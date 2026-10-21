@@ -143,7 +143,7 @@ export default function Manage() {
           </Notice>
         )}
         {ev.status === "purged" && (
-          <Notice tone="ok" title="Purged">Every ticket hash, refund address and payment record has been deleted. Only the totals below remain.</Notice>
+          <Notice tone="ok" title="Purged">Every ticket hash, refund address and payment record has been deleted, and the event&rsquo;s wallet keys were destroyed. Only the totals below remain.</Notice>
         )}
       </div>
 

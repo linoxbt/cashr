@@ -245,11 +245,15 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     @app.get("/events/{event_id}/admin")
     def admin_view(event_id: str, token: str = Depends(bearer), db=Depends(db_session)):
         ev = engine.authorize(db, event_id, token, "admin")
-        try:
-            bal = engine.balance(ev)
-            balance, pending, wallet_error = bal.total_zat, bal.pending_zat, ""
-        except ChainError as e:
-            balance, pending, wallet_error = None, None, str(e)
+        if ev.status == "purged":
+            # The wallet account was deleted with the event: nothing to ask the wallet.
+            balance, pending, wallet_error = 0, 0, ""
+        else:
+            try:
+                bal = engine.balance(ev)
+                balance, pending, wallet_error = bal.total_zat, bal.pending_zat, ""
+            except ChainError as e:
+                balance, pending, wallet_error = None, None, str(e)
         rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id).order_by(Rsvp.seat)).all()
         deposits = db.scalars(select(Deposit).where(Deposit.event_id == event_id)
                               .order_by(Deposit.height, Deposit.id)).all()
