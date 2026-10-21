@@ -101,11 +101,25 @@ let metaPromise: Promise<Meta> | null = null;
 export function useMeta(): Meta | null {
   const [meta, setMeta] = useState<Meta | null>(null);
   useEffect(() => {
-    metaPromise ??= api.meta().catch((e) => {
-      metaPromise = null;
-      throw e;
-    });
-    metaPromise.then(setMeta, () => setMeta(null));
+    let alive = true;
+    let retry: ReturnType<typeof setTimeout>;
+    const load = () => {
+      metaPromise ??= api.meta().catch((e) => {
+        metaPromise = null;
+        throw e;
+      });
+      metaPromise.then(
+        (m) => alive && setMeta(m),
+        () => {
+          if (alive) retry = setTimeout(load, 10_000);
+        },
+      );
+    };
+    load();
+    return () => {
+      alive = false;
+      clearTimeout(retry);
+    };
   }, []);
   return meta;
 }

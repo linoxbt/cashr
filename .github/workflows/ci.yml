@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  wallet:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: wallet } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: wallet }
+      - run: cargo test --locked
+
+  api:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: api } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e '.[dev]'
+      - run: pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: web/package-lock.json }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: npm ci
+        working-directory: web
+      - run: npm run lint && npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+        env: { NEXT_PUBLIC_API_URL: "http://localhost:8000" }
+      - name: End-to-end journey (simulated chain)
+        run: |
+          pip install -e 'api[dev]'
+          (cd api && UNLISTED_CHAIN=sim UNLISTED_SECRET=ci UNLISTED_SCAN_INTERVAL=1 \
+            UNLISTED_DATABASE_URL=sqlite:///$RUNNER_TEMP/e2e.db uvicorn unlisted.main:app --port 8000 &)
+          (cd web && npm start &)
+          npx --prefix web playwright install --with-deps chromium
+          for i in $(seq 1 60); do curl -sf localhost:3000 >/dev/null && curl -sf localhost:8000/meta >/dev/null && break; sleep 1; done
+          cd web && npm run e2e
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: { name: e2e-failure, path: web/e2e-failure.png, if-no-files-found: ignore }

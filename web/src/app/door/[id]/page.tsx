@@ -9,7 +9,7 @@ import { api, ApiError, type Manifest } from "@/lib/api";
 import { fromB64url, parseTicketQr, ticketHash } from "@/lib/codec";
 import { readJson, takeLinkToken, writeJson } from "@/lib/storage";
 
-type Verdict = { kind: "ok" | "already" | "unknown" | "other_event" | "closed"; seat?: number | null; offline?: boolean };
+type Verdict = { kind: "ok" | "already" | "unknown" | "other_event" | "closed" | "error"; seat?: number | null; offline?: boolean; detail?: string };
 
 const VERDICT_UI: Record<Verdict["kind"], { bg: string; title: string; sub: string }> = {
   ok: { bg: "bg-ok", title: "Welcome in", sub: "Ticket checked in." },
@@ -17,7 +17,12 @@ const VERDICT_UI: Record<Verdict["kind"], { bg: string; title: string; sub: stri
   unknown: { bg: "bg-bad", title: "Not a valid ticket", sub: "No confirmed RSVP matches this code." },
   other_event: { bg: "bg-bad", title: "Wrong event", sub: "This ticket is for a different event." },
   closed: { bg: "bg-screen-3", title: "Door closed", sub: "This event has ended." },
+  // Never shown as "not valid": a server problem says nothing about the ticket.
+  error: { bg: "bg-warn", title: "Try again", sub: "The server had a problem checking this ticket." },
 };
+
+// QR decoding is costly on phones; this is plenty for people walking up.
+const SCAN_INTERVAL_MS = 125;
 
 export default function Door() {
   const { id } = useParams<{ id: string }>();
@@ -28,6 +33,7 @@ export default function Door() {
   const [queue, setQueue] = useState<string[]>([]);
   const [online, setOnline] = useState(true);
   const [authError, setAuthError] = useState(false);
+  const [refused, setRefused] = useState(0);
   const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [manual, setManual] = useState("");
   const [camera, setCamera] = useState<"off" | "starting" | "on" | "denied">("off");
@@ -46,7 +52,10 @@ export default function Door() {
     try {
       let pendingQueue = readJson<string[]>(queueKey, []);
       if (pendingQueue.length) {
-        await api.syncCheckIns(id, pendingQueue, token);
+        const res = await api.syncCheckIns(id, pendingQueue, token);
+        // Offline check-ins the server didn't accept (e.g. the event was already settled).
+        const bad = res.results.filter((r) => r.result === "event_closed" || r.result === "unknown").length;
+        if (bad) setRefused((n) => n + bad);
         pendingQueue = [];
         writeJson(queueKey, pendingQueue);
         setQueue(pendingQueue);
@@ -93,7 +102,13 @@ export default function Door() {
         if (res.result === "ok" || res.result === "already") markLocal(hash);
         setVerdict({ kind: res.result === "event_closed" ? "closed" : res.result, seat: res.seat });
       } catch (e) {
-        if (e instanceof ApiError && e.status !== 0) throw e;
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+          setAuthError(true);
+          return;
+        }
+        if (e instanceof ApiError && e.status !== 0) {
+          return setVerdict({ kind: "error", detail: e.message });
+        }
         // Offline: decide from the cached manifest and queue the check-in.
         setOnline(false);
         if (!local) return setVerdict({ kind: "unknown", offline: true });
@@ -104,8 +119,8 @@ export default function Door() {
         setQueue(q);
         setVerdict({ kind: "ok", seat: local.seat, offline: true });
       }
-    } catch {
-      setVerdict({ kind: "unknown" });
+    } catch (e) {
+      setVerdict({ kind: "error", detail: e instanceof Error ? e.message : undefined });
     } finally {
       busy.current = false;
     }
@@ -138,8 +153,10 @@ export default function Door() {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     let raf = 0;
-    const tick = () => {
-      if (video && ctx && video.readyState === video.HAVE_ENOUGH_DATA) {
+    let last = 0;
+    const tick = (t: number) => {
+      if (t - last >= SCAN_INTERVAL_MS && video && ctx && video.readyState === video.HAVE_ENOUGH_DATA) {
+        last = t;
         const w = 480;
         const h = Math.round((video.videoHeight / video.videoWidth) * w) || 360;
         canvas.width = w;
@@ -188,6 +205,14 @@ export default function Door() {
         {online ? <Pill tone="ok">Online</Pill> : <Pill tone="warn">Offline · using saved list</Pill>}
         {queue.length > 0 && <Pill tone="warn">{queue.length} check-in{queue.length === 1 ? "" : "s"} to sync</Pill>}
       </div>
+      {refused > 0 && (
+        <div className="mt-3">
+          <Notice tone="bad" title={`${refused} offline check-in${refused === 1 ? " was" : "s were"} refused`}>
+            The server didn&rsquo;t accept them, usually because the event was settled before this phone synced. Tell
+            the organiser.
+          </Notice>
+        </div>
+      )}
 
       <div className="relative mt-6 aspect-square overflow-hidden rounded-md bg-black">
         <video ref={videoRef} playsInline muted className={`h-full w-full object-cover ${camera === "on" ? "" : "hidden"}`} />
@@ -212,6 +237,7 @@ export default function Door() {
             {verdict?.seat ? <div className="mt-2 text-lg">Seat {verdict.seat}</div> : null}
             <div className="mt-2 text-sm text-white/80">{ui.sub}</div>
             {verdict?.offline && <div className="mt-3 text-xs text-white/70">Checked offline. It will sync when the connection is back.</div>}
+            {verdict?.detail && <div className="mt-3 max-w-xs text-xs text-white/70">{verdict.detail}</div>}
           </div>
         )}
       </div>
@@ -231,6 +257,8 @@ export default function Door() {
       <div className="mt-6">
         <Notice>
           This device sees only ticket hashes. It never learns names or refund addresses, and it records whether a ticket was used, not when.
+          Offline, each phone checks against its own saved list, so two offline phones could both admit the same ticket:
+          use one door phone while offline, and let every phone sync before the organiser ends the event.
         </Notice>
       </div>
     </div>

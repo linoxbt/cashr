@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { useMeta } from "@/components/ui";
+import { API_CONFIGURED } from "@/lib/api";
 import { readJson, writeJson } from "@/lib/storage";
 
 const NAV = [
@@ -75,7 +76,13 @@ function Clock() {
 
 function ChainStatus() {
   const meta = useMeta();
-  if (!meta) return <span>Chain: …</span>;
+  const [waited, setWaited] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setWaited(true), 8000);
+    return () => clearTimeout(t);
+  }, []);
+  if (!API_CONFIGURED) return <span className="text-bad">Chain: No server</span>;
+  if (!meta) return waited ? <span className="text-bad">Chain: Offline</span> : <span>Chain: …</span>;
   if (meta.chain === "sim") {
     return (
       <span className="text-gold-ink" title="Development mode: no real ZEC moves">

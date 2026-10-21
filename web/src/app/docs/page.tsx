@@ -159,7 +159,7 @@ export default function Docs() {
           <Section id="how-it-works" title="How it works">
             <Steps
               items={[
-                ["One account per event", "Unlisted's wallet creates a fresh ZIP 32 account for each event, with an Orchard-only (shielded) address and a birthday at the current block."],
+                ["One wallet account per event", "Each event gets its own account from its own random seed (encrypted at rest), with an Orchard-only (shielded) address and a birthday at the current block. Purging the event deletes the seed."],
                 ["A secret on the attendee's phone", "The browser makes 32 random bytes and keeps them. Only SHA-256 of that secret leaves the device."],
                 ["The memo", <>The payment carries one encrypted line: <C>UNL1 &lt;event&gt; &lt;ticket hash&gt; &lt;refund address&gt;</C>. Only the event&rsquo;s wallet can read it.</>],
                 ["The wallet reads it", "A light-client wallet syncs from lightwalletd, fetches the full transaction to decrypt the memo, and the API records the hash and refund address."],
@@ -181,6 +181,8 @@ export default function Docs() {
                 ["Deposit", "Set by the organiser, minimum 0.0005 ZEC. Refunded in full to everyone who checks in."],
                 ["Returned payments", "Refunded minus 0.0001 ZEC, so junk payments can't drain the event's fees."],
                 ["Network fees for refunds", "Paid from forfeited deposits and organiser top-ups, never from refunds."],
+                ["When a refund counts as paid", "Once its transaction is mined with 3 confirmations. One that expires unmined is sent again automatically; it is never paid twice."],
+                ["No-show money", "Swept, minus the network fee, to the organiser's no-show fund address once refunds have confirmed. Without an address it waits in the event wallet, and the event can't be purged until it is swept."],
                 ["When refunds can go out", "A deposit becomes spendable after 10 confirmations (about 12 minutes). Refunds queued earlier simply wait."],
                 ["Who holds the money", "Unlisted's wallet holds deposits until the event is settled. Keep deposits small: the price of a coffee."],
               ]}
@@ -189,7 +191,8 @@ export default function Docs() {
 
           <Section id="privacy" title="Privacy">
             <p>
-              The server never stores names, emails, phone numbers, IP addresses, check-in times or ticket secrets. Organiser
+              The server never stores names, emails, phone numbers, check-in times or ticket secrets, and the API keeps no
+              access logs. (Your hosting provider&rsquo;s edge may still log IP addresses; use Tor for high-risk events.) Organiser
               and door links keep their secret after the <C>#</C>, which browsers never send to any server. Attendees never
               send the server anything that points at their ticket.
             </p>
@@ -205,13 +208,13 @@ export default function Docs() {
               wallet built on librustzcash that syncs from a public lightwalletd server, so no full node is needed.
             </p>
             <pre className="panel overflow-x-auto p-4 font-mono text-[12.5px] leading-relaxed text-ink">{`git clone https://github.com/linoxbt/cashr && cd cashr
-cp .env.example .env         # set UNLISTED_SECRET, UW_RPC_PASSWORD, UNLISTED_CORS_ORIGINS
+cp .env.example .env         # set UNLISTED_SECRET, UW_RPC_PASSWORD, UW_SEED_KEY, UNLISTED_CORS_ORIGINS
 docker compose up -d --build # wallet + API on :8000
-docker compose exec wallet cat /data/seed.txt   # back this up, offline`}</pre>
+# Back up the wallet volume (/data) and, separately, UW_SEED_KEY. Both are needed to move funds.`}</pre>
             <p>
               Put HTTPS in front of the API, then deploy <C>web/</C> to Netlify or Vercel with{" "}
-              <C>NEXT_PUBLIC_API_URL</C> set to the API&rsquo;s URL. The seed is a standard 24-word phrase; each event is
-              ZIP 32 account <em>n</em>, so funds can be recovered in any Zcash wallet. Full settings are in{" "}
+              <C>NEXT_PUBLIC_API_URL</C> set to the API&rsquo;s URL. Run exactly one API process: it refuses to start if
+              another holds its database. Full settings are in{" "}
               <a href="https://github.com/linoxbt/cashr/blob/main/docs/DEPLOY.md" className="text-ink underline underline-offset-4">docs/DEPLOY.md</a>.
             </p>
           </Section>
@@ -226,7 +229,8 @@ docker compose exec wallet cat /data/seed.txt   # back this up, offline`}</pre>
                 [<C key="a">GET /events/:id</C>, "—", "Public event details and counts."],
                 [<C key="a">GET /events/:id/tickets</C>, "—", "Every ticket hash with its status, plus returned payments."],
                 [<C key="a">GET /events/:id/admin</C>, "Admin", "Everything stored for the event, the wallet balance and payouts."],
-                [<C key="a">POST /events/:id/admin/:action</C>, "Admin", <>Actions: <C>close</C>, <C>reopen</C>, <C>settle</C>, <C>retry</C>, <C>purge</C>, <C>scan</C>.</>],
+                [<C key="a">POST /events/:id/admin/:action</C>, "Admin", <>Actions: <C>close</C>, <C>reopen</C>, <C>settle</C>, <C>retry</C>, <C>purge</C>, <C>scan</C>. Purge refuses while money is left in the event wallet.</>],
+                [<C key="a">POST /events/:id/admin/fund</C>, "Admin", <>Body <C>{`{"address"}`}</C>. Set the no-show fund address; a settled event&rsquo;s leftovers are swept to it.</>],
                 [<C key="a">GET /events/:id/door/manifest</C>, "Door", "Confirmed ticket hashes for offline checking."],
                 [<C key="a">POST /events/:id/door/checkin</C>, "Door", <>Body <C>{`{"ticket_hash"}`}</C>. Result: ok, already, unknown or event_closed.</>],
                 [<C key="a">POST /events/:id/door/sync</C>, "Door", "Upload check-ins recorded offline."],
@@ -238,7 +242,7 @@ docker compose exec wallet cat /data/seed.txt   # back this up, offline`}</pre>
             {[
               ["Can the organiser see who came?", "No. They see how many tickets were checked in, never whose. The deposit's sender is hidden even from the event's own wallet."],
               ["What if I lose my ticket?", "It can't be recovered: no one else has the secret. Save the ticket image when you RSVP."],
-              ["What if the organiser loses their links?", "The event keeps working for attendees, but no one can settle it. Funds stay in the event's wallet account and can be recovered with the server's seed."],
+              ["What if the organiser loses their links?", "The event keeps working for attendees, but no one can settle it. Funds stay in the event's wallet account, which only the server operator can move."],
               ["Can I use a transparent (t-address) balance?", "Paying from a transparent balance exposes your address. Pay from your shielded balance; refunds always go to a shielded address."],
               ["Why does my ticket say Awaiting payment?", "Your payment needs one block (about 75 seconds) to confirm. If it never confirms, check the amount and memo were unchanged."],
               ["Can a seized server be used to get in?", "No. It holds only hashes of tickets, and the door needs the secret behind the hash."],

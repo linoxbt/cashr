@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 
 import { Pill, Spinner, formatWhen, usePoll } from "@/components/ui";
-import { api, type Meta, type PublicEvent, type RsvpStatus } from "@/lib/api";
+import { API_CONFIGURED, api, type Meta, type PublicEvent, type RsvpStatus } from "@/lib/api";
 import { zatToZec } from "@/lib/codec";
 import { linkTarget } from "@/lib/links";
 import { forgetEvent, listSavedEvents, listTickets, type SavedEvent, type StoredTicket } from "@/lib/storage";
@@ -48,7 +48,9 @@ export function ServerStatus() {
           <span className="blink inline-block h-2 w-2 rounded-full bg-bad" /> No signal
         </div>
         <div className="text-ink-3">
-          The Unlisted server can&rsquo;t be reached, so events can&rsquo;t be created or joined right now.{" "}
+          {API_CONFIGURED
+            ? "The Unlisted server can't be reached, so events can't be created or joined right now."
+            : "This copy of Unlisted isn't connected to a server yet, so events can't be created or joined here."}{" "}
           <Link href="/docs#self-hosting" className="text-ink-2 underline decoration-ink-4 underline-offset-4 hover:text-ink">Run your own</Link>
         </div>
       </div>

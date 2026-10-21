@@ -9,6 +9,7 @@ const STORED = [
   ["Checked in", "A yes/no per ticket. No time, so arrivals can't be matched against cameras."],
   ["Deposit notes", "Transaction id, amount, block height. The sender is never visible, even to the wallet."],
   ["Reused-address digests", "Keyed hashes of refund addresses, only to refuse reuse. Never the address itself."],
+  ["The event's wallet account", "Its own seed (encrypted at rest) and the deposits' memos. Purging deletes the account and the seed, so the memos can't be decrypted again, even from the chain."],
 ];
 
 const LEAKS = [
@@ -19,17 +20,17 @@ const LEAKS = [
   },
   {
     risk: "Network metadata",
-    detail: "Loading the event page reveals an IP address to the web host and the API.",
-    fix: "The API keeps no access logs. Confirmation checks download every ticket hash, so no request points at one ticket. For high-risk groups, open the page over Tor.",
+    detail: "Loading a page reveals an IP address to the web host and the API host, and their providers may log it.",
+    fix: "The API itself keeps no access logs. Confirmation checks download every ticket hash, so no request points at one ticket. For high-risk groups, open the pages over Tor.",
   },
   {
     risk: "Odd amounts",
     detail: "A unique deposit amount could stand out.",
-    fix: "Every RSVP must pay exactly the same deposit. Anything else is returned.",
+    fix: "Every RSVP must pay exactly the same deposit, so inside the shielded pool they all look alike. Anything else is returned. Organisers should pick a round amount.",
   },
   {
     risk: "Transparent funds",
-    detail: "Paying from a transparent (t-address) balance exposes the payer's address.",
+    detail: "Paying from a transparent (t-address) balance shows the payer's address and the exact deposit amount on the public chain, which can tie them to the event.",
     fix: "Event addresses are Orchard-only and refunds are sent with the wallet's FullPrivacy policy. Attendees should pay from a shielded balance.",
   },
   {

@@ -3,3 +3,4 @@
 .env
 .netlify
 deploy-*.zip
+e2e-failure.png
