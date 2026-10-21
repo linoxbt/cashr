@@ -76,7 +76,7 @@ function placement(d: number): React.CSSProperties {
   const abs = Math.abs(d);
   const brightness = abs <= 1 ? 1 - 0.58 * abs : Math.max(0.22, 0.42 - 0.2 * (abs - 1));
   return {
-    transform: `translateX(calc(-50% + ${d} * var(--tape-w) * 1.28)) translateY(calc(${d * d} * var(--tape-w) * 0.13)) rotate(${d * 15}deg) scale(${1 - Math.min(abs, 3) * 0.04})`,
+    transform: `translateX(calc(-50% + ${d} * var(--tape-w) * 1.28)) translateY(calc(${d * d} * var(--tape-w) * 0.11)) rotate(${d * 15}deg) scale(${1 - Math.min(abs, 3) * 0.04})`,
     filter: abs < 0.02 ? "none" : `brightness(${brightness}) saturate(${1 - Math.min(abs, 1) * 0.2})`,
     opacity: clamp(3 - abs, 0, 1),
     zIndex: 100 - Math.round(abs * 10),
@@ -174,14 +174,16 @@ export function TapeDeck({ tapes }: { tapes: Tape[] }) {
 
   return (
     <div ref={section} className="relative w-full" style={{ height: `calc(var(--stage-h) + ${(n - 1) * 55}dvh)` }}>
-      <div className="sticky top-0 flex w-full flex-col items-center justify-center overflow-hidden pb-24 pt-28 sm:pt-36" style={{ height: "var(--stage-h)" }}>
-        <p className="osd mb-5 hidden max-w-md text-center text-ink-3 sm:block">
+      <div className="sticky top-0 flex w-full flex-col items-center justify-center overflow-hidden pb-20 pt-24 sm:pt-32" style={{ height: "var(--stage-h)" }}>
+        <p className="osd mb-5 hidden max-w-md text-center text-ink-3 sm:block [@media(max-height:860px)]:!hidden">
           Scroll to fast-forward through the tapes. Arrow keys work too; press enter or click the centre tape to play it.
         </p>
 
+        {/* The box is tall enough for the whole arc (side tapes sit lower and tilt
+            outwards), so the caption below never ends up under a tape. */}
         <div
-          className="relative w-full [--tape-w:clamp(150px,min(19vw,calc((100dvh_-_23rem)/1.55)),272px)]"
-          style={{ height: "calc(var(--tape-w) * 1.5 + 30px)" }}
+          className="relative w-full [--tape-w:clamp(140px,min(19vw,calc((100dvh_-_24rem)/2)),272px)]"
+          style={{ height: "calc(var(--tape-w) * 2)" }}
           role="region"
           aria-roledescription="carousel"
           aria-label="What Unlisted does"
@@ -213,14 +215,14 @@ export function TapeDeck({ tapes }: { tapes: Tape[] }) {
           })}
         </div>
 
-        <div className="osd mt-5 min-h-[88px] max-w-md px-4 text-center" aria-live="polite">
+        <div className="osd relative z-[200] min-h-[88px] max-w-md px-4 text-center" aria-live="polite">
           <div className="text-ink-3">{current_.title.join(" ")}</div>
           <p className="mt-1.5 text-[13px] leading-snug text-ink">{current_.caption}</p>
           <div className="mt-1.5 text-ink-3">{current_.tags.join(" · ")}</div>
         </div>
 
         {/* Tape counter: where you are in the reel. */}
-        <div className="osd mt-3 flex items-center gap-3 text-ink-3">
+        <div className="osd relative z-[200] mt-3 flex items-center gap-3 text-ink-3">
           <button className="btn-ghost px-2 py-1" onClick={() => goTo(active - 1)} disabled={active === 0} aria-label="Previous tape">←</button>
           <span className="tabular-nums">Tape {String(active + 1).padStart(2, "0")} / {String(n).padStart(2, "0")}</span>
           <div className="relative h-px w-24 bg-ink/20 sm:w-40" aria-hidden>
