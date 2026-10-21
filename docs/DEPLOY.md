@@ -39,8 +39,11 @@ This runs two containers:
 **The seed controls every event's deposits.** `seed.txt` is a standard 24-word BIP 39 phrase, and each event is ZIP
 32 account *n*, so it can be restored into any Zcash wallet in an emergency.
 
-Then deploy the web app on Vercel with root directory **`web/`** and set `NEXT_PUBLIC_API_URL` to the API's public
-HTTPS URL.
+Then deploy the web app with `NEXT_PUBLIC_API_URL` set to the API's public HTTPS URL:
+* **Netlify:** import the repo. `netlify.toml` already sets the base directory to `web/` and the Next.js build.
+* **Vercel:** import the repo with root directory `web/`.
+
+Also add the web origin to the API's `UNLISTED_CORS_ORIGINS`.
 
 ## Wallet service (`wallet/`)
 
