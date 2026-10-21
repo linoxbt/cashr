@@ -492,6 +492,9 @@ class Engine:
             ev = self._get_event(db, ev_id)
             if ev.status != "settled":
                 raise EngineError("bad_state", "Settle the event before purging it.")
+            if db.scalar(select(Payout.id).where(Payout.event_id == ev_id, Payout.status.in_(IN_FLIGHT))) is not None:
+                raise EngineError("payouts_pending", "A payout (such as a returned late payment) is still in progress. "
+                                  "Purge once it has confirmed.", 409)
             account_ref = ev.account_ref
         bal = self.balance(ev, fresh=True)
         if bal.total_zat > self.settings.dust_zat:

@@ -449,3 +449,18 @@ def test_old_database_gains_new_columns(tmp_path):
     init_db(make_engine(f"sqlite:///{path}"))
     cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(payouts)")}
     assert {"key", "polls"} <= cols
+
+
+def test_purge_waits_for_in_flight_returns(client, make_event, attendee):
+    fund = random_unified_address()
+    created = make_event(forfeit_address=fund)
+    ev, admin = created["event"], created["admin_token"]
+    settle(client, ev, admin)
+    # A late payment arrives and its return is still confirming.
+    client.chain.pay(ev["address"], ev["deposit_zat"], attendee(ev["id"]).memo())
+    client.engine.scan_once(full=True)
+    r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
+    assert r.status_code == 409 and r.json()["error"] == "payouts_pending"
+    advance(client, 4)
+    r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
+    assert r.json()["status"] == "purged", r.text
