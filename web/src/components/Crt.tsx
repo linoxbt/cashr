@@ -26,7 +26,7 @@ export function Logo({ compact = false }: { compact?: boolean }) {
           <rect x="0" y="20" width="16" height="2.5" fill="#ECE9E1" opacity="0.55" />
         </svg>
         {!compact && (
-          <span className="font-display text-[30px] leading-none tracking-[-0.02em] text-ink group-hover:[animation:channel_380ms_steps(6)_1]">
+          <span className="font-display text-[30px] leading-none tracking-[-0.02em] text-ink">
             Unlisted
           </span>
         )}

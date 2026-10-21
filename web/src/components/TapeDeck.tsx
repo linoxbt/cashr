@@ -69,113 +69,165 @@ export function TapeCover({ tape }: { tape: Tape }) {
   );
 }
 
-const mod = (n: number, m: number) => ((n % m) + m) % m;
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+/** How a tape at signed distance `d` from the centre sits on the arc. */
+function placement(d: number): React.CSSProperties {
+  const abs = Math.abs(d);
+  const brightness = abs <= 1 ? 1 - 0.58 * abs : Math.max(0.22, 0.42 - 0.2 * (abs - 1));
+  return {
+    transform: `translateX(calc(-50% + ${d} * var(--tape-w) * 1.28)) translateY(calc(${d * d} * var(--tape-w) * 0.13)) rotate(${d * 15}deg) scale(${1 - Math.min(abs, 3) * 0.04})`,
+    filter: abs < 0.02 ? "none" : `brightness(${brightness}) saturate(${1 - Math.min(abs, 1) * 0.2})`,
+    opacity: clamp(3 - abs, 0, 1),
+    zIndex: 100 - Math.round(abs * 10),
+  };
+}
 
 /**
- * Tapes laid out on an arc. Arrow keys or a swipe change tape; clicking a side
- * tape brings it forward; clicking (or Enter on) the centre one plays it.
+ * Tapes on an arc, driven by scrolling: the deck pins to the screen and the
+ * scroll position slides the tapes along, so the whole row moves left or right
+ * as you scroll on a phone or a desktop. Arrow keys, clicks on side tapes and
+ * the counter all scroll to a tape; the centre tape (or Enter) plays it.
  */
 export function TapeDeck({ tapes }: { tapes: Tape[] }) {
   const router = useRouter();
-  const [active, setActive] = useState(0);
-  const [jolt, setJolt] = useState(0);
-  const drag = useRef<number | null>(null);
-  const dragged = useRef(false);
   const n = tapes.length;
+  const section = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLElement | null>(null);
+  const target = useRef(0);
+  const current = useRef(0);
+  const raf = useRef(0);
+  const [pos, setPos] = useState(0);
+  const [jolt, setJolt] = useState(0);
+  const active = clamp(Math.round(pos), 0, n - 1);
+  const lastActive = useRef(0);
 
-  const go = useCallback((delta: number) => {
-    setActive((a) => mod(a + delta, n));
-    setJolt((j) => j + 1);
-  }, [n]);
+  useEffect(() => {
+    if (active !== lastActive.current) {
+      lastActive.current = active;
+      setJolt((j) => j + 1);
+    }
+  }, [active]);
+
+  const range = useCallback(() => {
+    const el = section.current;
+    const sc = scroller.current;
+    if (!el || !sc) return { top: 0, span: 1 };
+    return { top: el.offsetTop, span: Math.max(1, el.offsetHeight - sc.clientHeight) };
+  }, []);
+
+  useEffect(() => {
+    const el = section.current;
+    const sc = el?.closest(".crt-scroll") as HTMLElement | null;
+    if (!el || !sc) return;
+    scroller.current = sc;
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const animate = () => {
+      const delta = target.current - current.current;
+      current.current = still || Math.abs(delta) < 0.001 ? target.current : current.current + delta * 0.16;
+      setPos(current.current);
+      raf.current = current.current === target.current ? 0 : requestAnimationFrame(animate);
+    };
+    const onScroll = () => {
+      const { top, span } = range();
+      target.current = clamp((sc.scrollTop - top) / span, 0, 1) * (n - 1);
+      if (!raf.current) raf.current = requestAnimationFrame(animate);
+    };
+    onScroll();
+    sc.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    return () => {
+      sc.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      cancelAnimationFrame(raf.current);
+      raf.current = 0;
+    };
+  }, [n, range]);
+
+  const goTo = useCallback((i: number) => {
+    const sc = scroller.current;
+    if (!sc) return;
+    const { top, span } = range();
+    sc.scrollTo({ top: top + (clamp(i, 0, n - 1) / (n - 1)) * span, behavior: "smooth" });
+  }, [n, range]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
-      if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;
-      if (e.key === "ArrowRight") go(1);
-      else if (e.key === "ArrowLeft") go(-1);
-      else if (e.key === "Enter" && (!t || t === document.body)) router.push(tapes[active].href);
+      if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A"].includes(t.tagName))) return;
+      const sc = scroller.current;
+      const el = section.current;
+      // Only while the deck is on screen.
+      if (!sc || !el || sc.scrollTop > el.offsetTop + el.offsetHeight - sc.clientHeight + 40) return;
+      if (e.key === "ArrowRight") goTo(active + 1);
+      else if (e.key === "ArrowLeft") goTo(active - 1);
+      else if (e.key === "Enter") router.push(tapes[active].href);
       else return;
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [go, router, tapes, active]);
+  }, [active, goTo, router, tapes]);
 
-  const current = tapes[active];
+  const current_ = tapes[active];
 
   return (
-    <div className="flex w-full flex-col items-center">
-      <p className="osd mb-6 hidden max-w-md text-center text-ink-3 sm:block">
-        Use the left and right arrow keys to change tapes, and enter to play the one in the centre.
-      </p>
+    <div ref={section} className="relative w-full" style={{ height: `calc(var(--stage-h) + ${(n - 1) * 55}dvh)` }}>
+      <div className="sticky top-0 flex w-full flex-col items-center justify-center overflow-hidden pb-24 pt-28 sm:pt-36" style={{ height: "var(--stage-h)" }}>
+        <p className="osd mb-5 hidden max-w-md text-center text-ink-3 sm:block">
+          Scroll to fast-forward through the tapes. Arrow keys work too; press enter or click the centre tape to play it.
+        </p>
 
-      <div
-        className="relative w-full touch-pan-y [--tape-w:clamp(168px,min(19vw,calc((100dvh_-_22rem)/1.6)),272px)] [overflow-x:clip]"
-        style={{ height: "calc(var(--tape-w) * 1.5 + 40px)" }}
-        onPointerDown={(e) => (drag.current = e.clientX)}
-        onPointerUp={(e) => {
-          if (drag.current === null) return;
-          const dx = e.clientX - drag.current;
-          drag.current = null;
-          dragged.current = Math.abs(dx) > 40;
-          if (dragged.current) go(dx < 0 ? 1 : -1);
-        }}
-        role="region"
-        aria-roledescription="carousel"
-        aria-label="What Unlisted does"
-      >
-        {tapes.map((tape, i) => {
-          // Signed distance from the centre, wrapped so the deck loops.
-          let d = mod(i - active, n);
-          if (d > n / 2) d -= n;
-          const abs = Math.abs(d);
-          const visible = abs <= 2;
-          const style: React.CSSProperties = {
-            width: "var(--tape-w)",
-            height: "calc(var(--tape-w) * 1.5)",
-            left: "50%",
-            top: 0,
-            fontSize: "calc(var(--tape-w) / 13)",
-            transform: `translateX(calc(-50% + ${d} * var(--tape-w) * 1.28)) translateY(calc(${d * d} * var(--tape-w) * 0.13)) rotate(${d * 15}deg) scale(${1 - abs * 0.04})`,
-            filter: d === 0 ? "none" : `brightness(${abs === 1 ? 0.42 : 0.25}) saturate(0.8)`,
-            opacity: visible ? 1 : 0,
-            zIndex: 10 - abs,
-            transition: "transform 700ms cubic-bezier(0.2,0.8,0.2,1), filter 700ms ease, opacity 500ms ease",
-            pointerEvents: visible ? "auto" : "none",
-          };
-          return (
-            <button
-              key={tape.id}
-              type="button"
-              className="absolute origin-[50%_120%] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-gold"
-              style={style}
-              tabIndex={d === 0 ? 0 : -1}
-              aria-label={d === 0 ? `Play: ${tape.title.join(" ")}` : `Show ${tape.title.join(" ")}`}
-              onClick={() => {
-                if (dragged.current) return void (dragged.current = false);
-                if (d === 0) router.push(tape.href);
-                else go(d);
-              }}
-            >
-              <div key={d === 0 ? jolt : undefined} className={`h-full w-full ${d === 0 && jolt ? "jolt" : ""}`}>
-                <TapeCover tape={tape} />
-              </div>
-            </button>
-          );
-        })}
-      </div>
+        <div
+          className="relative w-full [--tape-w:clamp(150px,min(19vw,calc((100dvh_-_23rem)/1.55)),272px)]"
+          style={{ height: "calc(var(--tape-w) * 1.5 + 30px)" }}
+          role="region"
+          aria-roledescription="carousel"
+          aria-label="What Unlisted does"
+        >
+          {tapes.map((tape, i) => {
+            const d = i - pos;
+            const isActive = i === active;
+            return (
+              <button
+                key={tape.id}
+                type="button"
+                className="absolute left-1/2 top-0 origin-[50%_120%] will-change-transform focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-gold"
+                style={{
+                  width: "var(--tape-w)",
+                  height: "calc(var(--tape-w) * 1.5)",
+                  fontSize: "calc(var(--tape-w) / 13)",
+                  pointerEvents: Math.abs(d) < 2.5 ? "auto" : "none",
+                  ...placement(d),
+                }}
+                tabIndex={isActive ? 0 : -1}
+                aria-label={isActive ? `Play: ${tape.title.join(" ")}` : `Show ${tape.title.join(" ")}`}
+                onClick={() => (isActive ? router.push(tape.href) : goTo(i))}
+              >
+                <div key={isActive ? jolt : undefined} className={`h-full w-full ${isActive && jolt ? "jolt" : ""}`}>
+                  <TapeCover tape={tape} />
+                </div>
+              </button>
+            );
+          })}
+        </div>
 
-      <div className="osd mt-6 min-h-[92px] max-w-md px-4 text-center" aria-live="polite">
-        <div className="text-ink-3">{current.title.join(" ")}</div>
-        <p className="mt-1.5 text-[13px] leading-snug text-ink">{current.caption}</p>
-        <div className="mt-1.5 text-ink-3">{current.tags.join(" · ")}</div>
-      </div>
+        <div className="osd mt-5 min-h-[88px] max-w-md px-4 text-center" aria-live="polite">
+          <div className="text-ink-3">{current_.title.join(" ")}</div>
+          <p className="mt-1.5 text-[13px] leading-snug text-ink">{current_.caption}</p>
+          <div className="mt-1.5 text-ink-3">{current_.tags.join(" · ")}</div>
+        </div>
 
-      <div className="mt-2 flex items-center gap-3 sm:hidden">
-        <button className="btn-secondary px-3 py-1.5" onClick={() => go(-1)} aria-label="Previous tape">←</button>
-        <button className="btn-primary px-3 py-1.5" onClick={() => router.push(current.href)}>Play</button>
-        <button className="btn-secondary px-3 py-1.5" onClick={() => go(1)} aria-label="Next tape">→</button>
+        {/* Tape counter: where you are in the reel. */}
+        <div className="osd mt-3 flex items-center gap-3 text-ink-3">
+          <button className="btn-ghost px-2 py-1" onClick={() => goTo(active - 1)} disabled={active === 0} aria-label="Previous tape">←</button>
+          <span className="tabular-nums">Tape {String(active + 1).padStart(2, "0")} / {String(n).padStart(2, "0")}</span>
+          <div className="relative h-px w-24 bg-ink/20 sm:w-40" aria-hidden>
+            <div className="absolute inset-y-0 left-0 bg-gold" style={{ width: `${(pos / (n - 1)) * 100}%`, height: "2px", top: "-0.5px" }} />
+          </div>
+          <button className="btn-ghost px-2 py-1" onClick={() => goTo(active + 1)} disabled={active === n - 1} aria-label="Next tape">→</button>
+        </div>
       </div>
     </div>
   );
