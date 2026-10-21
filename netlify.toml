@@ -1,0 +1,11 @@
+# Netlify hosts the web app only (web/). The API and wallet need an always-on
+# host; see docs/DEPLOY.md. Set NEXT_PUBLIC_API_URL in the Netlify site's
+# environment variables to the API's public HTTPS URL before building.
+[build]
+  base = "web"
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "22"
+  NEXT_TELEMETRY_DISABLED = "1"
