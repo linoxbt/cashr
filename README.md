@@ -18,7 +18,8 @@ Unlisted replaces the list with:
    who paid.
 3. **A QR check-in at the door.** The door hashes the secret and looks it up. It records yes/no, not a time.
 4. **An automatic refund** to everyone who came, at an address only they know. No-show deposits go to the group's fund.
-5. **A purge.** After settling, one click deletes every hash and address. Only totals remain.
+5. **A purge.** After settling, one click deletes every hash and address, and destroys the event's wallet keys so
+   its memos can never be decrypted again. Only totals remain.
 
 The organiser's dashboard has a **"What a seizure reveals"** tab showing every record held for the event, exactly
 as stored. There is nothing in it that names anyone.
@@ -27,7 +28,8 @@ as stored. There is nothing in it that names anyone.
 
 ```
 wallet/  unlisted-wallet (Rust, librustzcash): light-client Zcash wallet syncing from lightwalletd.
-         One ZIP 32 account per event, memo decryption, Orchard-only refunds, zcashd-style JSON-RPC.
+         One account per event from its own encrypted seed, memo decryption, Orchard-only refunds,
+         idempotent sends that survive restarts, JSON-RPC.
 api/     FastAPI service: deposit scanner, RSVP rules, settlement, door API, purge (Python 3.11+)
 web/     Next.js app: landing, create event, RSVP, ticket, door scanner, organiser dashboard
 docs/    SPEC.md · PROTOCOL.md · DEPLOY.md
@@ -47,23 +49,23 @@ payment"):
 
 ```bash
 cd api && uv venv && uv pip install -e '.[dev]'
-UNLISTED_CHAIN=sim .venv/bin/uvicorn unlisted.main:app --port 8000 --no-access-log
+UNLISTED_CHAIN=sim UNLISTED_SECRET=dev .venv/bin/uvicorn unlisted.main:app --port 8000 --no-access-log
 cd web && npm install && NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 ```
 
 ## Tests
 
 ```bash
-cd wallet && cargo test          # block cache, exact amount parsing
-cd api && .venv/bin/pytest -q    # lifecycle, rejections, reuse, fees, auth, RPC adapter, UA decoding
+cd wallet && cargo test          # block cache, amounts, encrypted seeds, persisted operations
+cd api && .venv/bin/pytest -q    # lifecycle, idempotent payouts, expiry, sweeps, purge, limits, RPC adapter
 cd web && npm test               # codec + UA decoding parity with the API (real mainnet addresses)
-cd web && npm run build
+cd web && npm run build && npm run e2e   # browser journey against a running sim API (see web/e2e/journey.mjs)
 ```
 
 ## Privacy model
 
 Read [the threat model](web/src/app/privacy/page.tsx) (also served at `/privacy`) and
-[docs/PROTOCOL.md](docs/PROTOCOL.md). In short: no access logs, no IPs stored, no accounts, tokens only in URL
+[docs/PROTOCOL.md](docs/PROTOCOL.md). In short: no access logs, no IPs stored by the API, no accounts, tokens only in URL
 fragments, Orchard-only event addresses, refunds sent with `FullPrivacy`, uniform deposit amounts, refund-address reuse
 refused, and the attendee's confirmation check downloads the whole hash list rather than asking about one ticket.
 

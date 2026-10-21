@@ -45,24 +45,42 @@ The door hashes `secret` locally and only ever sends the hash.
 
 A note is processed once it has `UNLISTED_MIN_CONF` confirmations, in `(height, txid, index)` order:
 
-1. **No `UNL1` memo:** treated as an organiser fee top-up ("float").
-2. **Refund address without an Orchard receiver:** kept as float, since there is nowhere private to return it. The
-   RSVP page prevents this before payment.
-3. **Otherwise rejected, and returned minus `UNLISTED_REJECT_FEE_ZAT`, if any of:** wrong event id, RSVPs closed,
-   amount ≠ deposit, duplicate ticket hash, refund address used before (checked against an HMAC-SHA256 digest under
-   `UNLISTED_SECRET`), or event full. A return that would be ≤ 0 is kept as float.
+1. **No `UNL1` memo:** treated as an organiser fee top-up ("float", reason `no_memo`).
+2. **Refund address without an Orchard receiver:** kept as float (reason `bad_refund_address`), since there is
+   nowhere private to return it. It is listed with the returned payments so the attendee and organiser can see it.
+   The RSVP page prevents this before payment.
+3. **Otherwise rejected, and returned minus `UNLISTED_REJECT_FEE_ZAT`, if any of:** wrong event id, RSVPs closed
+   (status not `open`, or past `rsvp_closes_at`), amount ≠ deposit, duplicate ticket hash, refund address used
+   before (checked against an HMAC-SHA256 digest under `UNLISTED_SECRET`), or event full. A return that would be
+   ≤ 0 is kept as float.
 4. **Otherwise accepted:** seat = next number, digest of the refund address recorded.
+
+Events expose `accepting_rsvps` (open and before the deadline); the RSVP page shows payment details only while it
+is true.
+
+## Payouts
+
+Refunds, returns and sweeps are payouts: `queued → submitted → broadcast → done` (or `failed`, for a person).
+
+* Each payout has a random idempotency key, sent with every wallet call. Retrying after a timeout, a lost response
+  or a restart can never produce a second transaction while the first could still be mined.
+* `broadcast` means a txid exists. It becomes `done` only when mined with `UNLISTED_PAYOUT_CONF` confirmations.
+  A pending transaction is rebroadcast periodically; one that expires unmined is rebuilt under the same key.
+* An insufficient-funds failure keeps the payout queued (deposits still confirming, or a fee top-up is needed).
+  If the wallet has no record of an operation, the payout stops as `failed` rather than risk paying twice.
 
 ## Settlement
 
-* Checked-in RSVPs are refunded the full deposit in batched `z_sendmany` calls (`UNLISTED_REFUND_BATCH` recipients
-  each) with the `FullPrivacy` policy. Fees come from forfeits and float. If the balance is short, payouts wait,
-  queued, until the organiser tops up.
-* RSVPs that were not checked in are forfeited.
-* If a no-show fund address is set, once every refund is done the remaining balance minus a ZIP 317 fee reserve is
-  swept there.
-* Event becomes `settled`. **Purge** then deletes all RSVP, deposit and payout rows, plus location and details.
-  Aggregate counts stay.
+* Checked-in RSVPs are refunded the full deposit in batched sends (`UNLISTED_REFUND_BATCH` recipients each) with
+  the `FullPrivacy` policy. Fees come from forfeits and float. RSVPs that were not checked in are forfeited.
+* When every payout is `done` and nothing in the event wallet is still confirming, the whole spendable balance minus
+  the ZIP 317 fee is swept to the no-show fund address (`z_sweep`), repeating until less than `UNLISTED_DUST_ZAT`
+  remains. Then the event is `settled`.
+* Without a fund address the money stays in the event wallet. The organiser can add one at any time
+  (`POST /events/{id}/admin/fund`); a settled event then goes back to `settling` and sweeps.
+* **Purge** (only when `settled` and the wallet holds at most `UNLISTED_DUST_ZAT`) deletes the event's wallet
+  account, its transactions and memos, and its seed, then all RSVP, deposit and payout rows, plus location, details
+  and fund address. Aggregate counts stay. Payments sent to a purged event can't be returned.
 
 ## Privacy-relevant request patterns
 
@@ -70,4 +88,4 @@ A note is processed once it has `UNLISTED_MIN_CONF` confirmations, in `(height, 
   locally.
 * Admin/door tokens live in the URL fragment, which browsers never send. The client moves them to `sessionStorage`,
   strips them from the address bar, and sends them as `Authorization: Bearer`.
-* The API runs with `--no-access-log` and keeps no IP addresses.
+* The API runs with `--no-access-log` and keeps no IP addresses. Hosting providers in front of it may still log them.

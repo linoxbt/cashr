@@ -345,6 +345,13 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             engine.scan_once(full=True)
             return {"txid": txid}
 
+        @app.get("/sim/address")
+        def sim_address():
+            """A fresh, valid Orchard Unified Address, for end-to-end tests."""
+            from .chain.sim import random_unified_address
+
+            return {"address": random_unified_address(settings.network)}
+
         @app.post("/sim/mine")
         def sim_mine(blocks: int = 1):
             chain.mine(min(max(blocks, 1), 100))

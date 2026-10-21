@@ -14,11 +14,13 @@
 2. Attendees never send a request that identifies their ticket. Confirmation reads the whole ticket list.
 3. Tokens travel only in URL fragments and `Authorization` headers.
 4. Every RSVP pays exactly the deposit. Refund addresses are never reused. Event addresses are Orchard-only.
-5. Purge deletes RSVP, deposit and payout rows.
+5. Purge deletes RSVP, deposit and payout rows, and the event's wallet account and seed.
+6. A payout is sent under its idempotency key only. Never build a second transaction for a payout that could still be mined.
 
 ## Checks before committing
 ```
 cd wallet && cargo test
 cd api && .venv/bin/pytest -q
 cd web && npm test && npm run build
+cd web && npm run e2e   # with a sim API (UNLISTED_CHAIN=sim) and `npm start` running
 ```

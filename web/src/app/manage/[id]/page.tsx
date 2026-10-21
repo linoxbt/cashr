@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { Qr } from "@/components/Qr";
-import { CopyField, Notice, PageState, Pill, Spinner, Stat, formatWhen, usePoll } from "@/components/ui";
-import { api, ApiError, type AdminView } from "@/lib/api";
-import { REJECTION_TEXT, zatToZec, zip321 } from "@/lib/codec";
+import { CopyField, Notice, PageState, Pill, Spinner, Stat, formatWhen, useMeta, usePoll } from "@/components/ui";
+import { api, ApiError, type AdminView, type PayoutStatus } from "@/lib/api";
+import { REJECTION_TEXT, addressProblem, zatToZec, zip321 } from "@/lib/codec";
 import { takeLinkToken } from "@/lib/storage";
 
 type Tab = "overview" | "money" | "seized";
@@ -17,13 +17,15 @@ const ACTIONS: Record<string, { label: string; confirm: string; tone: "primary" 
   reopen: { label: "Reopen RSVPs", confirm: "Start taking RSVPs again?", tone: "secondary" },
   settle: {
     label: "End event & refund",
-    confirm: "Refund everyone who checked in and forfeit the rest? The door stops working and this can't be undone.",
+    confirm:
+      "Refund everyone who checked in and forfeit the rest? The door stops working and this can't be undone.\n\nFirst make sure every door phone shows no check-ins waiting to sync: check-ins synced after this are refused.",
     tone: "primary",
   },
   retry: { label: "Retry failed payouts", confirm: "Try the failed payouts again?", tone: "secondary" },
   purge: {
     label: "Purge all data",
-    confirm: "Permanently delete every ticket hash, refund address and payment record for this event? Only totals remain.",
+    confirm:
+      "Permanently delete every ticket hash, refund address and payment record for this event, and destroy its wallet keys? Only totals remain. Payments sent to this event afterwards can't be returned.",
     tone: "danger",
   },
 };
@@ -87,13 +89,18 @@ export default function Manage() {
     purged: [],
   }[ev.status];
   const shortfall = view.payouts.find((p) => p.status === "queued" && /insufficient/i.test(p.error));
+  // A shortfall while deposits are still confirming is just waiting, not a missing fee.
+  const confirming = (view.pending_zat ?? 0) > 0;
+  const leftover = view.balance_zat ?? 0;
 
   return (
     <div className="mx-auto max-w-page px-4 py-10 sm:px-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <div className="flex items-center gap-2">
-            <Pill tone={ev.status === "open" ? "ok" : ev.status === "purged" ? "neutral" : "warn"}>{ev.status}</Pill>
+            <Pill tone={ev.accepting_rsvps ? "ok" : ev.status === "purged" ? "neutral" : "warn"}>
+              {ev.status === "open" && !ev.accepting_rsvps ? "deadline passed" : ev.status}
+            </Pill>
             <span className="text-sm text-ink-3">{formatWhen(ev.starts_at)}</span>
           </div>
           <h1 className="mt-2 text-5xl ">{ev.title}</h1>
@@ -116,10 +123,23 @@ export default function Manage() {
       <div className="mt-6 space-y-3">
         {actionError && <Notice tone="bad">{actionError}</Notice>}
         {view.wallet_error && <Notice tone="bad" title="Wallet unreachable">{view.wallet_error}</Notice>}
-        {shortfall && (
+        {shortfall && confirming && (
+          <Notice title="Waiting for deposits to confirm">
+            Refunds can only spend deposits once they have enough confirmations (about 12 minutes for the newest one).
+            They go out automatically.
+          </Notice>
+        )}
+        {shortfall && !confirming && (
           <Notice tone="warn" title="Refunds are waiting for network fees">
-            Everyone came, so there are no forfeited deposits to cover fees. Send about 0.001 ZEC to the event address
-            under <strong>Money</strong> (no memo needed) and refunds go out automatically.
+            There isn&rsquo;t enough in the event wallet to pay the network fee, usually because everyone came and no
+            deposits were forfeited. Send about 0.001 ZEC to the event address under <strong>Money</strong> (no memo
+            needed) and refunds go out automatically.
+          </Notice>
+        )}
+        {ev.status === "settled" && leftover > 0 && !ev.forfeit_address && (
+          <Notice tone="warn" title={`${zatToZec(leftover)} ZEC is still in the event wallet`}>
+            Forfeited deposits and leftover fees stay here until you add a no-show fund address under{" "}
+            <strong>Money</strong>. Purging is blocked until then, because it destroys the wallet keys.
           </Notice>
         )}
         {ev.status === "purged" && (
@@ -131,7 +151,11 @@ export default function Manage() {
         <Stat label="RSVPs" value={`${ev.rsvp_count} / ${ev.capacity}`} sub={`${ev.seats_left} seats left`} />
         <Stat label="Checked in" value={ev.checked_in_count} sub={ev.rsvp_count ? `${Math.round((ev.checked_in_count / ev.rsvp_count) * 100)}% of RSVPs` : "No RSVPs yet"} />
         <Stat label="Returned payments" value={ev.rejected_count} sub="Full, late, wrong amount or reused address" />
-        <Stat label="Wallet balance" value={view.balance_zat === null ? "—" : `${zatToZec(view.balance_zat)} ZEC`} sub={`Deposit ${zatToZec(ev.deposit_zat)} ZEC`} />
+        <Stat
+          label="Wallet balance"
+          value={view.balance_zat === null ? "—" : `${zatToZec(view.balance_zat)} ZEC`}
+          sub={confirming ? `${zatToZec(view.pending_zat ?? 0)} ZEC still confirming` : `Deposit ${zatToZec(ev.deposit_zat)} ZEC`}
+        />
       </div>
 
       <div className="mt-10 border-b border-ink/10">
@@ -150,7 +174,7 @@ export default function Manage() {
 
       <div className="mt-6">
         {tab === "overview" && <TicketsTab view={view} />}
-        {tab === "money" && <MoneyTab view={view} />}
+        {tab === "money" && <MoneyTab view={view} token={token} onChange={() => setNonce((n) => n + 1)} />}
         {tab === "seized" && <SeizedTab view={view} />}
       </div>
     </div>
@@ -196,14 +220,57 @@ function TicketsTab({ view }: { view: AdminView }) {
   );
 }
 
-function MoneyTab({ view }: { view: AdminView }) {
+const PAYOUT_LABEL: Record<PayoutStatus, { tone: "ok" | "bad" | "warn" | "neutral"; text: string }> = {
+  queued: { tone: "warn", text: "queued" },
+  submitted: { tone: "warn", text: "building" },
+  broadcast: { tone: "neutral", text: "confirming" },
+  done: { tone: "ok", text: "paid" },
+  failed: { tone: "bad", text: "failed" },
+};
+
+function FundForm({ id, token, current, onChange }: { id: string; token: string; current: string; onChange: () => void }) {
+  const meta = useMeta();
+  const [address, setAddress] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    const problem = meta ? addressProblem(address, meta.network) : "Connecting…";
+    if (problem) return setError(problem);
+    setBusy(true);
+    setError(null);
+    try {
+      await api.setFund(id, address.trim(), token);
+      setAddress("");
+      onChange();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't save the address.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <form onSubmit={submit} className="space-y-2">
+      <label htmlFor="fund" className="label">{current ? "Change no-show fund address" : "No-show fund address"}</label>
+      <input id="fund" className="input font-mono text-[12px]" value={address} onChange={(e) => setAddress(e.target.value)} placeholder="u1…" spellCheck={false} />
+      {error && <p className="text-xs text-bad">{error}</p>}
+      <button className="btn-secondary w-full" disabled={busy || !address.trim()}>{busy && <Spinner />} Save{current ? "" : " and sweep after settling"}</button>
+    </form>
+  );
+}
+
+function MoneyTab({ view, token, onChange }: { view: AdminView; token: string; onChange: () => void }) {
   const ev = view.event;
   return (
     <div className="grid gap-6 lg:grid-cols-[1fr_20rem]">
       <div className="space-y-6">
         <div className="grid gap-4 sm:grid-cols-3">
           <Stat label="Refunded" value={`${zatToZec(ev.refunded_zat)} ZEC`} />
-          <Stat label="Forfeited" value={`${zatToZec(ev.forfeited_zat)} ZEC`} sub={ev.forfeit_address ? "Swept to your group fund" : "Kept in the event wallet"} />
+          <Stat
+            label="Forfeited"
+            value={`${zatToZec(ev.forfeited_zat)} ZEC`}
+            sub={ev.swept_zat ? `${zatToZec(ev.swept_zat)} ZEC swept to your fund` : ev.forfeit_address ? "Swept to your fund after refunds" : "Kept in the event wallet"}
+          />
           <Stat label="Fee top-ups" value={`${zatToZec(ev.float_zat)} ZEC`} />
         </div>
         <div className="card overflow-x-auto">
@@ -219,7 +286,7 @@ function MoneyTab({ view }: { view: AdminView }) {
                     <td className="px-5 py-3 tabular-nums text-ink-3">{p.recipients} recipient{p.recipients === 1 ? "" : "s"}</td>
                     <td className="px-5 py-3 tabular-nums">{zatToZec(p.amount_zat)} ZEC</td>
                     <td className="px-5 py-3">
-                      <Pill tone={p.status === "done" ? "ok" : p.status === "failed" ? "bad" : "warn"}>{p.status}</Pill>
+                      <Pill tone={PAYOUT_LABEL[p.status]?.tone ?? "neutral"}>{PAYOUT_LABEL[p.status]?.text ?? p.status}</Pill>
                       {p.error && <div className="mt-1 max-w-xs text-xs text-ink-3">{p.error}</div>}
                     </td>
                     <td className="px-5 py-3 font-mono text-xs text-ink-3">{p.txid ? `${p.txid.slice(0, 10)}…` : ""}</td>
@@ -241,8 +308,16 @@ function MoneyTab({ view }: { view: AdminView }) {
                     <td className="px-5 py-3 tabular-nums text-ink-3">Block {d.height}</td>
                     <td className="px-5 py-3 tabular-nums">{zatToZec(d.amount_zat)} ZEC</td>
                     <td className="px-5 py-3">
-                      {d.kind === "rsvp" ? <Pill tone="ok">RSVP</Pill> : d.kind === "rejected" ? <Pill tone="bad">Returned</Pill> : <Pill>Fee top-up</Pill>}
-                      {d.reason && <span className="ml-2 text-xs text-ink-3">{REJECTION_TEXT[d.reason] ?? d.reason}</span>}
+                      {d.kind === "rsvp" ? (
+                        <Pill tone="ok">RSVP</Pill>
+                      ) : d.kind === "rejected" ? (
+                        <Pill tone="bad">Returned</Pill>
+                      ) : d.reason === "bad_refund_address" ? (
+                        <Pill tone="warn">Can&rsquo;t refund</Pill>
+                      ) : (
+                        <Pill>Top-up / no memo</Pill>
+                      )}
+                      {d.reason && d.reason !== "no_memo" && <span className="ml-2 text-xs text-ink-3">{REJECTION_TEXT[d.reason] ?? d.reason}</span>}
                     </td>
                     <td className="px-5 py-3 text-xs text-ink-3">Sender: hidden</td>
                   </tr>
@@ -261,6 +336,14 @@ function MoneyTab({ view }: { view: AdminView }) {
           Scan to send a 0.001 ZEC fee top-up. Payments without an RSVP memo are treated as top-ups.
         </p>
         <CopyField label="Address" value={ev.address} />
+        {ev.status !== "purged" && (
+          <div className="border-t border-ink/10 pt-4">
+            {ev.forfeit_address && <CopyField label="No-show fund" value={ev.forfeit_address} />}
+            <div className={ev.forfeit_address ? "mt-4" : ""}>
+              <FundForm id={ev.id} token={token} current={ev.forfeit_address} onChange={onChange} />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -297,7 +380,10 @@ function SeizedTab({ view }: { view: AdminView }) {
           <li><strong>Refund addresses</strong> are one-time shielded addresses. The chain can&rsquo;t link them to their owners.</li>
           <li><strong>Deposit transactions</strong> are shielded. Their sender is hidden from everyone, us included.</li>
         </ul>
-        <p>After you purge the event, even this is gone.</p>
+        <p>
+          Purging deletes these records <em>and</em> the event&rsquo;s wallet keys and seed, so not even the server can
+          decrypt the event&rsquo;s memos from the chain again. Only the totals remain.
+        </p>
       </div>
       <pre className="max-h-[36rem] overflow-auto whitespace-pre-wrap break-all panel bg-black/60 p-5 font-mono text-xs leading-relaxed text-ink-2">
         {JSON.stringify(dump, null, 2)}

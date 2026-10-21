@@ -16,7 +16,6 @@ interface Created {
 
 export default function NewEvent() {
   const meta = useMeta();
-  const network = meta?.network ?? "main";
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<Created | null>(null);
@@ -33,18 +32,21 @@ export default function NewEvent() {
   const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
 
   const depositZat = zecToZat(form.deposit);
-  const forfeitProblem = form.forfeit_address.trim() ? addressProblem(form.forfeit_address, network) : null;
+  const forfeitProblem = form.forfeit_address.trim() && meta ? addressProblem(form.forfeit_address, meta.network) : null;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     if (depositZat === null || depositZat < 50_000) return setError("Deposit must be at least 0.0005 ZEC.");
     if (forfeitProblem) return setError(forfeitProblem);
+    const starts = new Date(form.starts_at);
+    if (Number.isNaN(starts.getTime())) return setError("Pick a start date and time.");
     setBusy(true);
     try {
       const res = await api.createEvent({
         title: form.title,
-        starts_at: form.starts_at,
+        // The browser's local time, sent with its offset so every attendee sees the right time.
+        starts_at: starts.toISOString(),
         location: form.location,
         details: form.details,
         capacity: Number(form.capacity),
@@ -105,7 +107,9 @@ export default function NewEvent() {
             <label className="label" htmlFor="deposit">Deposit (ZEC)</label>
             <input id="deposit" required inputMode="decimal" className="input" value={form.deposit} onChange={set("deposit")} />
             <p className="hint">
-              {depositZat !== null ? `${zatToZec(depositZat)} ZEC, refunded to everyone who comes.` : "Enter an amount like 0.01."}
+              {depositZat !== null
+                ? `${zatToZec(depositZat)} ZEC, refunded to everyone who comes. A round amount is less distinctive on chain.`
+                : "Enter an amount like 0.01."}
             </p>
           </div>
         </div>
@@ -113,14 +117,15 @@ export default function NewEvent() {
           <label className="label" htmlFor="forfeit">No-show fund address <span className="font-normal text-ink-4">(optional)</span></label>
           <input id="forfeit" className="input font-mono text-[13px]" value={form.forfeit_address} onChange={set("forfeit_address")} placeholder="u1…" spellCheck={false} />
           <p className="hint">
-            {forfeitProblem ?? "Shielded address for your group's fund. After settling, no-show deposits are swept here. Leave empty to keep them in the event wallet."}
+            {forfeitProblem ??
+              "Shielded address for your group's fund. After settling, no-show deposits and leftover fee money are swept here. You can also add it later from the dashboard; the event can't be purged until it's swept."}
           </p>
         </div>
 
         {error && <Notice tone="bad">{error}</Notice>}
         <div className="flex items-center justify-end gap-3 border-t border-ink/10 pt-6">
           <Link href="/" className="btn-ghost">Cancel</Link>
-          <button type="submit" className="btn-primary" disabled={busy}>
+          <button type="submit" className="btn-primary" disabled={busy || !meta}>
             {busy && <Spinner />} Create event
           </button>
         </div>
@@ -164,7 +169,7 @@ function CreatedPanel({ created }: { created: Created }) {
         <span>
           <span className="font-medium text-ink">Remember these links on this device</span>
           <span className="block text-ink-3">
-            Lists the event under &ldquo;Your events&rdquo; on the home screen. Anyone using this browser could then manage
+            Lists the event under <Link href="/events" className="underline">Your events</Link>. Anyone using this browser could then manage
             the event, so leave it off on shared or at-risk devices.
           </span>
         </span>

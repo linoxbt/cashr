@@ -1,4 +1,8 @@
-export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
+// Production builds never fall back to localhost: without NEXT_PUBLIC_API_URL
+// the app says plainly that it has no server, instead of failing quietly.
+const configured = process.env.NEXT_PUBLIC_API_URL?.trim();
+export const API_URL = (configured || (process.env.NODE_ENV === "production" ? "" : "http://localhost:8000")).replace(/\/$/, "");
+export const API_CONFIGURED = API_URL !== "";
 
 export type EventStatus = "open" | "closed" | "settling" | "settled" | "purged";
 
@@ -16,6 +20,8 @@ export interface PublicEvent {
   rsvp_count: number;
   checked_in_count: number;
   seats_left: number;
+  /** Open and before the RSVP deadline. Payments sent when this is false are returned. */
+  accepting_rsvps: boolean;
 }
 
 export interface AdminEvent extends PublicEvent {
@@ -24,6 +30,7 @@ export interface AdminEvent extends PublicEvent {
   refunded_zat: number;
   forfeited_zat: number;
   float_zat: number;
+  swept_zat: number;
 }
 
 export type RsvpStatus = "confirmed" | "refunding" | "refunded" | "forfeited";
@@ -36,11 +43,13 @@ export interface TicketList {
 
 export interface AdminView {
   event: AdminEvent;
+  /** Everything in the event wallet, including value still confirming. */
   balance_zat: number | null;
+  pending_zat: number | null;
   wallet_error: string;
   rsvps: { seat: number; ticket_hash: string; refund_address: string; status: RsvpStatus; checked_in: boolean }[];
   deposits: { txid: string; pool: string; index: number; amount_zat: number; height: number; kind: string; reason: string }[];
-  payouts: { id: number; kind: string; status: string; recipients: number; amount_zat: number; txid: string; error: string }[];
+  payouts: { id: number; kind: string; status: PayoutStatus; recipients: number; amount_zat: number; txid: string; error: string }[];
 }
 
 export interface Meta {
@@ -56,6 +65,8 @@ export interface Manifest {
   tickets: { h: string; seat: number; checked_in: boolean }[];
 }
 
+export type PayoutStatus = "queued" | "submitted" | "broadcast" | "done" | "failed";
+
 export type CheckInResult = "ok" | "already" | "unknown" | "event_closed";
 
 export class ApiError extends Error {
@@ -65,6 +76,9 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit & { token?: string } = {}): Promise<T> {
+  if (!API_CONFIGURED) {
+    throw new ApiError(0, "no_backend", "This copy of Unlisted isn't connected to a server yet, so nothing can be created or paid here.");
+  }
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (init.token) headers.Authorization = `Bearer ${init.token}`;
   let res: Response;
@@ -93,6 +107,8 @@ export const api = {
   admin: (id: string, token: string) => request<AdminView>(`/events/${id}/admin`, { token }),
   adminAction: (id: string, action: string, token: string) =>
     request<AdminEvent>(`/events/${id}/admin/${action}`, { method: "POST", token }),
+  setFund: (id: string, address: string, token: string) =>
+    request<AdminEvent>(`/events/${id}/admin/fund`, { method: "POST", token, body: JSON.stringify({ address }) }),
   manifest: (id: string, token: string) => request<Manifest>(`/events/${id}/door/manifest`, { token }),
   checkIn: (id: string, ticket_hash: string, token: string) =>
     request<{ result: CheckInResult; seat: number | null; checked_in_count: number }>(`/events/${id}/door/checkin`, {

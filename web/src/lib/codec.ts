@@ -135,4 +135,5 @@ export const REJECTION_TEXT: Record<string, string> = {
   rsvps_closed: "RSVPs had already closed.",
   duplicate_ticket: "That ticket was already used.",
   address_reused: "That refund address was already used for an Unlisted RSVP.",
+  bad_refund_address: "The refund address in the memo can't receive a private (Orchard) refund, so this payment can't be returned automatically. Ask the organiser.",
 };

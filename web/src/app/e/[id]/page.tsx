@@ -69,7 +69,7 @@ export default function EventPage() {
 
 function EventDetails({ event }: { event: PublicEvent }) {
   const statusPill = {
-    open: <Pill tone="ok">RSVPs open</Pill>,
+    open: event.accepting_rsvps ? <Pill tone="ok">RSVPs open</Pill> : <Pill tone="warn">RSVPs closed</Pill>,
     closed: <Pill tone="warn">RSVPs closed</Pill>,
     settling: <Pill>Refunds in progress</Pill>,
     settled: <Pill>Event over</Pill>,
@@ -118,17 +118,20 @@ function EventDetails({ event }: { event: PublicEvent }) {
 
 function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: StoredTicket) => void }) {
   const meta = useMeta();
-  const network = meta?.network ?? "main";
   const [address, setAddress] = useState("");
   const [fresh, setFresh] = useState(false);
   const [touched, setTouched] = useState(false);
-  const problem = addressProblem(address, network);
+  // Addresses are checked against the server's network, so wait until it is known.
+  const problem = meta ? addressProblem(address, meta.network) : null;
 
-  if (event.status !== "open") {
+  if (!event.accepting_rsvps) {
     return (
       <div className="card p-6">
         <h2 className="text-2xl ">RSVPs are closed</h2>
-        <p className="mt-2 text-sm text-ink-3">This event isn&rsquo;t taking new RSVPs.</p>
+        <p className="mt-2 text-sm text-ink-3">
+          {event.status === "open" ? "The RSVP deadline has passed." : "This event isn\u2019t taking new RSVPs."} Don&rsquo;t
+          send a deposit: it would be returned minus a fee.
+        </p>
       </div>
     );
   }
@@ -143,7 +146,7 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
 
   async function create() {
     setTouched(true);
-    if (problem || !fresh) return;
+    if (!meta || problem || !fresh) return;
     const secret = newSecret();
     const t: StoredTicket = {
       eventId: event.id,
@@ -185,8 +188,8 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
         </span>
       </label>
       {touched && !fresh && !problem && <p className="mt-2 text-sm text-bad">Please confirm the address is fresh.</p>}
-      <button className="btn-primary mt-6 w-full" onClick={create}>
-        Continue to deposit
+      <button className="btn-primary mt-6 w-full" onClick={create} disabled={!meta}>
+        {meta ? "Continue to deposit" : <><Spinner /> Connecting…</>}
       </button>
       <p className="mt-3 text-center text-xs text-ink-4">Nothing is sent to the server at this step.</p>
     </div>
@@ -256,6 +259,23 @@ function PayCard({ event, ticket, loaded, onForget }: { event: PublicEvent; tick
     ticketHash(fromB64url(ticket.secret)).then((h) => setIntact(h === ticket.hash));
   }, [ticket]);
 
+  if (!event.accepting_rsvps || event.seats_left === 0) {
+    // Never show payment details a deposit would bounce off.
+    return (
+      <div className="card p-6">
+        <Pill tone="warn">Don&rsquo;t pay now</Pill>
+        <h2 className="mt-3 text-2xl ">{event.seats_left === 0 && event.accepting_rsvps ? "The event filled up" : "RSVPs closed"}</h2>
+        <p className="mt-2 text-sm text-ink-2">
+          A deposit sent now would be returned to your refund address, minus a small network fee. If you already sent
+          one, it will show here once it confirms.
+        </p>
+        <div className="mt-5">
+          <ForgetButton onForget={onForget} warn label="Start over" />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="card p-6">
       <div className="eyebrow">Step 2 of 2</div>
@@ -268,6 +288,10 @@ function PayCard({ event, ticket, loaded, onForget }: { event: PublicEvent; tick
         <Qr value={uri} size={248} label="Payment QR code" />
       </div>
       <a href={uri} className="btn-primary mt-5 w-full">Open in wallet app</a>
+      <p className="mt-3 text-xs leading-relaxed text-ink-3">
+        Pay from your <strong className="text-ink-2">shielded</strong> balance. A payment from a transparent (t-address)
+        balance shows your address and this exact amount on the public chain.
+      </p>
 
       <div className="mt-5 flex items-center gap-2 rounded-lg bg-paper-2/60 px-3 py-2.5 text-sm text-ink-2">
         <Spinner className="text-ink-4" />
