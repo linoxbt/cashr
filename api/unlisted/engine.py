@@ -108,10 +108,13 @@ class Engine:
         with self.sessions() as db:
             ids = db.scalars(select(Event.id).where(Event.status.in_(ACTIVE))).all()
         for event_id in ids:
+            # One event failing (wallet hiccup, missing account) must not stop the others.
             try:
                 self.scan_event(event_id)
             except ChainError as e:
                 log.warning("scan %s: %s", event_id, e)
+            except Exception:
+                log.exception("scan %s failed", event_id)
 
     def scan_event(self, event_id: str) -> None:
         with self.sessions() as db:
