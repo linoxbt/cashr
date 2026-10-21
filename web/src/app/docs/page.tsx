@@ -2,8 +2,6 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
-import { TapeDeck } from "@/components/TapeDeck";
-import { TAPES } from "@/components/tapes";
 
 export const metadata: Metadata = { title: "Docs" };
 
@@ -89,8 +87,7 @@ export default function Docs() {
 
         <div className="min-w-0 space-y-14">
           <section id="overview" className="scroll-mt-32">
-            <TapeDeck tapes={TAPES} />
-            <div className="docs-prose mt-10 max-w-3xl space-y-4 text-[15px] leading-relaxed text-ink-2">
+            <div className="docs-prose max-w-3xl space-y-4 text-[15px] leading-relaxed text-ink-2">
               <p>
                 Unlisted is RSVPs for groups whose attendee list would hurt people if it leaked: support groups, union
                 organisers, journalists and their sources, activists. A small refundable deposit in shielded ZEC stops
