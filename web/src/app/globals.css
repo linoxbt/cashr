@@ -8,6 +8,8 @@
   --font-display: "Instrument Serif", ui-serif, Georgia, serif;
   --bezel: 28px;
   --screen-radius: 46px;
+  /* Height of the visible screen, for full-screen sections inside it. */
+  --stage-h: calc(100dvh - var(--bezel) * 2);
   color-scheme: dark;
 }
 
@@ -140,19 +142,22 @@ h2 {
   100% { transform: none; filter: none; }
 }
 
-/* ---- channel-change glitch (hover on OSD text, card swaps) ------------------- */
-.glitch:hover,
-.glitch:focus-visible {
-  animation: channel 380ms steps(6) 1;
+/* ---- channel-change glitch (hover on OSD text, card swaps) -------------------
+   Only text-shadow and a small skew: clip-path and opacity also shrink an
+   element's clickable area, and any visible change on :hover makes iOS treat
+   the first tap as a hover. So it runs only for real mice. */
+@media (hover: hover) and (pointer: fine) {
+  .glitch:hover,
+  .glitch:focus-visible {
+    animation: channel 380ms steps(6) 1;
+  }
 }
 
 @keyframes channel {
-  0% { text-shadow: -0.08em 0 rgba(255, 50, 80, 0.75), 0.08em 0 rgba(50, 150, 255, 0.75); transform: translateX(-0.1em) skewX(-8deg); }
-  20% { clip-path: inset(0 0 45% 0); transform: translateX(0.14em) skewX(6deg); }
-  40% { clip-path: inset(55% 0 0 0); opacity: 0.5; }
-  60% { clip-path: none; opacity: 1; text-shadow: 0.06em 0 rgba(255, 50, 80, 0.6), -0.06em 0 rgba(50, 150, 255, 0.6); transform: translateX(0.06em); }
-  80% { text-shadow: none; transform: translateX(-0.03em); }
-  100% { transform: none; }
+  0% { text-shadow: -0.08em 0 rgba(255, 50, 80, 0.75), 0.08em 0 rgba(50, 150, 255, 0.75); transform: skewX(-8deg); }
+  30% { text-shadow: 0.1em 0 rgba(255, 50, 80, 0.7), -0.1em 0 rgba(50, 150, 255, 0.7); transform: skewX(6deg); }
+  60% { text-shadow: 0.06em 0 rgba(255, 50, 80, 0.6), -0.06em 0 rgba(50, 150, 255, 0.6); transform: skewX(-3deg); }
+  100% { text-shadow: none; transform: none; }
 }
 
 .jolt {
