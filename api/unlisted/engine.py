@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from .chain import Chain, ChainError, Recipient
-from .codec import address_kind, try_decode_memo
+from .codec import is_orchard_address, try_decode_memo
 from .config import Settings
 from .db import Deposit, Event, Payout, Rsvp, SeenAddress
 
@@ -87,8 +87,8 @@ class Engine:
     def create_event(self, *, title: str, starts_at: str, location: str, details: str,
                      capacity: int, deposit_zat: int, rsvp_closes_at: datetime | None,
                      forfeit_address: str) -> CreatedEvent:
-        if forfeit_address and not address_kind(forfeit_address, self.settings.network):
-            raise EngineError("bad_address", "The no-show fund address is not a shielded Zcash address.")
+        if forfeit_address and not is_orchard_address(forfeit_address, self.settings.network):
+            raise EngineError("bad_address", "The no-show fund address must be a Unified Address with an Orchard receiver.")
         account_ref, address = self.chain.new_event_account()
         admin, door = new_token(), new_token()
         with self.lock, self.sessions() as db:
@@ -145,8 +145,8 @@ class Engine:
             ev.float_zat += note.amount_zat
             return
         dep.ticket_hash = memo.ticket_hash
-        if not address_kind(memo.refund_address, self.settings.network):
-            # No usable shielded address to return it to.
+        if not is_orchard_address(memo.refund_address, self.settings.network):
+            # Nowhere to return it privately (no Orchard receiver).
             dep.reason = "bad_refund_address"
             ev.float_zat += note.amount_zat
             return
@@ -241,8 +241,13 @@ class Engine:
         if st.state == "pending":
             return
         if st.state == "failed":
-            p.attempts += 1
             p.error = st.error
+            if "insufficient" in st.error.lower():
+                # Wallets report shortfalls when the send runs, not when it is
+                # submitted. Wait for forfeits or a top-up instead of failing.
+                p.status = "queued"
+                return
+            p.attempts += 1
             p.status = "failed" if p.attempts >= MAX_ATTEMPTS else "queued"
             return
         p.status, p.txid = "done", st.txid

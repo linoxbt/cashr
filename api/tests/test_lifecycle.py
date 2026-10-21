@@ -161,3 +161,40 @@ def test_create_validation(client):
     bad = {"title": "x", "starts_at": "soon", "capacity": 5, "deposit_zat": 500_000,
            "forfeit_address": "t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs"}
     assert client.post("/events", json=bad).json()["error"] == "bad_address"
+
+
+def test_refund_address_without_orchard_is_not_accepted(client, make_event, attendee):
+    from unlisted.chain.sim import random_unified_address
+
+    ev = make_event()["event"]
+    a = attendee(ev["id"])
+    a.refund_address = random_unified_address(orchard=False, sapling=True)
+    pay(client, ev, a.memo())
+    t = tickets(client, ev["id"])
+    assert t["tickets"] == [] and t["rejected"] == []
+    with client.engine.sessions() as db:
+        (dep,) = db.query(Deposit).filter(Deposit.event_id == ev["id"]).all()
+        assert dep.reason == "bad_refund_address"
+
+
+def test_async_shortfall_waits_for_top_up(client, make_event, attendee):
+    """A wallet that reports insufficient funds only when the op runs (like zcashd/unlisted-wallet)."""
+    from unlisted.chain.base import OpStatus
+
+    created = make_event()
+    ev, admin, door = created["event"], created["admin_token"], created["door_token"]
+    a = attendee(ev["id"])
+    pay(client, ev, a.memo())
+    client.post(f"/events/{ev['id']}/door/checkin", json={"ticket_hash": a.hash}, headers=auth(door))
+    real_status = client.chain.op_status
+    client.chain.op_status = lambda opid: OpStatus("failed", error="Insufficient balance (have 0, need 510000)")
+    for _ in range(MAX_POLLS):
+        client.post(f"/events/{ev['id']}/admin/settle" if _ == 0 else f"/events/{ev['id']}/admin/scan", headers=auth(admin))
+    view = client.get(f"/events/{ev['id']}/admin", headers=auth(admin)).json()
+    assert view["payouts"][0]["status"] == "queued"
+    client.chain.op_status = real_status
+    pay(client, ev, b"top-up", 100_000)
+    assert client.get(f"/events/{ev['id']}").json()["status"] == "settled"
+
+
+MAX_POLLS = 8

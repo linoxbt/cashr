@@ -1,4 +1,5 @@
 // Wire formats. Must match api/unlisted/codec.py exactly; see docs/PROTOCOL.md.
+import { hasOrchardReceiver } from "./ua.ts";
 
 export const MEMO_TAG = "UNL1";
 export const ZAT_PER_ZEC = 100_000_000;
@@ -115,9 +116,15 @@ export function addressProblem(address: string, network: string): string | null 
   const a = address.trim();
   if (!a) return "Paste an address from your wallet.";
   if (/^t[13m]/.test(a) || /^tex1/.test(a)) {
-    return "That is a transparent address. Use a shielded one (it starts with “u1” or “zs1”).";
+    return "That is a transparent address. Use your wallet's shielded address (it starts with “u1”).";
   }
-  if (!addressKind(a, network)) return "That does not look like a valid shielded Zcash address.";
+  if (addressKind(a, network) === "sapling") {
+    return "That is an older Sapling address. Use your wallet's Unified Address (it starts with “u1”).";
+  }
+  if (!addressKind(a, network)) return "That does not look like a valid Zcash address.";
+  if (!hasOrchardReceiver(a, network)) {
+    return "This address can't receive a private (Orchard) refund. Copy the shielded address from ZODL's Receive screen.";
+  }
   return null;
 }
 

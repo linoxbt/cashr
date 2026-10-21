@@ -13,6 +13,7 @@ import {
   zecToZat,
   zip321,
 } from "./codec.ts";
+import { decodeUnified } from "./ua.ts";
 
 test("bech32 checksum matches the BIP-173 vector", () => {
   // Same polymod as the Zcash HRPs; a bc1 address must fail only on HRP.
@@ -51,4 +52,27 @@ test("ticket QR parsing", () => {
   const secret = b64url(new Uint8Array(32).fill(7));
   assert.deepEqual(parseTicketQr(`unlisted:abcde12345:${secret}`), { eventId: "abcde12345", secret });
   assert.equal(parseTicketQr("https://example.com"), null);
+});
+
+// Real mainnet addresses produced by unlisted-wallet (librustzcash); same as api/tests/test_ua.py.
+const ORCHARD_ONLY = "u17j7e5kk4uzh698uajv4lah3mtt2x7jyewk3ya5tjvhjzp6yc5x260svm66uveezd93htyy3u0pyg80gpttfujfvj5pvlcqhngskrvpyd";
+const SAPLING_ONLY = "u1r4epe0uuztny46hl3pkrdv4tqlxxu59jcvj3wtnrsljt4glvvzfrumu8d827h8vgxf7pzkjenye60k392eeegpzdx5y7r3vpaysausau";
+const BOTH =
+  "u13sza6jr067ydyrkr2s40qsyqaw59aazmjvjrnzn9sktk9tg6fpeng99rzy78pasda3wp0vf5sfhzhq2jfz6l96006r4lg4vn6jg4dckez75a5a0" +
+  "gukew2mnhh7vcgpakz9hzraa9xvf490uryqqku6thqltl28kh32qgah0y4uzyqt8e";
+const BOTH_ORCHARD = "u1qf62h58pwerw7q5d3ga20ld2rtkj9laq88vt70dp29pc26jglj5mz88lzqj5anqweyfrxq04y2rjfv5n8g8ge590pe0dm8zxp5rtmnve";
+
+test("unified addresses decode to their receivers", () => {
+  assert.deepEqual(Object.keys(decodeUnified(ORCHARD_ONLY, "main") ?? {}), ["orchard"]);
+  assert.deepEqual(Object.keys(decodeUnified(SAPLING_ONLY, "main") ?? {}), ["sapling"]);
+  const both = decodeUnified(BOTH, "main");
+  assert.deepEqual(Object.keys(both ?? {}).sort(), ["orchard", "sapling"]);
+  assert.deepEqual(both?.orchard, decodeUnified(BOTH_ORCHARD, "main")?.orchard);
+  assert.equal(decodeUnified(ORCHARD_ONLY, "test"), null);
+});
+
+test("refund addresses must carry an Orchard receiver", () => {
+  assert.equal(addressProblem(ORCHARD_ONLY, "main"), null);
+  assert.equal(addressProblem(BOTH, "main"), null);
+  assert.match(addressProblem(SAPLING_ONLY, "main") ?? "", /Orchard/);
 });

@@ -1,0 +1,37 @@
+# The Unlisted backend: light-client wallet + API.
+#   cp .env.example .env   # set secrets
+#   docker compose up -d
+# The web app (web/) deploys separately to Vercel with NEXT_PUBLIC_API_URL.
+services:
+  wallet:
+    build: ./wallet
+    restart: unless-stopped
+    environment:
+      UW_NETWORK: ${UNLISTED_NETWORK:-main}
+      UW_LIGHTWALLETD: ${UW_LIGHTWALLETD:-https://zec.rocks:443}
+      UW_RPC_USER: unlisted
+      UW_RPC_PASSWORD: ${UW_RPC_PASSWORD:?set UW_RPC_PASSWORD}
+    volumes:
+      - wallet-data:/data   # holds seed.txt: back it up
+    # Not published: only the API talks to the wallet.
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    depends_on: [wallet]
+    environment:
+      UNLISTED_CHAIN: rpc
+      UNLISTED_NETWORK: ${UNLISTED_NETWORK:-main}
+      UNLISTED_SECRET: ${UNLISTED_SECRET:?set UNLISTED_SECRET}
+      UNLISTED_RPC_URL: http://wallet:8232
+      UNLISTED_RPC_USER: unlisted
+      UNLISTED_RPC_PASSWORD: ${UW_RPC_PASSWORD}
+      UNLISTED_CORS_ORIGINS: ${UNLISTED_CORS_ORIGINS:?set your web origin}
+    volumes:
+      - api-data:/data
+    ports:
+      - "8000:8000"
+
+volumes:
+  wallet-data:
+  api-data:

@@ -20,8 +20,10 @@ ASCII, single spaces, ≤ 512 bytes (on chain it is zero-padded to 512):
 UNL1 <event_id> <ticket_hash> <refund_address>
 ```
 
-`refund_address` must be a shielded address for the server's network: a Unified Address (`u1…`, bech32m) or Sapling
-(`zs1…`, bech32). Both client and server check the HRP and checksum. The wallet does the final check when it refunds.
+`refund_address` must be a **Unified Address containing an Orchard receiver** (`u1…` on mainnet). Refunds are
+Orchard-to-Orchard, so nothing about them (amount, recipient) is revealed on chain. The browser and the API both
+fully decode the address (bech32m → F4Jumble⁻¹ → receiver list, ZIP 316) to check it before any money moves.
+Implementations: `web/src/lib/ua.ts`, `api/unlisted/ua.py`. Both are tested against real addresses from librustzcash.
 
 ## Payment request (ZIP 321)
 
@@ -44,7 +46,8 @@ The door hashes `secret` locally and only ever sends the hash.
 A note is processed once it has `UNLISTED_MIN_CONF` confirmations, in `(height, txid, index)` order:
 
 1. **No `UNL1` memo:** treated as an organiser fee top-up ("float").
-2. **Refund address not shielded / malformed:** kept as float, since there is nowhere private to return it.
+2. **Refund address without an Orchard receiver:** kept as float, since there is nowhere private to return it. The
+   RSVP page prevents this before payment.
 3. **Otherwise rejected, and returned minus `UNLISTED_REJECT_FEE_ZAT`, if any of:** wrong event id, RSVPs closed,
    amount ≠ deposit, duplicate ticket hash, refund address used before (checked against an HMAC-SHA256 digest under
    `UNLISTED_SECRET`), or event full. A return that would be ≤ 0 is kept as float.

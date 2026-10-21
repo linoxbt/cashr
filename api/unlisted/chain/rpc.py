@@ -12,7 +12,7 @@ from decimal import Decimal
 
 import httpx
 
-from ..codec import ZAT_PER_ZEC
+from ..codec import ZAT_PER_ZEC, zat_to_zec_str
 from .base import ChainError, OpStatus, ReceivedNote, Recipient
 
 
@@ -99,7 +99,8 @@ class RpcChain:
         amounts = [
             {
                 "address": r.address,
-                "amount": float(Decimal(r.amount_zat) / ZAT_PER_ZEC),
+                # A decimal string, never a float: amounts must be exact.
+                "amount": zat_to_zec_str(r.amount_zat),
                 "memo": r.memo.hex(),
             }
             for r in recipients

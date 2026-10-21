@@ -1,53 +1,86 @@
 # Deploying Unlisted
 
-Three pieces:
-
 ```
-[ Next.js on Vercel ] --HTTPS--> [ FastAPI (always on) ] --JSON-RPC--> [ Zcash wallet: Zallet or zcashd ]
+[ web: Next.js on Vercel ] --HTTPS--> [ api: FastAPI ] --JSON-RPC--> [ wallet: unlisted-wallet ] --gRPC/TLS--> [ lightwalletd (zec.rocks) ] --> Zcash mainnet
 ```
 
-## 1. Wallet
+The wallet is a light client, so **no full node is needed**. It syncs compact blocks from a public lightwalletd
+server, then fetches the full transactions it needs to read memos.
 
-The API talks to a wallet over the zcashd JSON-RPC dialect. It uses these methods:
+## What has been verified on mainnet
 
-`getblockcount`, `z_getnewaccount`, `z_getaddressforaccount`, `z_listreceivedbyaddress` (falls back to
-`z_listunspent`), `z_getbalanceforaccount`, `z_sendmany`, `z_getoperationstatus`.
+Run against `https://zec.rocks:443` on Oct 21, 2026 (chain tip ≈ 3,525,545):
 
-> **Not yet verified against a live wallet.** The adapter is tested against zcashd 5.x response shapes
-> (`api/tests/test_rpc.py`) but has not been run against a synced Zallet or zcashd on mainnet. Before a real event:
-> create an event, pay a real deposit from ZODL, check in, settle, and confirm the refund lands. Zallet's coverage of
-> these methods may differ from zcashd's.
+| Step | Result |
+|---|---|
+| Connect, track tip | ✅ |
+| Create a per-event account with birthday = tip, derive Orchard-only / Sapling / combined UAs | ✅ |
+| Scan the account to the chain tip | ✅ |
+| API in `rpc` mode: create event (real Orchard address), scanner, admin balance, settle with no RSVPs | ✅ |
+| Build a transfer proposal, enforce FullPrivacy (non-Orchard recipient refused) | ✅ |
+| Receive a deposit, read its memo, prove and broadcast a refund | ⚠️ **Needs real ZEC. Not yet run.** |
 
-Fund nothing up front: each event gets its own account, and fees are covered by forfeits or a small top-up sent to
-the event address without a memo.
+Before a real event, run one full cycle with a small amount: create an event, pay the deposit from ZODL, check in,
+settle, and confirm the refund lands in ZODL.
 
-## 2. API
+## Quick start (Docker Compose)
 
-Environment:
+```bash
+cp .env.example .env      # fill in UNLISTED_SECRET, UW_RPC_PASSWORD, UNLISTED_CORS_ORIGINS
+docker compose up -d --build
+docker compose exec wallet cat /data/seed.txt   # write this down, offline
+```
+
+This runs two containers:
+* `wallet`: `unlisted-wallet`. It is not exposed publicly, and its seed lives in the `wallet-data` volume.
+* `api`: the FastAPI service on port 8000, with no access logs. Put TLS in front of it (Caddy, a load balancer, or
+  your host's HTTPS).
+
+**The seed controls every event's deposits.** `seed.txt` is a standard 24-word BIP 39 phrase, and each event is ZIP
+32 account *n*, so it can be restored into any Zcash wallet in an emergency.
+
+Then deploy the web app on Vercel with root directory **`web/`** and set `NEXT_PUBLIC_API_URL` to the API's public
+HTTPS URL.
+
+## Wallet service (`wallet/`)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `UW_NETWORK` | `main` | `main` or `test` |
+| `UW_LIGHTWALLETD` | `https://zec.rocks:443` (testnet: `https://testnet.zec.rocks:443`) | lightwalletd gRPC endpoint |
+| `UW_DATA_DIR` | `./wallet-data` | `seed.txt` and `wallet.sqlite` |
+| `UW_LISTEN` | `127.0.0.1:8232` | JSON-RPC listen address. A non-loopback address requires a password |
+| `UW_RPC_USER` / `UW_RPC_PASSWORD` | empty | HTTP basic auth for the RPC |
+| `UW_SYNC_INTERVAL` | `10` | Seconds between syncs |
+| `UW_EXTRA_CA_FILE` | none | Extra PEM CA to trust, for networks that re-sign TLS |
+
+RPC methods (zcashd-compatible shapes): `getblockcount`, `getwalletinfo`, `z_getnewaccount`,
+`z_getaddressforaccount`, `z_listreceivedbyaddress`, `z_getbalanceforaccount`, `z_sendmany` (`FullPrivacy` sends
+only to Orchard receivers; `AllowRevealedAmounts` also allows Sapling), `z_getoperationstatus`,
+`z_listunifiedreceivers`.
+
+Spending uses librustzcash's default confirmation policy (3 confirmations for the wallet's own change, 10 for
+received notes). Deposits therefore become refundable about 12 minutes after they arrive. That's well before any
+event ends; queued refunds simply wait.
+
+Build without Docker: `cd wallet && cargo build --release`. The Sapling parameters are bundled into the binary,
+and Orchard needs none.
+
+## API (`api/`)
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `UNLISTED_CHAIN` | yes | `rpc` for a real wallet (`sim` is dev only) |
-| `UNLISTED_NETWORK` | yes | `main` or `test` |
+| `UNLISTED_CHAIN` | yes | `rpc` (`sim` is for tests and local dev only) |
+| `UNLISTED_NETWORK` | yes | `main` or `test`. Must match the wallet |
 | `UNLISTED_SECRET` | yes | Long random string. Keys the refund-address reuse check. Never change it once set |
-| `UNLISTED_RPC_URL` / `_USER` / `_PASSWORD` | yes | Wallet RPC |
-| `UNLISTED_DATABASE_URL` | yes | `postgresql+psycopg://…` in production, or `sqlite:////data/unlisted.db` on a persistent disk |
-| `UNLISTED_CORS_ORIGINS` | yes | Your web origin, e.g. `https://unlisted.vercel.app` |
+| `UNLISTED_RPC_URL` / `_USER` / `_PASSWORD` | yes | The wallet's RPC |
+| `UNLISTED_DATABASE_URL` | no | Defaults to SQLite in `/data` in the image. `postgresql+psycopg://…` also works |
+| `UNLISTED_CORS_ORIGINS` | yes | Your web origin |
 | `UNLISTED_MIN_CONF` | no | Confirmations before an RSVP counts (default 1) |
-| `UNLISTED_SCAN_INTERVAL` | no | Seconds between wallet scans (default 15) |
-| `UNLISTED_REJECT_FEE_ZAT` | no | Withheld from returned payments (default 10000) |
 
-The scanner runs in-process, so run **exactly one** API instance and keep it always on.
+Run exactly **one** API instance: its deposit scanner runs in-process.
 
-**Container (Fly.io, Railway, a VPS):** `docker build -t unlisted-api api/` and run it with the variables above.
-The image starts uvicorn with `--no-access-log`.
+`UNLISTED_CHAIN=rpc` also works against zcashd or Zallet instead of `unlisted-wallet`, since they speak the same RPC.
 
-**Modal:** `cd api && modal secret create unlisted UNLISTED_CHAIN=rpc …` then `modal deploy modal_app.py`. It pins
-one always-warm container. Use Postgres rather than SQLite on a Modal Volume.
-
-Turn off request logging at any proxy in front of the API as well.
-
-## 3. Web
-
-On Vercel, import the repo with **root directory `web/`** and set `NEXT_PUBLIC_API_URL` to the API's public URL.
-Vercel keeps its own request logs; for the highest-risk groups, also offer the site over Tor.
+**Modal** (optional): `api/modal_app.py` pins one always-warm container. The wallet still needs a persistent host
+for its seed and database.

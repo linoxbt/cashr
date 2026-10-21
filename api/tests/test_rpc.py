@@ -70,8 +70,17 @@ def test_send_and_status():
     }, calls))
     assert c.send("3", "u1from", [Recipient("u1to", 500_000, b"hi")]) == "opid-1"
     method, params = calls[0]
-    assert params[0] == "u1from" and params[1] == [{"address": "u1to", "amount": 0.005, "memo": "6869"}]
+    assert params[0] == "u1from" and params[1] == [{"address": "u1to", "amount": "0.005", "memo": "6869"}]
     assert params[4] == "FullPrivacy"
     st = c.op_status("opid-1")
     assert (st.state, st.txid) == ("success", "dd")
     assert c.spendable_zat("3") == 42
+
+
+def test_failed_status_is_reported():
+    c = make_chain(responder({
+        "z_getoperationstatus": [{"id": "o", "status": "failed",
+                                  "error": {"code": -6, "message": "Insufficient balance (have 0, need 510000 including fee)"}}],
+    }, []))
+    st = c.op_status("o")
+    assert st.state == "failed" and "Insufficient" in st.error

@@ -26,36 +26,38 @@ as stored. There is nothing in it that names anyone.
 ## Repository
 
 ```
-api/   FastAPI service: wallet adapter, deposit scanner, settlement, door API (Python 3.11+)
-web/   Next.js app: landing, create event, RSVP, ticket, door scanner, organiser dashboard
-docs/  SPEC.md · PROTOCOL.md · DEPLOY.md
+wallet/  unlisted-wallet (Rust, librustzcash): light-client Zcash wallet syncing from lightwalletd.
+         One ZIP 32 account per event, memo decryption, Orchard-only refunds, zcashd-style JSON-RPC.
+api/     FastAPI service: deposit scanner, RSVP rules, settlement, door API, purge (Python 3.11+)
+web/     Next.js app: landing, create event, RSVP, ticket, door scanner, organiser dashboard
+docs/    SPEC.md · PROTOCOL.md · DEPLOY.md
 ```
 
-## Run it locally
+## Run it
+
+**Against Zcash mainnet** (real wallet, real ZEC): see [docs/DEPLOY.md](docs/DEPLOY.md), or in short:
 
 ```bash
-# API, using the simulated chain (no real ZEC)
-cd api
-uv venv && uv pip install -e '.[dev]'
-UNLISTED_CHAIN=sim .venv/bin/uvicorn unlisted.main:app --port 8000 --no-access-log
-
-# Web
-cd web
-npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
+cp .env.example .env && docker compose up -d --build     # wallet + API
+cd web && npm install && NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 ```
 
-Open http://localhost:3000, create an event, and RSVP in a second browser profile. In simulated mode the RSVP page
-shows a "Simulate this payment" button, and every page shows a banner saying no real ZEC moves.
+**Locally without ZEC** (simulated chain; every page shows a banner, and the RSVP page offers "Simulate this
+payment"):
 
-For a real deployment against a Zcash wallet, see [docs/DEPLOY.md](docs/DEPLOY.md).
+```bash
+cd api && uv venv && uv pip install -e '.[dev]'
+UNLISTED_CHAIN=sim .venv/bin/uvicorn unlisted.main:app --port 8000 --no-access-log
+cd web && npm install && NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
+```
 
 ## Tests
 
 ```bash
-cd api && .venv/bin/pytest -q    # lifecycle, rejections, reuse, fees, auth, RPC adapter
-cd web && npm test               # codec parity with the API
-cd web && npm run build          # type-check and production build
+cd wallet && cargo test          # block cache, exact amount parsing
+cd api && .venv/bin/pytest -q    # lifecycle, rejections, reuse, fees, auth, RPC adapter, UA decoding
+cd web && npm test               # codec + UA decoding parity with the API (real mainnet addresses)
+cd web && npm run build
 ```
 
 ## Privacy model
