@@ -89,6 +89,8 @@ def test_full_lifecycle(client, make_event, attendee):
             assert db.query(model).filter(model.event_id == ev["id"]).count() == 0
     # The wallet's keys and records for the event are gone too.
     assert account not in client.chain._accounts
+    view = admin_view(client, ev, admin)
+    assert view["wallet_error"] == "" and view["balance_zat"] == 0
     assert tickets(client, ev["id"])["tickets"] == []
     gone = client.get(f"/events/{ev['id']}").json()
     assert gone["rsvp_count"] == 2 and gone["checked_in_count"] == 1 and gone["location"] == ""

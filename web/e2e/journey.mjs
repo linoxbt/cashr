@@ -112,7 +112,9 @@ try {
   step("settled: refund confirmed and no-shows swept");
   await p.click("text=Purge all data");
   await p.getByText("Purged", { exact: true }).waitFor({ timeout: 15000 });
-  step("purged, wallet keys destroyed");
+  await p.waitForTimeout(1500);
+  if (await p.getByText("Wallet unreachable").isVisible()) throw new Error("dashboard shows a wallet error after purge");
+  step("purged, wallet keys destroyed, dashboard clean");
 
   // 8. The attendee's ticket list reflects it.
   await p.evaluate((t) => localStorage.setItem("unlisted.tickets.v1", JSON.stringify({ [t.eventId]: t })), tickets[0]);

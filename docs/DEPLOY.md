@@ -45,6 +45,21 @@ Then deploy the web app with `NEXT_PUBLIC_API_URL` set to the API's public HTTPS
 it shows "not connected to a server" instead of calling localhost). On Netlify, `netlify.toml` already sets the base
 directory to `web/` and the Next.js runtime. Add the web origin to the API's `UNLISTED_CORS_ORIGINS`.
 
+## Railway
+
+`api/railway.json` and `wallet/railway.json` hold the build and deploy settings. Create one project with two
+services from this repo:
+
+| Service | Root directory | Volume | Variables | Networking |
+|---|---|---|---|---|
+| `wallet` | `/wallet` | `/data` | `RAILWAY_RUN_UID=0`, `UW_SEED_KEY`, `UW_RPC_USER`, `UW_RPC_PASSWORD`, `UW_LISTEN=[::]:8232` | private only |
+| `api` | `/api` | `/data` | `RAILWAY_RUN_UID=0`, `UNLISTED_CHAIN=rpc`, `UNLISTED_NETWORK=main`, `UNLISTED_SECRET`, `UNLISTED_RPC_URL=http://wallet.railway.internal:8232`, `UNLISTED_RPC_USER`, `UNLISTED_RPC_PASSWORD`, `UNLISTED_CORS_ORIGINS` | public domain, port 8000 |
+
+Railway volumes are owned by root, so `RAILWAY_RUN_UID=0` lets the containers (which otherwise run as an
+unprivileged user) write to them. Keep each service at one replica (the API refuses to start a second one on the same database anyway).
+Free Railway accounts can be paused during high traffic ("Deploys have been paused temporarily"); Pro accounts are
+not.
+
 ## Wallet service (`wallet/`)
 
 | Variable | Default | Meaning |
