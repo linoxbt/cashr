@@ -203,3 +203,14 @@ MAX_POLLS = 8
 def test_meta_reports_wallet_tip(client):
     m = client.get("/meta").json()
     assert m["chain"] == "sim" and m["tip"] == client.chain.tip_height()
+
+
+def test_one_broken_event_does_not_stop_scanning(client, make_event, attendee):
+    broken = make_event()["event"]
+    ok = make_event()["event"]
+    # Simulate an event whose wallet account has gone missing.
+    del client.chain._accounts[client.engine.sessions().get(__import__("unlisted.db", fromlist=["Event"]).Event, broken["id"]).account_ref]
+    a = attendee(ok["id"])
+    client.chain.pay(ok["address"], ok["deposit_zat"], a.memo())
+    client.engine.scan_once()
+    assert [t["h"] for t in tickets(client, ok["id"])["tickets"]] == [a.hash]
