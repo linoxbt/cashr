@@ -81,7 +81,7 @@ function EventDetails({ event }: { event: PublicEvent }) {
         {statusPill}
         <Pill tone="gold">No guest list</Pill>
       </div>
-      <h1 className="mt-4 text-4xl font-semibold tracking-tight">{event.title}</h1>
+      <h1 className="mt-4 text-5xl sm:text-6xl ">{event.title}</h1>
       <dl className="mt-6 grid gap-4 sm:grid-cols-2">
         <div className="card p-4">
           <dt className="eyebrow">When</dt>
@@ -127,7 +127,7 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
   if (event.status !== "open") {
     return (
       <div className="card p-6">
-        <h2 className="text-lg font-semibold">RSVPs are closed</h2>
+        <h2 className="text-2xl ">RSVPs are closed</h2>
         <p className="mt-2 text-sm text-ink-3">This event isn&rsquo;t taking new RSVPs.</p>
       </div>
     );
@@ -135,7 +135,7 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
   if (event.seats_left === 0) {
     return (
       <div className="card p-6">
-        <h2 className="text-lg font-semibold">This event is full</h2>
+        <h2 className="text-2xl ">This event is full</h2>
         <p className="mt-2 text-sm text-ink-3">Check back later. Seats can open up if RSVPs are returned.</p>
       </div>
     );
@@ -160,7 +160,7 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
   return (
     <div className="card p-6">
       <div className="eyebrow">Step 1 of 2</div>
-      <h2 className="mt-2 text-lg font-semibold">Where should your refund go?</h2>
+      <h2 className="mt-2 text-2xl ">Where should your refund go?</h2>
       <p className="mt-1.5 text-sm text-ink-3">
         Paste a shielded receive address from your own wallet. In ZODL, tap <em>Receive</em> and copy the shielded address.
       </p>
@@ -259,7 +259,7 @@ function PayCard({ event, ticket, loaded, onForget }: { event: PublicEvent; tick
   return (
     <div className="card p-6">
       <div className="eyebrow">Step 2 of 2</div>
-      <h2 className="mt-2 text-lg font-semibold">Pay the {zatToZec(event.deposit_zat)} ZEC deposit</h2>
+      <h2 className="mt-2 text-2xl ">Pay the {zatToZec(event.deposit_zat)} ZEC deposit</h2>
       <p className="mt-1.5 text-sm text-ink-3">
         Scan with ZODL or any Zcash wallet. The amount and memo are filled in for you. Don&rsquo;t change them.
       </p>
@@ -302,7 +302,7 @@ function Rejected({ event, reason, onForget }: { event: PublicEvent; reason: str
   return (
     <div className="card p-6">
       <Pill tone="bad">Payment returned</Pill>
-      <h2 className="mt-3 text-lg font-semibold">This RSVP didn&rsquo;t go through</h2>
+      <h2 className="mt-3 text-2xl ">This RSVP didn&rsquo;t go through</h2>
       <p className="mt-2 text-sm text-ink-2">{REJECTION_TEXT[reason] ?? "The payment couldn't be accepted."}</p>
       <p className="mt-2 text-sm text-ink-3">
         Your payment is being returned to your refund address, minus a small network fee.

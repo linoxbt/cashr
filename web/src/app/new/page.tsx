@@ -65,7 +65,7 @@ export default function NewEvent() {
   return (
     <div className="mx-auto max-w-3xl px-4 py-14 sm:px-6">
       <p className="eyebrow">New event</p>
-      <h1 className="mt-3 text-3xl font-semibold tracking-tight">Create an event</h1>
+      <h1 className="mt-3 text-5xl ">Create an event</h1>
       <p className="mt-3 text-ink-2">
         No account, no email. You&rsquo;ll get two private links: keep them safe, they are the only way in.
       </p>
@@ -137,7 +137,7 @@ function CreatedPanel({ created }: { created: Created }) {
   return (
     <div className="mx-auto max-w-3xl px-4 py-14 sm:px-6">
       <p className="eyebrow">Event created</p>
-      <h1 className="mt-3 text-3xl font-semibold tracking-tight">{event.title} is ready.</h1>
+      <h1 className="mt-3 text-5xl ">{event.title} is ready.</h1>
       <div className="mt-6">
         <Notice tone="warn" title="Save these links now">
           The manage and door links are shown only once. We store a hash of them, not the links, so we can&rsquo;t

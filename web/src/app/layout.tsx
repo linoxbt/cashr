@@ -1,7 +1,12 @@
 import type { Metadata, Viewport } from "next";
 
-import { SiteFooter, SiteHeader } from "@/components/Shell";
-import { SimBanner } from "@/components/ui";
+import "@fontsource-variable/inter-tight";
+import "@fontsource/ibm-plex-mono/400.css";
+import "@fontsource/ibm-plex-mono/500.css";
+import "@fontsource/instrument-serif/400.css";
+import "@fontsource/instrument-serif/400-italic.css";
+
+import { Crt } from "@/components/Crt";
 
 import "./globals.css";
 
@@ -13,16 +18,13 @@ export const metadata: Metadata = {
   robots: { index: true, follow: true },
 };
 
-export const viewport: Viewport = { themeColor: "#F6F4EF", width: "device-width", initialScale: 1 };
+export const viewport: Viewport = { themeColor: "#050505", width: "device-width", initialScale: 1, viewportFit: "cover" };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="min-h-screen font-sans">
-        <SimBanner />
-        <SiteHeader />
-        <main>{children}</main>
-        <SiteFooter />
+      <body className="font-sans">
+        <Crt>{children}</Crt>
       </body>
     </html>
   );

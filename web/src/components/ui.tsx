@@ -6,14 +6,14 @@ import { api, type Meta } from "@/lib/api";
 
 export function Pill({ tone = "neutral", children }: { tone?: "neutral" | "ok" | "warn" | "bad" | "gold"; children: ReactNode }) {
   const tones = {
-    neutral: "bg-paper-2 text-ink-2",
+    neutral: "bg-white/[0.06] text-ink-2",
     ok: "bg-ok-soft text-ok",
     warn: "bg-warn-soft text-warn",
     bad: "bg-bad-soft text-bad",
     gold: "bg-gold-soft text-gold-ink",
   };
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ${tones[tone]}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-[3px] px-2 py-0.5 font-mono text-[11px] font-medium uppercase tracking-[-0.02em] ${tones[tone]}`}>
       {children}
     </span>
   );
@@ -23,7 +23,7 @@ export function Stat({ label, value, sub }: { label: string; value: ReactNode; s
   return (
     <div className="card p-5">
       <div className="eyebrow">{label}</div>
-      <div className="mt-2 text-2xl font-semibold tabular-nums tracking-tight">{value}</div>
+      <div className="mt-2 font-display text-4xl tabular-nums leading-none">{value}</div>
       {sub && <div className="mt-1 text-xs text-ink-3">{sub}</div>}
     </div>
   );
@@ -31,13 +31,13 @@ export function Stat({ label, value, sub }: { label: string; value: ReactNode; s
 
 export function Notice({ tone = "neutral", title, children }: { tone?: "neutral" | "ok" | "warn" | "bad"; title?: string; children: ReactNode }) {
   const tones = {
-    neutral: "border-ink/10 bg-paper-2/60",
+    neutral: "border-ink/10 bg-white/[0.03]",
     ok: "border-ok/20 bg-ok-soft",
     warn: "border-warn/20 bg-warn-soft",
     bad: "border-bad/20 bg-bad-soft",
   };
   return (
-    <div className={`rounded-xl border px-4 py-3 text-sm ${tones[tone]}`} role={tone === "bad" ? "alert" : undefined}>
+    <div className={`rounded-md border px-4 py-3 text-sm ${tones[tone]}`} role={tone === "bad" ? "alert" : undefined}>
       {title && <div className="mb-0.5 font-semibold">{title}</div>}
       <div className="text-ink-2">{children}</div>
     </div>
@@ -72,7 +72,7 @@ export function CopyField({ label, value, hint }: { label: string; value: string
         <span className="label mb-0">{label}</span>
         <CopyButton value={value} />
       </div>
-      <div className="mono-break mt-1.5 rounded-lg border border-ink/10 bg-paper/60 px-3 py-2 text-ink-2">{value}</div>
+      <div className="mono-break mt-1.5 rounded-[4px] border border-ink/10 bg-black/40 px-3 py-2 text-ink-2">{value}</div>
       {hint && <p className="hint">{hint}</p>}
     </div>
   );
@@ -90,7 +90,7 @@ export function Spinner({ className = "" }: { className?: string }) {
 export function PageState({ title, children }: { title: string; children?: ReactNode }) {
   return (
     <div className="mx-auto max-w-lg px-4 py-24 text-center">
-      <h1 className="text-xl font-semibold">{title}</h1>
+      <h1 className="text-4xl">{title}</h1>
       {children && <div className="mt-3 text-sm text-ink-3">{children}</div>}
     </div>
   );
@@ -108,18 +108,6 @@ export function useMeta(): Meta | null {
     metaPromise.then(setMeta, () => setMeta(null));
   }, []);
   return meta;
-}
-
-export function SimBanner() {
-  const meta = useMeta();
-  if (meta?.chain !== "sim") return null;
-  return (
-    <div className="bg-gold-soft text-gold-ink">
-      <div className="mx-auto max-w-page px-4 py-2 text-center text-xs font-medium sm:px-6">
-        Simulated chain: this server is running in development mode. No real ZEC moves.
-      </div>
-    </div>
-  );
 }
 
 export function usePoll(fn: () => void | Promise<void>, ms: number, deps: unknown[]) {

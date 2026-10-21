@@ -96,7 +96,7 @@ export default function Manage() {
             <Pill tone={ev.status === "open" ? "ok" : ev.status === "purged" ? "neutral" : "warn"}>{ev.status}</Pill>
             <span className="text-sm text-ink-3">{formatWhen(ev.starts_at)}</span>
           </div>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight">{ev.title}</h1>
+          <h1 className="mt-2 text-5xl ">{ev.title}</h1>
         </div>
         <div className="flex flex-wrap gap-2">
           <Link href={`/e/${ev.id}`} className="btn-secondary">RSVP page</Link>
@@ -287,7 +287,7 @@ function SeizedTab({ view }: { view: AdminView }) {
   return (
     <div className="grid gap-6 lg:grid-cols-[22rem_1fr]">
       <div className="space-y-4 text-sm leading-relaxed text-ink-2">
-        <h2 className="text-xl font-semibold text-ink">Imagine this server was seized tonight.</h2>
+        <h2 className="text-3xl text-ink">Imagine this server was seized tonight.</h2>
         <p>
           On the right is every record Unlisted holds for this event, exactly as stored. Look for a name, an email, a
           phone number or the address someone paid from. None of them exist.
@@ -299,7 +299,7 @@ function SeizedTab({ view }: { view: AdminView }) {
         </ul>
         <p>After you purge the event, even this is gone.</p>
       </div>
-      <pre className="max-h-[36rem] overflow-auto whitespace-pre-wrap break-all rounded-2xl border border-ink/10 bg-ink p-5 font-mono text-xs leading-relaxed text-paper/90">
+      <pre className="max-h-[36rem] overflow-auto whitespace-pre-wrap break-all panel bg-black/60 p-5 font-mono text-xs leading-relaxed text-ink-2">
         {JSON.stringify(dump, null, 2)}
       </pre>
     </div>

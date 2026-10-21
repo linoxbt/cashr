@@ -3,61 +3,231 @@
 @tailwind utilities;
 
 :root {
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  color-scheme: light;
+  --font-sans: "Inter Tight Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display: "Instrument Serif", ui-serif, Georgia, serif;
+  --bezel: 28px;
+  --screen-radius: 46px;
+  color-scheme: dark;
+}
+
+@media (max-width: 640px) {
+  :root {
+    --bezel: 8px;
+    --screen-radius: 26px;
+  }
 }
 
 html,
 body {
-  background: #f6f4ef;
-  color: #0e1116;
+  height: 100%;
+  background: #050505;
+  color: #ece9e1;
 }
 
 body {
+  overflow: hidden;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
 ::selection {
-  background: #fbf0d5;
+  background: rgba(244, 183, 40, 0.35);
 }
 
+h1,
+h2 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
+/* ---- the television -------------------------------------------------------- */
+.crt {
+  position: fixed;
+  inset: 0;
+  padding: var(--bezel);
+  background:
+    radial-gradient(120% 90% at 50% 0%, #121212 0%, #070707 60%, #030303 100%);
+}
+
+.crt-screen {
+  position: relative;
+  height: 100%;
+  border-radius: var(--screen-radius) / calc(var(--screen-radius) * 0.9);
+  overflow: hidden;
+  isolation: isolate;
+  background: radial-gradient(130% 120% at 50% 45%, #1b1b1b 0%, #131313 45%, #0b0b0b 100%);
+  box-shadow:
+    0 0 0 1px #000,
+    0 0 0 3px #0d0d0d,
+    0 30px 80px rgba(0, 0, 0, 0.7);
+  transition: filter 300ms ease;
+}
+
+.crt-screen.bw {
+  filter: grayscale(1) contrast(1.08);
+}
+
+.crt-scroll {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(236, 233, 225, 0.18) transparent;
+}
+
+/* Overlays sit above content and never take clicks. */
+.crt-fx {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  border-radius: inherit;
+}
+
+.crt-vignette {
+  box-shadow:
+    inset 0 0 140px 30px rgba(0, 0, 0, 0.75),
+    inset 0 0 18px 4px rgba(0, 0, 0, 0.9),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.crt-scanlines {
+  background: repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.022) 0 1px, transparent 1px 3px);
+  mix-blend-mode: screen;
+}
+
+.crt-glare {
+  background:
+    linear-gradient(105deg, transparent 58%, rgba(255, 255, 255, 0.035) 64%, transparent 70%),
+    linear-gradient(105deg, transparent 70%, rgba(255, 255, 255, 0.025) 74%, transparent 78%),
+    radial-gradient(60% 18% at 50% 3%, rgba(255, 255, 255, 0.05), transparent 70%);
+}
+
+.crt-grain {
+  overflow: hidden;
+}
+
+.crt-grain::before {
+  content: "";
+  position: absolute;
+  inset: -10%;
+  opacity: 0.06;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
+  animation: grain 0.8s steps(1) infinite;
+}
+
+@keyframes grain {
+  0% { transform: translate(0, 0); }
+  20% { transform: translate(-3%, -5%); }
+  40% { transform: translate(5%, 2%); }
+  60% { transform: translate(-2%, 6%); }
+  80% { transform: translate(4%, -4%); }
+}
+
+/* Power-on: the picture opens from a bright line, like a tube warming up. */
+.crt-boot {
+  animation: boot 900ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes boot {
+  0% { transform: scale(1, 0.004); filter: brightness(4); opacity: 0.2; }
+  35% { transform: scale(1, 0.004); filter: brightness(4); opacity: 1; }
+  60% { transform: scale(1, 1.02); filter: brightness(1.6); }
+  100% { transform: none; filter: none; }
+}
+
+/* ---- channel-change glitch (hover on OSD text, card swaps) ------------------- */
+.glitch:hover,
+.glitch:focus-visible {
+  animation: channel 380ms steps(6) 1;
+}
+
+@keyframes channel {
+  0% { text-shadow: -0.08em 0 rgba(255, 50, 80, 0.75), 0.08em 0 rgba(50, 150, 255, 0.75); transform: translateX(-0.1em) skewX(-8deg); }
+  20% { clip-path: inset(0 0 45% 0); transform: translateX(0.14em) skewX(6deg); }
+  40% { clip-path: inset(55% 0 0 0); opacity: 0.5; }
+  60% { clip-path: none; opacity: 1; text-shadow: 0.06em 0 rgba(255, 50, 80, 0.6), -0.06em 0 rgba(50, 150, 255, 0.6); transform: translateX(0.06em); }
+  80% { text-shadow: none; transform: translateX(-0.03em); }
+  100% { transform: none; }
+}
+
+.jolt {
+  animation: jolt 320ms steps(5) 1;
+}
+
+@keyframes jolt {
+  0% { transform: translateX(-6px) skewX(-4deg); filter: drop-shadow(-3px 0 rgba(255, 50, 80, 0.7)) drop-shadow(3px 0 rgba(50, 150, 255, 0.7)); }
+  25% { transform: translateX(5px) skewX(3deg); clip-path: inset(0 0 40% 0); }
+  50% { transform: translateX(-2px); clip-path: inset(50% 0 0 0); }
+  75% { transform: translateX(2px); clip-path: none; filter: none; }
+  100% { transform: none; }
+}
+
+.blink {
+  animation: blink 1.2s steps(1) infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0.2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crt-grain::before,
+  .crt-boot,
+  .glitch:hover,
+  .glitch:focus-visible,
+  .jolt,
+  .blink {
+    animation: none !important;
+  }
+}
+
+/* ---- components ------------------------------------------------------------- */
 @layer components {
+  .osd {
+    @apply font-mono text-[12.5px] font-medium uppercase tracking-[-0.03em] text-ink-2;
+  }
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition
+    @apply inline-flex items-center justify-center gap-2 rounded-[4px] px-4 py-2.5 font-mono text-[12.5px] font-medium uppercase tracking-[-0.02em] transition
       focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gold
-      disabled:cursor-not-allowed disabled:opacity-50;
+      disabled:cursor-not-allowed disabled:opacity-40;
   }
   .btn-primary {
-    @apply btn bg-ink text-paper hover:bg-ink-2;
+    @apply btn bg-ink text-screen hover:bg-white;
   }
   .btn-secondary {
-    @apply btn border border-ink/15 bg-white text-ink hover:border-ink/30;
+    @apply btn border border-ink/20 bg-transparent text-ink hover:border-ink/45 hover:bg-white/[0.03];
   }
   .btn-danger {
-    @apply btn border border-bad/30 bg-white text-bad hover:bg-bad-soft;
+    @apply btn border border-bad/40 bg-transparent text-bad hover:bg-bad-soft;
   }
   .btn-ghost {
-    @apply btn text-ink-2 hover:bg-paper-2;
+    @apply btn text-ink-2 hover:bg-white/[0.04] hover:text-ink;
   }
   .card {
-    @apply rounded-2xl border border-ink/10 bg-white shadow-[0_1px_2px_rgba(14,17,22,0.04)];
+    @apply rounded-md border border-ink/[0.11] bg-white/[0.025] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)];
+  }
+  .panel {
+    @apply rounded-md border border-ink/[0.11] bg-black/40;
   }
   .input {
-    @apply block w-full rounded-lg border border-ink/15 bg-white px-3 py-2.5 text-sm text-ink placeholder:text-ink-4
-      focus:border-ink/40 focus:outline-none focus:ring-2 focus:ring-gold/40;
+    @apply block w-full rounded-[4px] border border-ink/15 bg-black/40 px-3 py-2.5 text-sm text-ink placeholder:text-ink-4
+      focus:border-gold/60 focus:outline-none focus:ring-2 focus:ring-gold/20;
   }
   .label {
-    @apply mb-1.5 block text-sm font-medium text-ink-2;
+    @apply mb-1.5 block font-mono text-[11.5px] font-medium uppercase tracking-[-0.02em] text-ink-3;
   }
   .hint {
-    @apply mt-1.5 text-xs text-ink-3;
+    @apply mt-1.5 text-xs text-ink-4;
   }
   .eyebrow {
-    @apply text-xs font-semibold uppercase tracking-[0.14em] text-ink-3;
+    @apply font-mono text-[11.5px] font-medium uppercase tracking-[-0.02em] text-ink-3;
   }
   .mono-break {
-    @apply break-all font-mono text-[13px] leading-relaxed;
+    @apply break-all font-mono text-[12.5px] leading-relaxed;
   }
 }
