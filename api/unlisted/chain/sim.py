@@ -21,7 +21,7 @@ from .base import Balance, ChainError, OpStatus, ReceivedNote, Recipient, TxStat
 
 MARGINAL_FEE = 5_000
 EXPIRY_DELTA = 40
-DUST_ZAT = 10_000
+DUST_ZAT = 20_000  # matches the real wallet's delete limit
 
 
 def zip317_fee(inputs: int, outputs: int) -> int:
