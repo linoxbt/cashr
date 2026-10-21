@@ -50,12 +50,12 @@ export default function Privacy() {
   return (
     <div className="mx-auto max-w-4xl px-4 py-16 sm:px-6">
       <p className="eyebrow">Threat model</p>
-      <h1 className="mt-3 text-4xl font-semibold tracking-tight">What we store, what could leak, and what you trust us with.</h1>
+      <h1 className="mt-3 text-5xl sm:text-6xl ">What we store, what could leak, and what you trust us with.</h1>
       <p className="mt-5 text-lg leading-relaxed text-ink-2">
         Privacy that only looks right is worse than none, because people rely on it. Here is the whole picture.
       </p>
 
-      <h2 className="mt-14 text-xl font-semibold">Everything the server ever stores</h2>
+      <h2 className="mt-14 text-3xl ">Everything the server ever stores</h2>
       <div className="card mt-4 divide-y divide-ink/5">
         {STORED.map(([k, v]) => (
           <div key={k} className="grid gap-1 px-5 py-4 sm:grid-cols-[14rem_1fr]">
@@ -69,7 +69,7 @@ export default function Privacy() {
         and were forfeited.
       </p>
 
-      <h2 className="mt-14 text-xl font-semibold">Known leaks and how each is closed</h2>
+      <h2 className="mt-14 text-3xl ">Known leaks and how each is closed</h2>
       <div className="mt-4 grid gap-4">
         {LEAKS.map((l) => (
           <div key={l.risk} className="card p-5">
@@ -80,7 +80,7 @@ export default function Privacy() {
         ))}
       </div>
 
-      <h2 className="mt-14 text-xl font-semibold">What you are trusting</h2>
+      <h2 className="mt-14 text-3xl ">What you are trusting</h2>
       <ul className="mt-4 list-disc space-y-2 pl-5 text-ink-2">
         {TRUST.map((t) => <li key={t}>{t}</li>)}
       </ul>

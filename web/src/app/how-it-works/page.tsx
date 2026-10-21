@@ -40,7 +40,7 @@ export default function HowItWorks() {
   return (
     <div className="mx-auto max-w-page px-4 py-16 sm:px-6">
       <p className="eyebrow">How it works</p>
-      <h1 className="mt-3 max-w-3xl text-4xl font-semibold tracking-tight">
+      <h1 className="mt-3 max-w-3xl text-5xl sm:text-6xl ">
         A deposit, a secret and a refund, with nothing in between that names anyone.
       </h1>
       <p className="mt-5 max-w-2xl text-lg leading-relaxed text-ink-2">
@@ -64,11 +64,11 @@ export default function HowItWorks() {
 
       <section className="mt-20 grid gap-10 lg:grid-cols-2">
         <div>
-          <h2 className="text-2xl font-semibold tracking-tight">The memo</h2>
+          <h2 className="text-3xl ">The memo</h2>
           <p className="mt-3 leading-relaxed text-ink-2">
             Every RSVP payment carries one line of text, encrypted so only the event&rsquo;s wallet can read it:
           </p>
-          <pre className="mono-break mt-4 whitespace-pre-wrap rounded-xl border border-ink/10 bg-white p-4 text-ink-2">
+          <pre className="mono-break mt-4 whitespace-pre-wrap panel p-4 text-ink-2">
 UNL1 &lt;event id&gt; &lt;base64url(sha256(secret))&gt; &lt;refund address&gt;
           </pre>
           <p className="mt-4 leading-relaxed text-ink-2">
@@ -77,7 +77,7 @@ UNL1 &lt;event id&gt; &lt;base64url(sha256(secret))&gt; &lt;refund address&gt;
           </p>
         </div>
         <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Why only Zcash can do this</h2>
+          <h2 className="text-3xl ">Why only Zcash can do this</h2>
           <ul className="mt-4 space-y-3 text-ink-2">
             <li><strong className="text-ink">Cards and PayPal</strong> give the organiser a name with every payment.</li>
             <li><strong className="text-ink">Bitcoin and Ethereum</strong> put the payer&rsquo;s address and the refund on a public ledger anyone can trace.</li>

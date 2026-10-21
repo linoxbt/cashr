@@ -1,118 +1,138 @@
-import Link from "next/link";
+import { TapeDeck, type Tape } from "@/components/TapeDeck";
 
-const STEPS = [
-  {
-    n: "01",
-    title: "RSVP with a refundable deposit",
-    body: "Attendees scan one QR code with any Zcash wallet. The deposit is shielded: nobody can see who paid, including you.",
-  },
-  {
-    n: "02",
-    title: "Show a ticket at the door",
-    body: "The ticket is a random secret generated on the attendee's phone. The door checks it against a list of hashes. It never learns a name.",
-  },
-  {
-    n: "03",
-    title: "Get your deposit back",
-    body: "People who came are refunded automatically to an address only they know. No-show deposits go to your group's fund.",
-  },
-];
+// ---- cover art (SVG, inherits the tape colour) --------------------------------
 
-const SEIZED = [
-  { field: "Names", them: "Every attendee", us: "None" },
-  { field: "Emails / phone numbers", them: "Every attendee", us: "None" },
-  { field: "Wallet or card details", them: "Every attendee", us: "None" },
-  { field: "Who paid", them: "Yes", us: "Hidden by the shielded pool" },
-  { field: "Who showed up", them: "Check-in list with timestamps", us: "A count" },
-  { field: "After the event", them: "Kept forever", us: "Deleted with one click" },
+function RedactedList() {
+  const rows = [0.82, 0.64, 0.9, 0.55, 0.74, 0.6];
+  return (
+    <svg viewBox="0 0 100 90" className="h-full w-full" aria-hidden>
+      <text x="8" y="12" fontSize="6" fill="currentColor" fontFamily="monospace" opacity="0.8">GUEST LIST</text>
+      {rows.map((w, i) => (
+        <g key={i}>
+          <text x="8" y={24 + i * 11} fontSize="5.5" fill="currentColor" fontFamily="monospace" opacity="0.6">{String(i + 1).padStart(2, "0")}</text>
+          <rect x="18" y={19 + i * 11} width={74 * w} height="6" fill="currentColor" />
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+function Coin() {
+  return (
+    <svg viewBox="0 0 100 90" className="h-full w-full" aria-hidden>
+      {[34, 27, 20].map((r) => (
+        <circle key={r} cx="50" cy="45" r={r} fill="none" stroke="currentColor" strokeWidth={r === 34 ? 2 : 1} opacity={r === 20 ? 0.6 : 1} />
+      ))}
+      <text x="50" y="49" fontSize="10" textAnchor="middle" fill="currentColor" fontFamily="monospace">ZEC</text>
+    </svg>
+  );
+}
+
+function TicketGrid() {
+  // Deterministic "QR" pattern.
+  const cells = Array.from({ length: 121 }, (_, i) => ((i * 7919) % 13) % 3 === 0);
+  return (
+    <svg viewBox="0 0 100 90" className="h-full w-full" aria-hidden>
+      <g transform="translate(23 18)">
+        {cells.map((on, i) =>
+          on ? <rect key={i} x={(i % 11) * 5} y={Math.floor(i / 11) * 5} width="4.4" height="4.4" fill="currentColor" /> : null,
+        )}
+        {[[0, 0], [40, 0], [0, 40]].map(([x, y]) => (
+          <g key={`${x}${y}`}>
+            <rect x={x} y={y} width="15" height="15" fill="#070707" stroke="currentColor" strokeWidth="2.2" />
+            <rect x={x + 5} y={y + 5} width="5" height="5" fill="currentColor" />
+          </g>
+        ))}
+      </g>
+    </svg>
+  );
+}
+
+function RefundLoop() {
+  return (
+    <svg viewBox="0 0 100 90" className="h-full w-full" aria-hidden>
+      <path d="M28 45a22 22 0 0 1 38-15" fill="none" stroke="currentColor" strokeWidth="3" />
+      <path d="M72 45a22 22 0 0 1-38 15" fill="none" stroke="currentColor" strokeWidth="3" />
+      <path d="M60 24l8 6-9 4z" fill="currentColor" />
+      <path d="M40 66l-8-6 9-4z" fill="currentColor" />
+      <text x="50" y="49" fontSize="9" textAnchor="middle" fill="currentColor" fontFamily="monospace">ZEC</text>
+    </svg>
+  );
+}
+
+function SeizedLaptop() {
+  return (
+    <svg viewBox="0 0 100 90" className="h-full w-full" aria-hidden>
+      <rect x="22" y="18" width="56" height="38" fill="none" stroke="currentColor" strokeWidth="2.2" />
+      <path d="M14 64h72l-6 7H20z" fill="currentColor" />
+      <text x="50" y="35" fontSize="6" textAnchor="middle" fill="currentColor" fontFamily="monospace">0 NAMES</text>
+      <text x="50" y="45" fontSize="6" textAnchor="middle" fill="currentColor" fontFamily="monospace" opacity="0.6">0 EMAILS</text>
+      <path d="M8 8l84 74" stroke="currentColor" strokeWidth="1" opacity="0.5" />
+    </svg>
+  );
+}
+
+const TAPES: Tape[] = [
+  {
+    id: "no-list",
+    title: ["No", "Guest", "List"],
+    color: "#E0262B",
+    caption: "RSVPs for groups whose attendee list would hurt people if it leaked.",
+    tags: ["Create an event", "Shielded ZEC"],
+    href: "/new",
+  },
+  {
+    id: "deposit",
+    title: ["The", "Deposit"],
+    color: "#F4B728",
+    caption: "A small refundable deposit stops no-shows. Nobody can see who paid, not even you.",
+    tags: ["Orchard", "ZIP 321"],
+    href: "/how-it-works",
+    art: <Coin />,
+  },
+  {
+    id: "door",
+    title: ["The", "Door"],
+    color: "#7C5CFF",
+    caption: "Your ticket is a secret made on your phone. The door checks a hash, never a name.",
+    tags: ["SHA-256", "Works offline"],
+    href: "/how-it-works",
+    art: <TicketGrid />,
+  },
+  {
+    id: "refund",
+    title: ["The", "Refund"],
+    color: "#3DD68C",
+    caption: "Show up, and your deposit returns to an address only you know.",
+    tags: ["Orchard → Orchard", "Full privacy"],
+    href: "/how-it-works",
+    art: <RefundLoop />,
+  },
+  {
+    id: "seized",
+    title: ["Seized"],
+    color: "#3B6CFF",
+    caption: "If the organiser's laptop is taken tonight, there is nothing on it to find.",
+    tags: ["Threat model"],
+    href: "/privacy",
+    art: <SeizedLaptop />,
+  },
+  {
+    id: "purge",
+    title: ["Purge"],
+    color: "#E8E1D0",
+    caption: "One click after the event and even the ticket hashes are gone.",
+    tags: ["Retention: zero"],
+    href: "/privacy",
+    art: <RedactedList />,
+  },
 ];
 
 export default function Home() {
   return (
-    <>
-      <section className="mx-auto max-w-page px-4 pb-16 pt-20 sm:px-6 sm:pt-28">
-        <div className="max-w-3xl">
-          <p className="eyebrow">For groups that can&rsquo;t afford a leaked list</p>
-          <h1 className="mt-4 text-4xl font-semibold leading-[1.08] tracking-tight sm:text-6xl">
-            The guest list is the liability.
-            <span className="block text-ink-3">So we don&rsquo;t keep one.</span>
-          </h1>
-          <p className="mt-6 max-w-2xl text-lg leading-relaxed text-ink-2">
-            Unlisted is RSVPs for support groups, organisers, journalists and anyone else whose attendee list would hurt
-            people if it leaked. A small refundable deposit in shielded ZEC stops no-shows. Nobody, not even you, ever
-            holds a list of who came.
-          </p>
-          <div className="mt-9 flex flex-wrap gap-3">
-            <Link href="/new" className="btn-primary px-5 py-3 text-base">Create an event</Link>
-            <Link href="/how-it-works" className="btn-secondary px-5 py-3 text-base">How it works</Link>
-          </div>
-        </div>
-      </section>
-
-      <section className="border-y border-ink/10 bg-white">
-        <div className="mx-auto grid max-w-page gap-px bg-ink/10 sm:grid-cols-3">
-          {STEPS.map((s) => (
-            <div key={s.n} className="bg-white px-6 py-10">
-              <div className="font-mono text-sm text-gold-ink">{s.n}</div>
-              <h3 className="mt-3 text-lg font-semibold">{s.title}</h3>
-              <p className="mt-2 text-sm leading-relaxed text-ink-3">{s.body}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="mx-auto max-w-page px-4 py-20 sm:px-6">
-        <div className="grid gap-12 lg:grid-cols-[1fr_1.3fr] lg:items-start">
-          <div>
-            <p className="eyebrow">If the organiser&rsquo;s laptop is seized</p>
-            <h2 className="mt-3 text-3xl font-semibold tracking-tight">There is nothing on it to find.</h2>
-            <p className="mt-4 leading-relaxed text-ink-2">
-              Every RSVP tool keeps a database of people. Breaches, subpoenas and stolen devices turn that database
-              into a target list. Unlisted only stores random ticket hashes and one-time refund addresses, and deletes
-              those after the event.
-            </p>
-            <p className="mt-4 leading-relaxed text-ink-2">
-              That works because of Zcash&rsquo;s shielded pool: a deposit can come from someone unknown, and a refund
-              can go back to them, with nothing on the public chain linking either one to a person.
-            </p>
-            <Link href="/privacy" className="mt-6 inline-block text-sm font-semibold underline decoration-gold decoration-2 underline-offset-4">
-              Read the full threat model
-            </Link>
-          </div>
-          <div className="card overflow-hidden">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-paper-2/60 text-xs uppercase tracking-wider text-ink-3">
-                <tr>
-                  <th className="px-5 py-3 font-semibold">What a seized server reveals</th>
-                  <th className="px-5 py-3 font-semibold">Typical RSVP tool</th>
-                  <th className="px-5 py-3 font-semibold">Unlisted</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-ink/5">
-                {SEIZED.map((r) => (
-                  <tr key={r.field}>
-                    <td className="px-5 py-3.5 font-medium">{r.field}</td>
-                    <td className="px-5 py-3.5 text-bad">{r.them}</td>
-                    <td className="px-5 py-3.5 text-ok">{r.us}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <section className="mx-auto max-w-page px-4 sm:px-6">
-        <div className="card flex flex-col items-start justify-between gap-6 bg-ink p-8 text-paper sm:flex-row sm:items-center sm:p-10">
-          <div>
-            <h2 className="text-2xl font-semibold tracking-tight">Running something sensitive this week?</h2>
-            <p className="mt-2 max-w-xl text-paper/70">
-              Create an event in a minute. No account, no email, no name required, for you or your attendees.
-            </p>
-          </div>
-          <Link href="/new" className="btn bg-gold px-5 py-3 text-base text-ink hover:bg-gold/90">Create an event</Link>
-        </div>
-      </section>
-    </>
+    <div className="flex min-h-[calc(100dvh-var(--bezel)*2-14rem)] w-full flex-col items-center justify-center pb-4">
+      <h1 className="sr-only">Unlisted: RSVPs without a guest list</h1>
+      <TapeDeck tapes={TAPES} />
+    </div>
   );
 }

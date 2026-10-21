@@ -16,7 +16,7 @@ const VERDICT_UI: Record<Verdict["kind"], { bg: string; title: string; sub: stri
   already: { bg: "bg-warn", title: "Already checked in", sub: "This ticket was used before." },
   unknown: { bg: "bg-bad", title: "Not a valid ticket", sub: "No confirmed RSVP matches this code." },
   other_event: { bg: "bg-bad", title: "Wrong event", sub: "This ticket is for a different event." },
-  closed: { bg: "bg-ink-2", title: "Door closed", sub: "This event has ended." },
+  closed: { bg: "bg-screen-3", title: "Door closed", sub: "This event has ended." },
 };
 
 export default function Door() {
@@ -177,7 +177,7 @@ export default function Door() {
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="eyebrow">Door</p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight">{manifest?.event.title ?? "Loading event…"}</h1>
+          <h1 className="mt-1 text-2xl ">{manifest?.event.title ?? "Loading event…"}</h1>
         </div>
         <div className="text-right">
           <div className="text-2xl font-semibold tabular-nums">{checkedIn}<span className="text-ink-4">/{total}</span></div>
@@ -189,26 +189,26 @@ export default function Door() {
         {queue.length > 0 && <Pill tone="warn">{queue.length} check-in{queue.length === 1 ? "" : "s"} to sync</Pill>}
       </div>
 
-      <div className="relative mt-6 aspect-square overflow-hidden rounded-2xl bg-ink">
+      <div className="relative mt-6 aspect-square overflow-hidden rounded-md bg-black">
         <video ref={videoRef} playsInline muted className={`h-full w-full object-cover ${camera === "on" ? "" : "hidden"}`} />
         {camera !== "on" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-paper">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-ink">
             {camera === "denied" ? (
-              <p className="text-sm text-paper/80">Camera access was blocked. Allow it in your browser settings, or enter codes by hand below.</p>
+              <p className="text-sm text-ink-2">Camera access was blocked. Allow it in your browser settings, or enter codes by hand below.</p>
             ) : (
               <>
-                <p className="text-sm text-paper/70">Point the camera at an attendee&rsquo;s ticket.</p>
-                <button className="btn bg-gold text-ink hover:bg-gold/90" onClick={startCamera} disabled={camera === "starting"}>
+                <p className="text-sm text-ink-3">Point the camera at an attendee&rsquo;s ticket.</p>
+                <button className="btn bg-gold text-screen hover:bg-gold/90" onClick={startCamera} disabled={camera === "starting"}>
                   {camera === "starting" && <Spinner />} Start scanning
                 </button>
               </>
             )}
           </div>
         )}
-        {camera === "on" && !ui && <div className="pointer-events-none absolute inset-10 rounded-2xl border-2 border-paper/60" />}
+        {camera === "on" && !ui && <div className="pointer-events-none absolute inset-10 rounded-2xl border-2 border-ink/50" />}
         {ui && (
           <div className={`absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-white ${ui.bg}`} role="status" aria-live="assertive">
-            <div className="text-3xl font-semibold">{ui.title}</div>
+            <div className="font-display text-5xl sm:text-6xl">{ui.title}</div>
             {verdict?.seat ? <div className="mt-2 text-lg">Seat {verdict.seat}</div> : null}
             <div className="mt-2 text-sm text-white/80">{ui.sub}</div>
             {verdict?.offline && <div className="mt-3 text-xs text-white/70">Checked offline. It will sync when the connection is back.</div>}

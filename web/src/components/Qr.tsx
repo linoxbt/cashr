@@ -14,7 +14,7 @@ export function Qr({ value, size = 240, label }: { value: string; size?: number;
     <div
       role="img"
       aria-label={label}
-      className="overflow-hidden rounded-xl border border-ink/10 bg-white p-2 [&_svg]:h-full [&_svg]:w-full"
+      className="overflow-hidden rounded-[4px] bg-white p-2 shadow-[0_0_0_1px_rgba(236,233,225,0.25)] [&_svg]:h-full [&_svg]:w-full"
       style={{ width: size, height: size }}
       dangerouslySetInnerHTML={{ __html: svg }}
     />
