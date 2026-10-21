@@ -1,6 +1,10 @@
+from datetime import datetime, timedelta, timezone
+
+import pytest
 from conftest import auth
 
-from unlisted.db import Deposit, Payout, Rsvp, SeenAddress
+from unlisted.chain.sim import EXPIRY_DELTA, random_unified_address
+from unlisted.db import Deposit, Event, Payout, Rsvp, SeenAddress
 
 
 def tickets(client, event_id):
@@ -9,11 +13,46 @@ def tickets(client, event_id):
 
 def pay(client, ev, memo, amount=None):
     client.chain.pay(ev["address"], ev["deposit_zat"] if amount is None else amount, memo)
-    client.engine.scan_once()
+    client.engine.scan_once(full=True)
+
+
+def advance(client, blocks=1):
+    for _ in range(blocks):
+        client.chain.mine()
+        client.engine.scan_once(full=True)
+
+
+def status(client, event_id):
+    return client.get(f"/events/{event_id}").json()["status"]
+
+
+def settle(client, ev, admin, max_blocks=20, post=True):
+    if post:
+        r = client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
+        assert r.status_code == 200, r.text
+    for _ in range(max_blocks):
+        if status(client, ev["id"]) == "settled":
+            return
+        advance(client)
+    raise AssertionError(f"event did not settle: {admin_view(client, ev, admin)['payouts']}")
+
+
+def admin_view(client, ev, admin):
+    return client.get(f"/events/{ev['id']}/admin", headers=auth(admin)).json()
+
+
+def checkin(client, ev, door, a):
+    r = client.post(f"/events/{ev['id']}/door/checkin", json={"ticket_hash": a.hash}, headers=auth(door))
+    return r.json()["result"]
+
+
+def refunds_to(client, address):
+    return [r.amount_zat for _, rs, _ in client.chain.sent for r in rs if r.address == address]
 
 
 def test_full_lifecycle(client, make_event, attendee):
-    created = make_event(forfeit_address="")
+    fund = random_unified_address()
+    created = make_event(forfeit_address=fund)
     ev, admin, door = created["event"], created["admin_token"], created["door_token"]
     a, b = attendee(ev["id"]), attendee(ev["id"])
 
@@ -24,42 +63,161 @@ def test_full_lifecycle(client, make_event, attendee):
     assert client.get(f"/events/{ev['id']}").json()["seats_left"] == 1
 
     # The door only ever sees the hash of what the attendee shows.
-    r = client.post(f"/events/{ev['id']}/door/checkin", json={"ticket_hash": a.hash}, headers=auth(door))
-    assert r.json()["result"] == "ok"
-    r = client.post(f"/events/{ev['id']}/door/checkin", json={"ticket_hash": a.hash}, headers=auth(door))
-    assert r.json()["result"] == "already"
+    assert checkin(client, ev, door, a) == "ok"
+    assert checkin(client, ev, door, a) == "already"
 
     r = client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
-    assert r.status_code == 200, r.text
-    assert r.json()["status"] == "settled"
-    assert r.json()["refunded_zat"] == ev["deposit_zat"]
-    assert r.json()["forfeited_zat"] == ev["deposit_zat"]
+    assert r.json()["status"] == "settling"
+    # Broadcast is not paid: the refund counts once it is mined and confirmed.
+    assert r.json()["refunded_zat"] == 0
+    assert {x["h"]: x["status"] for x in tickets(client, ev["id"])["tickets"]}[a.hash] == "refunding"
+    settle(client, ev, admin, post=False)
 
-    # Exactly one refund, to the address only the attendee chose.
-    refunds = [rcpt for _, rs, _ in client.chain.sent for rcpt in rs]
-    assert [(x.address, x.amount_zat) for x in refunds] == [(a.refund_address, ev["deposit_zat"])]
+    after = admin_view(client, ev, admin)
+    assert after["event"]["refunded_zat"] == ev["deposit_zat"]
+    assert after["event"]["forfeited_zat"] == ev["deposit_zat"]
+    assert refunds_to(client, a.refund_address) == [ev["deposit_zat"]]
+    # Forfeits and the fee float leave the event wallet; nothing is stranded.
+    assert after["balance_zat"] == 0 and after["event"]["swept_zat"] > 0
+    assert refunds_to(client, fund) == [after["event"]["swept_zat"]]
 
+    account = client.engine.sessions().get(Event, ev["id"]).account_ref
     r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
-    assert r.json()["status"] == "purged"
+    assert r.json()["status"] == "purged", r.text
     with client.engine.sessions() as db:
         for model in (Rsvp, Deposit, Payout):
             assert db.query(model).filter(model.event_id == ev["id"]).count() == 0
+    # The wallet's keys and records for the event are gone too.
+    assert account not in client.chain._accounts
     assert tickets(client, ev["id"])["tickets"] == []
-    after = client.get(f"/events/{ev['id']}").json()
-    assert after["rsvp_count"] == 2 and after["checked_in_count"] == 1 and after["location"] == ""
+    gone = client.get(f"/events/{ev['id']}").json()
+    assert gone["rsvp_count"] == 2 and gone["checked_in_count"] == 1 and gone["location"] == ""
 
 
-def test_forfeits_swept_to_group_fund(client, make_event, attendee):
-    from unlisted.chain.sim import random_unified_address
+def test_lost_response_never_pays_twice(client, make_event, attendee):
+    created = make_event(forfeit_address=random_unified_address())
+    ev, admin, door = created["event"], created["admin_token"], created["door_token"]
+    a, b = attendee(ev["id"]), attendee(ev["id"])
+    pay(client, ev, a.memo())
+    pay(client, ev, b.memo())
+    checkin(client, ev, door, a)
+    # The wallet builds and broadcasts, but the API never hears back (timeout).
+    client.chain.lose_responses = 2
+    settle(client, ev, admin)
+    assert refunds_to(client, a.refund_address) == [ev["deposit_zat"]]
 
+
+def test_restarted_api_resumes_without_paying_twice(client, make_event, attendee):
+    from unlisted.engine import Engine
+
+    created = make_event(forfeit_address=random_unified_address())
+    ev, admin, door = created["event"], created["admin_token"], created["door_token"]
+    a, b = attendee(ev["id"]), attendee(ev["id"])
+    pay(client, ev, a.memo())
+    pay(client, ev, b.memo())
+    checkin(client, ev, door, a)
+    client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
+    # Crash before the result was recorded: roll the payout back to queued.
+    with client.engine.sessions() as db:
+        p = db.query(Payout).filter(Payout.kind == "refund").one()
+        p.status, p.opid, p.txid = "queued", "", ""
+        db.commit()
+    fresh = Engine(client.engine.settings, client.chain, client.engine.sessions)
+    for _ in range(10):
+        client.chain.mine()
+        fresh.scan_once(full=True)
+    assert refunds_to(client, a.refund_address) == [ev["deposit_zat"]]
+    assert status(client, ev["id"]) == "settled"
+
+
+def test_expired_refund_is_sent_again(client, make_event, attendee):
+    created = make_event()
+    ev, admin, door = created["event"], created["admin_token"], created["door_token"]
+    a = attendee(ev["id"])
+    pay(client, ev, a.memo())
+    pay(client, ev, b"top-up", 100_000)
+    checkin(client, ev, door, a)
+    client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
+    (_, _, first), = client.chain.sent
+    client.chain.drop_from_mempool(first)
+    for _ in range(EXPIRY_DELTA + 1):
+        client.chain.height += 1  # blocks pass without the transaction
+    client.engine.scan_once(full=True)
+    assert tickets(client, ev["id"])["tickets"][0]["status"] == "refunding"
+    advance(client, 5)
+    assert [txid for _, _, txid in client.chain.sent][0] == first and len(client.chain.sent) == 2
+    assert client.chain.tx_status(first).state == "expired"
+    assert tickets(client, ev["id"])["tickets"][0]["status"] == "refunded"
+    assert admin_view(client, ev, admin)["event"]["refunded_zat"] == ev["deposit_zat"]
+
+
+def test_pending_refund_is_rebroadcast_not_resent(client, make_event, attendee):
+    from unlisted.engine import REBROADCAST_EVERY
+
+    created = make_event()
+    ev, admin, door = created["event"], created["admin_token"], created["door_token"]
+    a = attendee(ev["id"])
+    pay(client, ev, a.memo())
+    pay(client, ev, b"top-up", 100_000)
+    checkin(client, ev, door, a)
+    client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
+    (_, _, txid), = client.chain.sent
+    client.chain.drop_from_mempool(txid)
+    for _ in range(REBROADCAST_EVERY):
+        client.engine.scan_once(full=True)
+    assert client.chain._txs[txid].in_mempool  # rebroadcast
+    advance(client, 4)
+    assert len(client.chain.sent) == 1 and status(client, ev["id"]) == "settled"
+
+
+def test_sweep_waits_for_change_to_confirm(client, make_event, attendee):
+    client.chain.change_conf = 3  # like the real wallet's trusted-confirmations policy
     fund = random_unified_address()
     created = make_event(forfeit_address=fund)
+    ev, admin, door = created["event"], created["admin_token"], created["door_token"]
+    people = [attendee(ev["id"]) for _ in range(3)]
+    for p in people:
+        pay(client, ev, p.memo())
+    checkin(client, ev, door, people[0])
+    settle(client, ev, admin)
+    swept = admin_view(client, ev, admin)["event"]["swept_zat"]
+    # Two forfeits plus the refund's change, minus two fees: nothing left behind.
+    assert swept == 3 * ev["deposit_zat"] - ev["deposit_zat"] - 2 * 10_000
+    assert client.chain.balance(client.engine.sessions().get(Event, ev["id"]).account_ref).total_zat == 0
+
+
+def test_without_fund_address_money_is_kept_and_purge_refused(client, make_event, attendee):
+    created = make_event()
     ev, admin = created["event"], created["admin_token"]
     pay(client, ev, attendee(ev["id"]).memo())
-    r = client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
-    assert r.json()["status"] == "settled"
-    sweep = client.chain.sent[-1][1][0]
-    assert sweep.address == fund and 0 < sweep.amount_zat < ev["deposit_zat"]
+    settle(client, ev, admin)
+    r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
+    assert r.status_code == 409 and r.json()["error"] == "funds_left"
+    fund = random_unified_address()
+    r = client.post(f"/events/{ev['id']}/admin/fund", json={"address": fund}, headers=auth(admin))
+    assert r.status_code == 200, r.text
+    settle_wait = 0
+    while status(client, ev["id"]) != "settled" and settle_wait < 10:
+        advance(client)
+        settle_wait += 1
+    assert refunds_to(client, fund) == [ev["deposit_zat"] - 10_000]
+    r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
+    assert r.json()["status"] == "purged"
+
+
+def test_unknown_operation_stops_for_a_person(client, make_event, attendee):
+    from unlisted.chain.base import OpStatus
+
+    created = make_event()
+    ev, admin, door = created["event"], created["admin_token"], created["door_token"]
+    a = attendee(ev["id"])
+    pay(client, ev, a.memo())
+    pay(client, ev, b"top-up", 100_000)
+    checkin(client, ev, door, a)
+    client.chain.op_status = lambda opid: OpStatus("failed", error="operation unknown to wallet")
+    client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
+    (p,) = admin_view(client, ev, admin)["payouts"]
+    assert p["status"] == "failed" and "paid twice" in p["error"]
 
 
 def test_rejections_are_returned(client, make_event, attendee):
@@ -74,8 +232,7 @@ def test_rejections_are_returned(client, make_event, attendee):
     assert [x["h"] for x in t["tickets"]] == [first.hash]
     reasons = sorted(x["reason"] for x in t["rejected"])
     assert reasons == ["full", "wrong_amount", "wrong_event"]
-    returned = {r.address: r.amount_zat for _, rs, _ in client.chain.sent for r in rs}
-    assert returned[second.refund_address] == ev["deposit_zat"] - 10_000
+    assert refunds_to(client, second.refund_address) == [ev["deposit_zat"] - 10_000]
 
 
 def test_refund_address_reuse_refused_across_events(client, make_event, attendee):
@@ -98,8 +255,7 @@ def test_unconfirmed_notes_wait(client, make_event, attendee):
     a = attendee(ev["id"])
     pay(client, ev, a.memo())
     assert tickets(client, ev["id"])["tickets"] == []
-    client.chain.mine()
-    client.engine.scan_once()
+    advance(client)
     assert [x["h"] for x in tickets(client, ev["id"])["tickets"]] == [a.hash]
 
 
@@ -111,12 +267,31 @@ def test_closed_event_rejects_new_rsvps(client, make_event, attendee):
     assert tickets(client, ev["id"])["rejected"][0]["reason"] == "rsvps_closed"
 
 
+def test_rsvp_deadline_closes_rsvps(client, make_event, attendee):
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    ev = make_event(rsvp_closes_at=past)["event"]
+    assert ev["status"] == "open" and ev["accepting_rsvps"] is False
+    pay(client, ev, attendee(ev["id"]).memo())
+    assert tickets(client, ev["id"])["rejected"][0]["reason"] == "rsvps_closed"
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    assert make_event(rsvp_closes_at=future)["event"]["accepting_rsvps"] is True
+
+
+def test_start_time_needs_a_timezone(client, make_event):
+    r = client.post("/events", json={"title": "x", "starts_at": "2026-10-30T18:00", "capacity": 5,
+                                     "deposit_zat": 500_000})
+    assert r.status_code == 422
+    ev = make_event(starts_at="2026-10-30T18:00:00+02:00")["event"]
+    assert ev["starts_at"] == "2026-10-30T16:00:00Z"
+
+
 def test_memoless_payment_funds_the_float(client, make_event):
     created = make_event()
     ev, admin = created["event"], created["admin_token"]
     pay(client, ev, b"fee top-up", 200_000)
-    view = client.get(f"/events/{ev['id']}/admin", headers=auth(admin)).json()
+    view = admin_view(client, ev, admin)
     assert view["event"]["float_zat"] == 200_000 and view["rsvps"] == []
+    assert view["deposits"][0]["reason"] == "no_memo"
 
 
 def test_refunds_wait_for_fee_float(client, make_event, attendee):
@@ -124,15 +299,16 @@ def test_refunds_wait_for_fee_float(client, make_event, attendee):
     ev, admin, door = created["event"], created["admin_token"], created["door_token"]
     a = attendee(ev["id"])
     pay(client, ev, a.memo())
-    client.post(f"/events/{ev['id']}/door/checkin", json={"ticket_hash": a.hash}, headers=auth(door))
+    checkin(client, ev, door, a)
     # 100% attendance and no float: the fee cannot be covered yet.
     r = client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
     assert r.json()["status"] == "settling"
-    view = client.get(f"/events/{ev['id']}/admin", headers=auth(admin)).json()
-    assert view["payouts"][0]["status"] == "queued"
-    assert "insufficient" in view["payouts"][0]["error"].lower()
+    (p,) = admin_view(client, ev, admin)["payouts"]
+    assert p["status"] == "queued" and "insufficient" in p["error"].lower()
     pay(client, ev, b"top-up", 100_000)
-    assert client.get(f"/events/{ev['id']}").json()["status"] == "settled"
+    advance(client, 5)
+    assert status(client, ev["id"]) == "settled"
+    assert refunds_to(client, a.refund_address) == [ev["deposit_zat"]]
 
 
 def test_tokens_are_scoped(client, make_event):
@@ -156,48 +332,91 @@ def test_offline_door_sync(client, make_event, attendee):
 
 
 def test_create_validation(client):
-    bad = {"title": "x", "starts_at": "soon", "capacity": 0, "deposit_zat": 500_000}
+    bad = {"title": "x", "starts_at": "2026-10-30T18:00:00Z", "capacity": 0, "deposit_zat": 500_000}
     assert client.post("/events", json=bad).status_code == 422
-    bad = {"title": "x", "starts_at": "soon", "capacity": 5, "deposit_zat": 500_000,
+    bad = {"title": "x", "starts_at": "2026-10-30T18:00:00Z", "capacity": 5, "deposit_zat": 500_000,
            "forfeit_address": "t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs"}
     assert client.post("/events", json=bad).json()["error"] == "bad_address"
 
 
-def test_refund_address_without_orchard_is_not_accepted(client, make_event, attendee):
-    from unlisted.chain.sim import random_unified_address
+def test_event_creation_is_rate_limited(tmp_path, chain):
+    from fastapi.testclient import TestClient
 
+    from unlisted.app import create_app
+    from unlisted.config import Settings
+
+    settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/r.db", run_scanner=False,
+                        secret="s", create_per_hour=2)
+    with TestClient(create_app(settings, chain)) as c:
+        body = {"title": "x", "starts_at": "2026-10-30T18:00:00Z", "capacity": 5, "deposit_zat": 500_000}
+        assert [c.post("/events", json=body).status_code for _ in range(3)] == [201, 201, 429]
+
+
+def test_chain_mode_must_be_explicit():
+    from unlisted.chain import make_chain
+    from unlisted.config import Settings
+
+    with pytest.raises(ValueError):
+        make_chain(Settings(chain_mode=""))
+
+
+def test_one_process_per_database(tmp_path, chain):
+    from unlisted.app import create_app
+    from unlisted.config import Settings
+
+    settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/w.db", run_scanner=False, secret="s")
+    first = create_app(settings, chain)
+    with pytest.raises(RuntimeError, match="Another Unlisted API process"):
+        create_app(settings, chain)
+    first.state.writer_lock.release()
+    create_app(settings, chain).state.writer_lock.release()
+
+
+def test_refund_address_without_orchard_is_reported(client, make_event, attendee):
     ev = make_event()["event"]
     a = attendee(ev["id"])
     a.refund_address = random_unified_address(orchard=False, sapling=True)
     pay(client, ev, a.memo())
     t = tickets(client, ev["id"])
-    assert t["tickets"] == [] and t["rejected"] == []
-    with client.engine.sessions() as db:
-        (dep,) = db.query(Deposit).filter(Deposit.event_id == ev["id"]).all()
-        assert dep.reason == "bad_refund_address"
+    assert t["tickets"] == []
+    # The attendee can see why nothing happened.
+    assert t["rejected"] == [{"h": a.hash, "reason": "bad_refund_address"}]
 
 
 def test_async_shortfall_waits_for_top_up(client, make_event, attendee):
-    """A wallet that reports insufficient funds only when the op runs (like zcashd/unlisted-wallet)."""
+    """The wallet reports insufficient funds only when the operation runs."""
     from unlisted.chain.base import OpStatus
 
     created = make_event()
     ev, admin, door = created["event"], created["admin_token"], created["door_token"]
     a = attendee(ev["id"])
     pay(client, ev, a.memo())
-    client.post(f"/events/{ev['id']}/door/checkin", json={"ticket_hash": a.hash}, headers=auth(door))
+    checkin(client, ev, door, a)
     real_status = client.chain.op_status
     client.chain.op_status = lambda opid: OpStatus("failed", error="Insufficient balance (have 0, need 510000)")
-    for _ in range(MAX_POLLS):
-        client.post(f"/events/{ev['id']}/admin/settle" if _ == 0 else f"/events/{ev['id']}/admin/scan", headers=auth(admin))
-    view = client.get(f"/events/{ev['id']}/admin", headers=auth(admin)).json()
-    assert view["payouts"][0]["status"] == "queued"
+    client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
+    for _ in range(8):
+        client.post(f"/events/{ev['id']}/admin/scan", headers=auth(admin))
+    assert admin_view(client, ev, admin)["payouts"][0]["status"] == "queued"
     client.chain.op_status = real_status
     pay(client, ev, b"top-up", 100_000)
-    assert client.get(f"/events/{ev['id']}").json()["status"] == "settled"
+    advance(client, 5)
+    assert status(client, ev["id"]) == "settled"
 
 
-MAX_POLLS = 8
+def test_settled_events_are_scanned_less_often(client, make_event, attendee):
+    created = make_event()
+    ev, admin = created["event"], created["admin_token"]
+    settle(client, ev, admin)
+    late = attendee(ev["id"])
+    client.chain.pay(ev["address"], ev["deposit_zat"], late.memo())
+    client.engine._cycle = 0
+    client.engine.scan_once()
+    assert tickets(client, ev["id"])["rejected"] == []
+    for _ in range(8):
+        client.engine.scan_once()
+    # A late payment to a settled event is still returned.
+    assert tickets(client, ev["id"])["rejected"][0]["reason"] == "rsvps_closed"
 
 
 def test_meta_reports_wallet_tip(client):
@@ -209,8 +428,24 @@ def test_one_broken_event_does_not_stop_scanning(client, make_event, attendee):
     broken = make_event()["event"]
     ok = make_event()["event"]
     # Simulate an event whose wallet account has gone missing.
-    del client.chain._accounts[client.engine.sessions().get(__import__("unlisted.db", fromlist=["Event"]).Event, broken["id"]).account_ref]
+    del client.chain._accounts[client.engine.sessions().get(Event, broken["id"]).account_ref]
     a = attendee(ok["id"])
     client.chain.pay(ok["address"], ok["deposit_zat"], a.memo())
-    client.engine.scan_once()
+    client.engine.scan_once(full=True)
     assert [t["h"] for t in tickets(client, ok["id"])["tickets"]] == [a.hash]
+
+
+def test_old_database_gains_new_columns(tmp_path):
+    import sqlite3
+
+    from unlisted.db import init_db, make_engine
+
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE payouts (id INTEGER PRIMARY KEY, event_id VARCHAR(10), kind VARCHAR(10), "
+                "recipients JSON, status VARCHAR(10), opid VARCHAR(80), txid VARCHAR(64), error TEXT, attempts INTEGER)")
+    con.commit()
+    con.close()
+    init_db(make_engine(f"sqlite:///{path}"))
+    cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(payouts)")}
+    assert {"key", "polls"} <= cols

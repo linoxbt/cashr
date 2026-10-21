@@ -1,7 +1,10 @@
 """Event lifecycle: ingest deposits, check in, settle, purge.
 
-All state changes go through here, under one lock, so the background scanner
-and API requests never race on an event's counters.
+All database changes go through here, under one lock, so the background
+scanner and API requests never race on an event's counters. Wallet calls are
+made *outside* the lock (they can be slow), and their results are applied
+only if the payout has not moved on meanwhile. Sends carry an idempotency key,
+so two processes submitting the same payout produce one transaction.
 """
 
 from __future__ import annotations
@@ -12,13 +15,15 @@ import logging
 import secrets
 import string
 import threading
-from dataclasses import dataclass
+import time
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from .chain import Chain, ChainError, Recipient
+from .chain import Balance, Chain, ChainError, Recipient
 from .codec import is_orchard_address, try_decode_memo
 from .config import Settings
 from .db import Deposit, Event, Payout, Rsvp, SeenAddress
@@ -27,8 +32,16 @@ log = logging.getLogger("unlisted.engine")
 
 ACTIVE = ("open", "closed", "settling", "settled")
 DOOR_OPEN = ("open", "closed")
+IN_FLIGHT = ("queued", "submitted", "broadcast")
 MAX_ATTEMPTS = 5
-ZIP317_MARGINAL_ZAT = 5_000
+# Notes this far below the last ingested block are re-read on every scan, so a
+# small reorg cannot hide a deposit.
+REORG_MARGIN = 100
+# A pending transaction is rebroadcast every this many polls (~5 min at 15 s).
+REBROADCAST_EVERY = 20
+# Settled events are scanned (for late payments to return) every Nth cycle.
+SLOW_SCAN_EVERY = 8
+BALANCE_TTL_S = 10.0
 
 _ID_ALPHABET = string.ascii_lowercase + string.digits
 
@@ -45,6 +58,17 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def accepting_rsvps(ev: Event, now: datetime | None = None) -> bool:
+    if ev.status != "open":
+        return False
+    closes = ev.rsvp_closes_at
+    if closes is None:
+        return True
+    if closes.tzinfo is None:
+        closes = closes.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) <= closes
+
+
 class EngineError(Exception):
     def __init__(self, code: str, message: str, status: int = 400):
         super().__init__(message)
@@ -59,12 +83,29 @@ class CreatedEvent:
     door_token: str
 
 
+@dataclass
+class _Snapshot:
+    """What a payout looked like when the wallet call for it was planned."""
+
+    id: int
+    kind: str
+    status: str
+    key: str
+    opid: str
+    txid: str
+    polls: int
+    recipients: list = field(default_factory=list)
+
+
 class Engine:
     def __init__(self, settings: Settings, chain: Chain, sessions: sessionmaker):
         self.settings = settings
         self.chain = chain
         self.sessions = sessions
         self.lock = threading.RLock()
+        self._created: deque[float] = deque()
+        self._balances: dict[str, tuple[float, Balance]] = {}
+        self._cycle = 0
 
     # ---- helpers --------------------------------------------------------
     def _address_digest(self, address: str) -> str:
@@ -83,12 +124,35 @@ class Engine:
             raise EngineError("forbidden", "That link is not valid for this event.", 403)
         return ev
 
+    def balance(self, ev: Event, fresh: bool = False) -> Balance:
+        """The event wallet's balance, cached briefly so dashboards don't hammer the wallet."""
+        hit = self._balances.get(ev.id)
+        if hit and not fresh and time.monotonic() - hit[0] < BALANCE_TTL_S:
+            return hit[1]
+        bal = self.chain.balance(ev.account_ref)
+        self._balances[ev.id] = (time.monotonic(), bal)
+        return bal
+
     # ---- creation -------------------------------------------------------
+    def _check_capacity(self) -> None:
+        now = time.monotonic()
+        while self._created and now - self._created[0] > 3600:
+            self._created.popleft()
+        if len(self._created) >= self.settings.create_per_hour:
+            raise EngineError("busy", "This server is creating too many events right now. Try again in a while.", 429)
+        with self.sessions() as db:
+            live = db.scalar(select(func.count()).select_from(Event).where(Event.status != "purged"))
+        if live >= self.settings.max_live_events:
+            raise EngineError("busy", "This server is at its limit of live events. Try again after some are purged.", 429)
+
     def create_event(self, *, title: str, starts_at: str, location: str, details: str,
                      capacity: int, deposit_zat: int, rsvp_closes_at: datetime | None,
                      forfeit_address: str) -> CreatedEvent:
         if forfeit_address and not is_orchard_address(forfeit_address, self.settings.network):
             raise EngineError("bad_address", "The no-show fund address must be a Unified Address with an Orchard receiver.")
+        with self.lock:
+            self._check_capacity()
+            self._created.append(time.monotonic())
         account_ref, address = self.chain.new_event_account()
         admin, door = new_token(), new_token()
         with self.lock, self.sessions() as db:
@@ -98,16 +162,22 @@ class Engine:
                 rsvp_closes_at=rsvp_closes_at, forfeit_address=forfeit_address,
                 account_ref=account_ref, address=address,
                 admin_token_hash=token_hash(admin), door_token_hash=token_hash(door),
+                scan_height=self.chain.tip_height(),
             )
             db.add(ev)
             db.commit()
             return CreatedEvent(ev, admin, door)
 
     # ---- ingestion ------------------------------------------------------
-    def scan_once(self) -> None:
+    def scan_once(self, full: bool = False) -> None:
+        self._cycle += 1
+        slow_turn = full or self._cycle % SLOW_SCAN_EVERY == 0
         with self.sessions() as db:
-            ids = db.scalars(select(Event.id).where(Event.status.in_(ACTIVE))).all()
-        for event_id in ids:
+            busy = set(db.scalars(select(Payout.event_id).where(Payout.status.in_(IN_FLIGHT))))
+            rows = db.execute(select(Event.id, Event.status).where(Event.status.in_(ACTIVE))).all()
+        for event_id, status in rows:
+            if status == "settled" and event_id not in busy and not slow_turn:
+                continue
             # One event failing (wallet hiccup, missing account) must not stop the others.
             try:
                 self.scan_event(event_id)
@@ -120,9 +190,12 @@ class Engine:
         with self.sessions() as db:
             ev = self._get_event(db, event_id)
             account_ref, address = ev.account_ref, ev.address
-        notes = self.chain.received(account_ref, address)
+            since = max(0, ev.scan_height - REORG_MARGIN)
+        notes = self.chain.received(account_ref, address, since)
         with self.lock, self.sessions() as db:
             ev = self._get_event(db, event_id)
+            if ev.status not in ACTIVE:
+                return
             known = {
                 (d.txid, d.pool, d.out_index)
                 for d in db.scalars(select(Deposit).where(Deposit.event_id == event_id))
@@ -135,7 +208,10 @@ class Engine:
             )
             for note in fresh:
                 self._ingest(db, ev, note)
+                ev.scan_height = max(ev.scan_height, note.height)
             db.commit()
+        if fresh:
+            self._balances.pop(event_id, None)
         self.process_payouts(event_id)
 
     def _ingest(self, db: Session, ev: Event, note) -> None:
@@ -144,12 +220,14 @@ class Engine:
         db.add(dep)
         memo = try_decode_memo(note.memo)
         if memo is None:
-            # Organiser top-ups (and anything else without our memo) fund fees.
+            # Organiser top-ups, and payments whose memo was lost: they fund fees.
+            dep.reason = "no_memo"
             ev.float_zat += note.amount_zat
             return
         dep.ticket_hash = memo.ticket_hash
         if not is_orchard_address(memo.refund_address, self.settings.network):
-            # Nowhere to return it privately (no Orchard receiver).
+            # Nowhere to return it privately (no Orchard receiver). The
+            # attendee sees this on their ticket; the organiser sees it too.
             dep.reason = "bad_refund_address"
             ev.float_zat += note.amount_zat
             return
@@ -179,10 +257,7 @@ class Engine:
     def _rejection(self, db: Session, ev: Event, memo, amount_zat: int) -> str:
         if memo.event_id != ev.id:
             return "wrong_event"
-        closes = ev.rsvp_closes_at
-        if closes is not None and closes.tzinfo is None:
-            closes = closes.replace(tzinfo=timezone.utc)
-        if ev.status != "open" or (closes is not None and datetime.now(timezone.utc) > closes):
+        if not accepting_rsvps(ev):
             return "rsvps_closed"
         if amount_zat != ev.deposit_zat:
             return "wrong_amount"
@@ -198,93 +273,160 @@ class Engine:
 
     # ---- payouts --------------------------------------------------------
     def process_payouts(self, event_id: str) -> None:
-        # A settlement step can queue the forfeit sweep; run it in the same cycle.
+        # Settlement can queue a sweep; give it a turn in the same cycle.
         for _ in range(3):
-            if not self._process_payouts_once(event_id):
+            self._run_payouts(event_id)
+            if not self._advance_settlement(event_id):
                 return
 
-    def _process_payouts_once(self, event_id: str) -> bool:
-        """Returns True if settlement queued new work."""
+    def _run_payouts(self, event_id: str) -> None:
         with self.lock, self.sessions() as db:
             ev = self._get_event(db, event_id)
-            payouts = db.scalars(
-                select(Payout).where(Payout.event_id == event_id,
-                                     Payout.status.in_(("queued", "submitted")))
-                .order_by(Payout.id)
-            ).all()
-            for p in payouts:
-                if p.status == "submitted":
-                    self._poll(db, ev, p)
-                if p.status == "queued":
-                    self._submit(db, ev, p)
+            account_ref, address = ev.account_ref, ev.address
+            for p in db.scalars(select(Payout).where(Payout.event_id == event_id, Payout.key.is_(None))):
+                p.key = secrets.token_hex(16)  # rows from before keys existed
             db.commit()
-            if ev.status == "settling":
-                queued = self._advance_settlement(db, ev)
-                db.commit()
-                return queued
-            return False
+            snaps = [
+                _Snapshot(p.id, p.kind, p.status, p.key, p.opid, p.txid, p.polls, list(p.recipients))
+                for p in db.scalars(select(Payout).where(Payout.event_id == event_id,
+                                                         Payout.status.in_(IN_FLIGHT))
+                                    .order_by(Payout.id))
+            ]
+        for snap in snaps:
+            # Wallet I/O happens without the lock; door check-ins never wait on it.
+            changes = self._step(account_ref, address, snap)
+            if changes:
+                self._apply(event_id, snap, changes)
 
-    def _submit(self, db: Session, ev: Event, p: Payout) -> None:
-        recipients = [Recipient(r["address"], int(r["amount_zat"]), r["memo"].encode())
-                      for r in p.recipients]
+    def _submit(self, account_ref: str, address: str, snap: _Snapshot) -> str:
+        if snap.kind == "forfeit":
+            r = snap.recipients[0]
+            return self.chain.sweep(account_ref, address, r["address"], r["memo"].encode(), snap.key)
+        recipients = [Recipient(r["address"], int(r["amount_zat"]), r["memo"].encode()) for r in snap.recipients]
+        return self.chain.send(account_ref, address, recipients, snap.key)
+
+    def _step(self, account_ref: str, address: str, snap: _Snapshot) -> dict:
+        """Advance one payout by talking to the wallet. Returns the column changes to apply."""
         try:
-            p.opid = self.chain.send(ev.account_ref, ev.address, recipients)
-            p.status, p.error = "submitted", ""
+            if snap.status == "queued":
+                opid = self._submit(account_ref, address, snap)
+                return self._after_op(snap, opid) | {"opid": opid}
+            if snap.status == "submitted":
+                return self._after_op(snap, snap.opid)
+            return self._after_broadcast(account_ref, address, snap)
         except ChainError as e:
-            p.attempts += 1
-            p.error = str(e)
-            # Shortfalls wait for a top-up rather than failing for good.
-            if "insufficient" not in p.error.lower() and p.attempts >= MAX_ATTEMPTS:
-                p.status = "failed"
-            return
-        self._poll(db, ev, p)
+            # Unreachable, timed out, or refused. Retrying is safe: the key
+            # stops the wallet from building a second transaction.
+            msg = str(e)
+            if "insufficient" in msg.lower():
+                return {"error": msg}
+            attempts = self._attempts(snap) + 1
+            return {"error": msg, "attempts": attempts,
+                    "status": "failed" if attempts >= MAX_ATTEMPTS and snap.status == "queued" else snap.status}
 
-    def _poll(self, db: Session, ev: Event, p: Payout) -> None:
-        st = self.chain.op_status(p.opid)
+    def _attempts(self, snap: _Snapshot) -> int:
+        with self.sessions() as db:
+            return db.get(Payout, snap.id).attempts
+
+    def _after_op(self, snap: _Snapshot, opid: str) -> dict:
+        st = self.chain.op_status(opid)
         if st.state == "pending":
-            return
+            return {"status": "submitted"}
         if st.state == "failed":
-            p.error = st.error
             if "insufficient" in st.error.lower():
-                # Wallets report shortfalls when the send runs, not when it is
-                # submitted. Wait for forfeits or a top-up instead of failing.
-                p.status = "queued"
-                return
-            p.attempts += 1
-            p.status = "failed" if p.attempts >= MAX_ATTEMPTS else "queued"
-            return
-        p.status, p.txid = "done", st.txid
-        if p.kind == "refund":
-            ids = [r["rsvp_id"] for r in p.recipients]
-            for rsvp in db.scalars(select(Rsvp).where(Rsvp.id.in_(ids))):
-                rsvp.status = "refunded"
-            ev.refunded_zat += sum(int(r["amount_zat"]) for r in p.recipients)
+                # Wallets report shortfalls when the send runs. Wait for
+                # forfeits or a top-up instead of failing.
+                return {"status": "queued", "error": st.error}
+            if "unknown" in st.error.lower():
+                # The wallet keeps operations on disk, so this means its data
+                # was lost or replaced. It may already have paid: stop and let
+                # a person check before anything is sent again.
+                return {"status": "failed", "error": "The wallet has no record of this payout. Check the event "
+                        "wallet's history before retrying, or it could be paid twice."}
+            attempts = self._attempts(snap) + 1
+            return {"status": "failed" if attempts >= MAX_ATTEMPTS else "queued",
+                    "error": st.error, "attempts": attempts}
+        changes = {"status": "broadcast", "txid": st.txid, "error": "", "polls": 0}
+        if st.amount_zat is not None and snap.kind == "forfeit":
+            changes["sweep_amount"] = st.amount_zat
+        return changes
 
-    def _advance_settlement(self, db: Session, ev: Event) -> bool:
-        """Move a settling event forward. Returns True if it queued the sweep."""
-        # Wait for every refund, and for any failure to be retried by the organiser.
-        unfinished = db.scalar(select(Payout.id).where(
-            Payout.event_id == ev.id, Payout.status.in_(("queued", "submitted", "failed"))))
-        if unfinished is not None:
-            return False
-        has_sweep = db.scalar(select(Payout.id).where(Payout.event_id == ev.id,
-                                                      Payout.kind == "forfeit"))
-        if ev.forfeit_address and has_sweep is None:
-            n_notes = db.query(Deposit).filter(Deposit.event_id == ev.id).count()
-            reserve = ZIP317_MARGINAL_ZAT * max(2, n_notes + 2)
-            try:
-                amount = self.chain.spendable_zat(ev.account_ref) - reserve
-            except ChainError as e:
-                log.warning("sweep %s: %s", ev.id, e)
+    def _after_broadcast(self, account_ref: str, address: str, snap: _Snapshot) -> dict:
+        tx = self.chain.tx_status(snap.txid)
+        if tx.state == "mined" and tx.confirmations >= self.settings.payout_conf:
+            return {"status": "done", "error": ""}
+        if tx.state == "expired":
+            # It can never be mined now, and its notes are spendable again.
+            # Resubmitting the same key makes the wallet build a fresh one.
+            return {"status": "queued", "error": f"Transaction {snap.txid[:10]}… expired unmined; sending again."}
+        polls = snap.polls + 1
+        if tx.state == "pending" and polls % REBROADCAST_EVERY == 0:
+            self._submit(account_ref, address, snap)  # same key: a rebroadcast, never a new send
+        return {"polls": polls}
+
+    def _apply(self, event_id: str, snap: _Snapshot, changes: dict) -> None:
+        with self.lock, self.sessions() as db:
+            p = db.get(Payout, snap.id)
+            # Another worker got there first; its result stands.
+            if p is None or p.status != snap.status or p.opid != snap.opid:
+                return
+            ev = self._get_event(db, event_id)
+            sweep_amount = changes.pop("sweep_amount", None)
+            if sweep_amount is not None:
+                rec = dict(p.recipients[0], amount_zat=sweep_amount)
+                p.recipients = [rec]
+            for k, v in changes.items():
+                setattr(p, k, v)
+            if changes.get("status") == "done":
+                total = sum(int(r["amount_zat"]) for r in p.recipients)
+                if p.kind == "refund":
+                    ids = [r["rsvp_id"] for r in p.recipients]
+                    for rsvp in db.scalars(select(Rsvp).where(Rsvp.id.in_(ids))):
+                        rsvp.status = "refunded"
+                    ev.refunded_zat += total
+                elif p.kind == "forfeit":
+                    ev.swept_zat += total
+                self._balances.pop(event_id, None)
+            db.commit()
+
+    def _advance_settlement(self, event_id: str) -> bool:
+        """Move a settling event forward. Returns True if it queued a sweep."""
+        with self.sessions() as db:
+            ev = self._get_event(db, event_id)
+            if ev.status != "settling":
                 return False
-            if amount > 0:
-                db.add(Payout(event_id=ev.id, kind="forfeit", recipients=[{
-                    "address": ev.forfeit_address, "amount_zat": amount,
-                    "memo": f"Unlisted: no-show deposits from '{ev.title}'.", "rsvp_id": None,
-                }]))
-                return True
-        ev.status = "settled"
-        return False
+            # Wait for every payout to be confirmed, and for failures to be retried by the organiser.
+            unfinished = db.scalar(select(Payout.id).where(
+                Payout.event_id == ev.id, Payout.status.in_(IN_FLIGHT + ("failed",))))
+            if unfinished is not None:
+                return False
+            fund = ev.forfeit_address
+            try:
+                bal = self.balance(ev, fresh=True) if fund else None
+            except ChainError as e:
+                log.warning("settle %s: %s", ev.id, e)
+                return False
+        with self.lock, self.sessions() as db:
+            ev = self._get_event(db, event_id)
+            if ev.status != "settling" or ev.forfeit_address != fund:
+                return False
+            if db.scalar(select(Payout.id).where(Payout.event_id == ev.id,
+                                                 Payout.status.in_(IN_FLIGHT + ("failed",)))) is not None:
+                return False
+            if fund and bal is not None:
+                if bal.pending_zat > 0:
+                    # Change from refunds (or a late payment) is still confirming.
+                    return False
+                if bal.spendable_zat > self.settings.dust_zat:
+                    db.add(Payout(event_id=ev.id, kind="forfeit", recipients=[{
+                        "address": fund, "amount_zat": bal.spendable_zat,
+                        "memo": f"Unlisted: no-show deposits from '{ev.title}'.", "rsvp_id": None,
+                    }]))
+                    db.commit()
+                    return True
+            ev.status = "settled"
+            db.commit()
+            return False
 
     # ---- organiser actions ----------------------------------------------
     def close(self, db: Session, ev: Event) -> None:
@@ -320,17 +462,59 @@ class Engine:
         failed = db.scalars(select(Payout).where(Payout.event_id == ev.id,
                                                  Payout.status == "failed")).all()
         for p in failed:
+            # Same key: if a transaction for it could still be mined, the
+            # wallet rebroadcasts it instead of paying again.
             p.status, p.attempts = "queued", 0
         return len(failed)
 
-    def purge(self, db: Session, ev: Event) -> None:
-        if ev.status != "settled":
-            raise EngineError("bad_state", "Settle the event before purging it.")
-        for model in (Rsvp, Deposit, Payout):
-            db.query(model).filter(model.event_id == ev.id).delete()
-        ev.location = ""
-        ev.details = ""
-        ev.status = "purged"
+    def set_fund_address(self, db: Session, ev: Event, address: str) -> None:
+        address = address.strip()
+        if ev.status == "purged":
+            raise EngineError("bad_state", "This event has been purged.")
+        if not is_orchard_address(address, self.settings.network):
+            raise EngineError("bad_address", "The no-show fund address must be a Unified Address with an Orchard receiver.")
+        sweeping = db.scalar(select(Payout.id).where(Payout.event_id == ev.id, Payout.kind == "forfeit",
+                                                     Payout.status.in_(IN_FLIGHT)))
+        if sweeping is not None:
+            raise EngineError("bad_state", "A sweep to the current fund address is in progress.")
+        ev.forfeit_address = address
+        if ev.status == "settled":
+            # Sweep what was kept in the event wallet.
+            ev.status = "settling"
+
+    def purge(self, ev_id: str) -> None:
+        """Delete everything about the event, including its wallet keys.
+
+        Refuses while money is still in the event wallet: deleting the keys
+        would destroy it.
+        """
+        with self.sessions() as db:
+            ev = self._get_event(db, ev_id)
+            if ev.status != "settled":
+                raise EngineError("bad_state", "Settle the event before purging it.")
+            account_ref = ev.account_ref
+        bal = self.balance(ev, fresh=True)
+        if bal.total_zat > self.settings.dust_zat:
+            raise EngineError(
+                "funds_left",
+                f"{bal.total_zat / 1e8:.8f} ZEC is still in the event wallet. Set a no-show fund address so it "
+                "can be swept there before purging; purging destroys the wallet keys.",
+                409,
+            )
+        with self.lock, self.sessions() as db:
+            ev = self._get_event(db, ev_id)
+            if ev.status != "settled":
+                raise EngineError("bad_state", "Settle the event before purging it.")
+            # Keys first: if the wallet refuses, nothing is deleted here either.
+            self.chain.delete_account(account_ref)
+            for model in (Rsvp, Deposit, Payout):
+                db.query(model).filter(model.event_id == ev.id).delete()
+            ev.location = ""
+            ev.details = ""
+            ev.forfeit_address = ""
+            ev.status = "purged"
+            db.commit()
+        self._balances.pop(ev_id, None)
 
     # ---- door -----------------------------------------------------------
     def check_in(self, db: Session, ev: Event, ticket_hash: str) -> tuple[str, int | None]:

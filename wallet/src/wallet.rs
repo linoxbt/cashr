@@ -1,7 +1,7 @@
-//! The wallet: one seed, one ZIP 32 account per Unlisted event.
+//! The wallet: one account per Unlisted event, each from its own seed.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::BTreeSet,
     path::PathBuf,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -9,9 +9,9 @@ use std::{
     },
 };
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, bail};
 use rand::rngs::OsRng;
-use secrecy::{ExposeSecret, SecretVec};
+use secrecy::ExposeSecret;
 use tokio::sync::Mutex;
 use tonic::Code;
 use tracing::{info, warn};
@@ -20,16 +20,17 @@ use zcash_client_backend::{
     data_api::{
         wallet::{
             create_proposed_transactions, decrypt_and_store_transaction,
-            input_selection::{GreedyInputSelector, SpendPolicy},
-            propose_transfer, ConfirmationsPolicy, SpendingKeys,
+            input_selection::{GreedyInputSelector, LockedInputPolicy, SpendPolicy},
+            propose_send_max_transfer, propose_transfer, ConfirmationsPolicy, SpendingKeys,
         },
-        Account as _, AccountBirthday, TransactionDataRequest, TransactionStatus, WalletRead,
+        AccountBirthday, MaxSpendMode, TransactionDataRequest, TransactionStatus, WalletRead,
         WalletWrite,
     },
     fees::{zip317::SingleOutputChangeStrategy, DustOutputPolicy, StandardFeeRule},
     proto::service::{BlockId, ChainSpec, RawTransaction, TxFilter},
     wallet::OvkPolicy,
 };
+use rusqlite::OptionalExtension;
 use zcash_client_sqlite::{util::SystemClock, AccountUuid, WalletDb};
 use zcash_keys::{
     address::{Address, UnifiedAddress},
@@ -47,16 +48,38 @@ use zip321::{Payment, TransactionRequest};
 
 use crate::{
     cache::MemBlockCache,
+    keys::SeedStore,
     lightwalletd::{Client, Endpoint},
+    ops::{Op, OpStore},
 };
+
+/// The wallet refuses to delete an account holding more than this.
+pub const DELETE_MAX_ZAT: u64 = 20_000;
 
 pub type Db = WalletDb<rusqlite::Connection, Network, SystemClock, OsRng>;
 
 #[derive(Clone, Debug)]
 pub enum OpState {
     Executing,
-    Success(String),
+    /// Built and broadcast at least once (not necessarily mined).
+    Success { txid: String, amount: Option<u64> },
+    /// Nothing was broadcast.
     Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TxState {
+    Mined { confirmations: u32 },
+    /// Not mined yet, and can still be.
+    Pending,
+    /// Not mined, and past its expiry height: it can never be mined.
+    Expired,
+}
+
+pub enum SendKind {
+    Transfer(TransactionRequest),
+    /// Everything spendable, minus the fee, to one address.
+    Sweep { to: ZcashAddress, memo: MemoBytes },
 }
 
 #[derive(Clone, Debug)]
@@ -95,37 +118,62 @@ pub struct ReceivedOutput {
 
 pub struct Wallet {
     pub params: Network,
+    /// The writer: sync, account creation, building transactions.
     db: Mutex<Db>,
     db_path: PathBuf,
-    seed: SecretVec<u8>,
+    seeds: SeedStore,
+    ops: OpStore,
+    /// Serialises the idempotency check-and-set in `submit`.
+    submit_lock: std::sync::Mutex<()>,
     cache: MemBlockCache,
     endpoint: Endpoint,
     client: Mutex<Option<Client>>,
-    ops: std::sync::Mutex<HashMap<String, OpState>>,
     tip: AtomicU32,
     scanned: AtomicU32,
     prover: LocalTxProver,
 }
 
 impl Wallet {
-    pub fn open(params: Network, db_path: PathBuf, seed: SecretVec<u8>, endpoint: Endpoint) -> anyhow::Result<Arc<Self>> {
+    pub fn open(params: Network, data_dir: &std::path::Path, seed_key_hex: &str, endpoint: Endpoint) -> anyhow::Result<Arc<Self>> {
+        let db_path = data_dir.join("wallet.sqlite");
         let mut db = WalletDb::for_path(&db_path, params, SystemClock, OsRng)?;
-        zcash_client_sqlite::wallet::init::init_wallet_db(&mut db, Some(SecretVec::new(seed.expose_secret().clone())))
+        zcash_client_sqlite::wallet::init::init_wallet_db(&mut db, None)
             .map_err(|e| anyhow!("wallet database migration failed: {e:?}"))?;
         let tip = db.chain_height()?.map(u32::from).unwrap_or(0);
+        let scanned = db.block_fully_scanned()?.map(|m| u32::from(m.block_height())).unwrap_or(0);
+        let seeds = SeedStore::open(&data_dir.join("seeds"), seed_key_hex)?;
+        let ops = OpStore::open(&data_dir.join("ops.sqlite"))?;
+        ops.prune(30)?;
         Ok(Arc::new(Self {
             params,
             db: Mutex::new(db),
             db_path,
-            seed,
+            seeds,
+            ops,
+            submit_lock: Default::default(),
             cache: MemBlockCache::default(),
             endpoint,
             client: Mutex::new(None),
-            ops: Default::default(),
             tip: AtomicU32::new(tip),
-            scanned: AtomicU32::new(0),
+            scanned: AtomicU32::new(scanned),
             prover: LocalTxProver::bundled(),
         }))
+    }
+
+    /// A separate connection for reads, so RPC calls never wait for a sync
+    /// (which holds the writer for whole batches) to finish.
+    fn reader(&self) -> anyhow::Result<Db> {
+        Ok(WalletDb::for_path(&self.db_path, self.params, SystemClock, OsRng)?)
+    }
+
+    fn read_conn(&self) -> anyhow::Result<rusqlite::Connection> {
+        let conn = rusqlite::Connection::open_with_flags(&self.db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        Ok(conn)
+    }
+
+    pub fn parse_account(account: &str) -> anyhow::Result<AccountUuid> {
+        Ok(AccountUuid::from_uuid(uuid::Uuid::parse_str(account).map_err(|_| anyhow!("account must be a UUID"))?))
     }
 
     async fn client(&self) -> anyhow::Result<Client> {
@@ -233,9 +281,9 @@ impl Wallet {
 
     // ---- accounts -----------------------------------------------------------
 
-    /// Create a fresh account whose birthday is the current tip, so it never
-    /// scans history. Returns its ZIP 32 account index.
-    pub async fn new_account(&self) -> anyhow::Result<u32> {
+    /// Create a fresh account, from a fresh seed, whose birthday is the
+    /// current tip so it never scans history. Returns the account's UUID.
+    pub async fn new_account(&self) -> anyhow::Result<String> {
         let mut client = self.client().await?;
         let latest = client.get_latest_block(ChainSpec::default()).await?.into_inner();
         let treestate = client
@@ -244,49 +292,47 @@ impl Wallet {
             .into_inner();
         let birthday = AccountBirthday::from_treestate(treestate, None)
             .map_err(|e| anyhow!("bad tree state from lightwalletd: {e:?}"))?;
+        let seed = SeedStore::generate();
+        // The seed is on disk before the account exists, so funds sent to the
+        // account can always be spent.
+        let staged = self.seeds.stage(&seed)?;
         let mut db = self.db.lock().await;
-        let name = format!("unlisted-{}", db.get_account_ids()?.len());
-        let (uuid, _) = db.create_account(&name, &self.seed, &birthday, None)?;
-        let index = Self::index_of(&db, uuid)?;
-        info!(account = index, birthday = latest.height, "created account");
-        Ok(index)
-    }
-
-    fn index_of(db: &Db, uuid: AccountUuid) -> anyhow::Result<u32> {
-        let account = db.get_account(uuid)?.ok_or_else(|| anyhow!("account vanished"))?;
-        let derivation = account
-            .source()
-            .key_derivation()
-            .ok_or_else(|| anyhow!("account is not derived from the wallet seed"))?;
-        Ok(u32::from(derivation.account_index()))
-    }
-
-    fn uuid_of(db: &Db, index: u32) -> anyhow::Result<AccountUuid> {
-        for id in db.get_account_ids()? {
-            if Self::index_of(db, id).ok() == Some(index) {
-                return Ok(id);
+        let created = db.create_account("unlisted-event", &seed, &birthday, None);
+        let (uuid, _) = match created {
+            Ok(v) => v,
+            Err(e) => {
+                self.seeds.discard(&staged);
+                return Err(e.into());
             }
-        }
-        bail!("no account with index {index}")
+        };
+        let account = uuid.expose_uuid().to_string();
+        self.seeds.commit(&staged, &account)?;
+        info!(%account, birthday = latest.height, "created account");
+        Ok(account)
     }
 
-    pub async fn address_for(&self, index: u32, orchard: bool, sapling: bool) -> anyhow::Result<String> {
+    pub async fn address_for(&self, account: &str, orchard: bool, sapling: bool) -> anyhow::Result<String> {
         let req = |on: bool| if on { ReceiverRequirement::Require } else { ReceiverRequirement::Omit };
         let request = UnifiedAddressRequest::Custom(
             ReceiverRequirements::new(req(orchard), req(sapling), ReceiverRequirement::Omit)
                 .map_err(|_| anyhow!("a unified address needs a shielded receiver"))?,
         );
+        let uuid = Self::parse_account(account)?;
         let mut db = self.db.lock().await;
-        let uuid = Self::uuid_of(&db, index)?;
         let (ua, _) = db
             .get_next_available_address(uuid, request)?
             .ok_or_else(|| anyhow!("no address available"))?;
         Ok(ua.encode(&self.params))
     }
 
-    pub async fn spendable(&self, index: u32) -> anyhow::Result<(u64, u64)> {
-        let db = self.db.lock().await;
-        let uuid = Self::uuid_of(&db, index)?;
+    /// (spendable, pending) zatoshis. Pending is received or change value
+    /// still waiting for confirmations.
+    pub fn balance(&self, account: &str) -> anyhow::Result<(u64, u64)> {
+        let uuid = Self::parse_account(account)?;
+        let db = self.reader()?;
+        if !db.get_account_ids()?.contains(&uuid) {
+            bail!("no account {account}");
+        }
         let Some(summary) = db.get_wallet_summary(ConfirmationsPolicy::default())? else {
             return Ok((0, 0));
         };
@@ -294,10 +340,13 @@ impl Wallet {
             .account_balances()
             .get(&uuid)
             .map(|b| {
-                (
-                    b.orchard_balance().spendable_value().into_u64(),
-                    b.sapling_balance().spendable_value().into_u64(),
-                )
+                let pools = [b.orchard_balance(), b.sapling_balance()];
+                let spendable = pools.iter().map(|p| p.spendable_value().into_u64()).sum();
+                let pending = pools
+                    .iter()
+                    .map(|p| p.change_pending_confirmation().into_u64() + p.value_pending_spendability().into_u64())
+                    .sum();
+                (spendable, pending)
             })
             .unwrap_or((0, 0)))
     }
@@ -305,16 +354,18 @@ impl Wallet {
     /// Every non-change output received at `address` whose memo is known.
     /// Outputs found by compact scanning wait here until their full
     /// transaction has been fetched, so a caller never sees a memo-less note.
-    pub fn received_at(&self, address: &str) -> anyhow::Result<Vec<ReceivedOutput>> {
-        let conn = rusqlite::Connection::open_with_flags(&self.db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    /// Mined at or after `since` (or not mined yet).
+    pub fn received_at(&self, address: &str, since: u32) -> anyhow::Result<Vec<ReceivedOutput>> {
+        let conn = self.read_conn()?;
         let mut stmt = conn.prepare(
             "SELECT t.txid, t.mined_height, ro.pool, ro.output_index, ro.value, ro.memo
              FROM v_received_outputs ro
              JOIN transactions t ON t.id_tx = ro.transaction_id
              JOIN addresses a ON a.id = ro.address_id
-             WHERE a.address = ?1 AND ro.is_change = 0 AND ro.memo IS NOT NULL",
+             WHERE a.address = ?1 AND ro.is_change = 0 AND ro.memo IS NOT NULL
+               AND (t.mined_height IS NULL OR t.mined_height >= ?2)",
         )?;
-        let rows = stmt.query_map([address], |row| {
+        let rows = stmt.query_map(rusqlite::params![address, since], |row| {
             let txid: Vec<u8> = row.get(0)?;
             Ok((txid, row.get::<_, Option<u32>>(1)?, row.get::<_, i64>(2)?, row.get::<_, u32>(3)?,
                 row.get::<_, i64>(4)?, row.get::<_, Vec<u8>>(5)?))
@@ -335,52 +386,161 @@ impl Wallet {
         Ok(out)
     }
 
-    pub async fn account_for_address(&self, address: &str) -> anyhow::Result<u32> {
-        let conn = rusqlite::Connection::open_with_flags(&self.db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let uuid: Vec<u8> = conn
+    pub fn account_for_address(&self, address: &str) -> anyhow::Result<String> {
+        let conn = self.read_conn()?;
+        let uuid: Option<Vec<u8>> = conn
             .query_row(
                 "SELECT acc.uuid FROM addresses ad JOIN accounts acc ON acc.id = ad.account_id WHERE ad.address = ?1",
                 [address],
                 |r| r.get(0),
             )
-            .context("from address does not belong to this wallet")?;
-        let uuid = uuid::Uuid::from_slice(&uuid)?;
-        let db = self.db.lock().await;
-        Self::index_of(&db, AccountUuid::from_uuid(uuid))
+            .optional()?;
+        let uuid = uuid.ok_or_else(|| anyhow!("from address does not belong to this wallet"))?;
+        Ok(uuid::Uuid::from_slice(&uuid)?.to_string())
+    }
+
+    /// Where a transaction this wallet built stands on chain.
+    pub fn tx_state(&self, txid: &str) -> anyhow::Result<Option<TxState>> {
+        let id = TxId::from_hex(txid).ok_or_else(|| anyhow!("bad txid"))?;
+        let conn = self.read_conn()?;
+        let row: Option<(Option<u32>, Option<u32>)> = conn
+            .query_row(
+                "SELECT mined_height, expiry_height FROM transactions WHERE txid = ?1",
+                [id.as_ref().to_vec()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(mined, expiry)| match (mined, expiry) {
+            (Some(h), _) => TxState::Mined { confirmations: self.confirmations(Some(h)) },
+            // Expired once every block up to its expiry height has been scanned without it.
+            (None, Some(e)) if e != 0 && self.scanned() > e => TxState::Expired,
+            _ => TxState::Pending,
+        }))
+    }
+
+    /// Delete an event's account, its transactions and memos, and its seed.
+    pub async fn delete_account(&self, account: &str) -> anyhow::Result<()> {
+        let uuid = Self::parse_account(account)?;
+        let (spendable, pending) = self.balance(account)?;
+        if spendable + pending > DELETE_MAX_ZAT {
+            bail!("account still holds {} zatoshis; sweep it before deleting", spendable + pending);
+        }
+        {
+            let mut db = self.db.lock().await;
+            db.delete_account(uuid)?;
+        }
+        self.seeds.delete(account)?;
+        self.ops.delete_account(account)?;
+        info!(%account, "deleted account and its seed");
+        Ok(())
     }
 
     // ---- sending ------------------------------------------------------------
 
-    pub fn op_status(&self, opid: &str) -> Option<OpState> {
-        self.ops.lock().unwrap().get(opid).cloned()
+    pub fn op_status(&self, opid: &str) -> anyhow::Result<Option<OpState>> {
+        Ok(self.ops.get(opid)?.map(|op| match (op.state.as_str(), op.txid) {
+            ("executing", _) => OpState::Executing,
+            // A failed broadcast may still have reached the network: the
+            // caller tracks the transaction rather than assuming nothing was sent.
+            (_, Some(txid)) => OpState::Success { txid, amount: op.amount },
+            _ => OpState::Failed(op.error),
+        }))
     }
 
-    /// Validate synchronously, then build, prove and broadcast in the background.
-    pub fn send(self: &Arc<Self>, from_index: u32, recipients: Vec<Recipient>, policy: PrivacyPolicy) -> anyhow::Result<String> {
+    pub fn transfer_request(&self, recipients: Vec<Recipient>, policy: PrivacyPolicy) -> anyhow::Result<SendKind> {
         let mut payments = Vec::with_capacity(recipients.len());
         for r in &recipients {
             payments.push(Payment::new(self.shielded_target(&r.address, policy)?, Some(r.amount), Some(r.memo.clone()), None, None, vec![])
                 .map_err(|e| anyhow!("invalid payment: {e:?}"))?);
         }
-        let request = TransactionRequest::new(payments).map_err(|e| anyhow!("invalid request: {e:?}"))?;
-        let opid = format!("opid-{}", uuid::Uuid::new_v4());
-        self.ops.lock().unwrap().insert(opid.clone(), OpState::Executing);
+        Ok(SendKind::Transfer(TransactionRequest::new(payments).map_err(|e| anyhow!("invalid request: {e:?}"))?))
+    }
+
+    pub fn sweep_request(&self, to: &str, memo: MemoBytes) -> anyhow::Result<SendKind> {
+        Ok(SendKind::Sweep { to: self.shielded_target(to, PrivacyPolicy::FullPrivacy)?, memo })
+    }
+
+    /// Submit a send under an idempotency key. Never builds a second
+    /// transaction for a key while an earlier one could still be mined:
+    /// a pending one is rebroadcast, a mined one is left alone, and only one
+    /// that failed before broadcast, or expired unmined, is rebuilt.
+    pub fn submit(self: &Arc<Self>, key: &str, account: &str, kind: SendKind) -> anyhow::Result<String> {
+        if key.is_empty() || key.len() > 64 {
+            bail!("an idempotency key of 1-64 characters is required");
+        }
+        let _guard = self.submit_lock.lock().unwrap();
+        let existing = self.ops.by_key(key)?;
+        let opid = match existing {
+            None => {
+                let opid = format!("opid-{}", uuid::Uuid::new_v4());
+                self.ops.insert(&opid, key, account)?;
+                opid
+            }
+            Some(Op { account: ref a, .. }) if a != account => bail!("idempotency key already used by another account"),
+            Some(op) if op.state == "executing" => return Ok(op.opid),
+            Some(Op { opid, txid: Some(txid), .. }) => match self.tx_state(&txid)? {
+                Some(TxState::Mined { .. }) => return Ok(opid),
+                Some(TxState::Pending) => {
+                    let wallet = Arc::clone(self);
+                    let id = opid.clone();
+                    tokio::spawn(async move { wallet.rebroadcast(&id, &txid).await });
+                    return Ok(opid);
+                }
+                Some(TxState::Expired) => {
+                    info!(%txid, "transaction expired unmined; building a replacement");
+                    self.ops.restart(&opid)?;
+                    opid
+                }
+                None => bail!("transaction {txid} for this key is unknown to the wallet; refusing to send again"),
+            },
+            Some(op) => {
+                self.ops.restart(&op.opid)?;
+                op.opid
+            }
+        };
         let wallet = Arc::clone(self);
-        let id = opid.clone();
+        let (id, account) = (opid.clone(), account.to_string());
         tokio::spawn(async move {
-            let state = match wallet.send_inner(from_index, request).await {
+            match wallet.build_and_broadcast(&id, &account, kind).await {
                 Ok(txid) => {
                     info!(%txid, "broadcast");
-                    OpState::Success(txid)
+                    let _ = wallet.ops.finish(&id, "success", "");
                 }
                 Err(e) => {
                     warn!(error = %e, "send failed");
-                    OpState::Failed(e.to_string())
+                    let _ = wallet.ops.finish(&id, "failed", &e.to_string());
                 }
-            };
-            wallet.ops.lock().unwrap().insert(id, state);
+            }
         });
         Ok(opid)
+    }
+
+    async fn rebroadcast(&self, opid: &str, txid: &str) {
+        let result = async {
+            let id = TxId::from_hex(txid).ok_or_else(|| anyhow!("bad txid"))?;
+            let tx = self.reader()?.get_transaction(id)?.ok_or_else(|| anyhow!("transaction not found"))?;
+            let mut raw = RawTransaction::default();
+            tx.write(&mut raw.data)?;
+            self.broadcast(raw).await
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                let _ = self.ops.finish(opid, "success", "");
+            }
+            Err(e) => warn!(%txid, error = %e, "rebroadcast failed"),
+        }
+    }
+
+    async fn broadcast(&self, raw: RawTransaction) -> anyhow::Result<()> {
+        let mut client = self.client().await?;
+        let resp = client.send_transaction(raw).await?.into_inner();
+        let msg = resp.error_message.to_lowercase();
+        // Already known to the node: that is what a rebroadcast hopes for.
+        if resp.error_code != 0 && !msg.contains("already") && !msg.contains("txn-mempool-conflict") {
+            bail!("lightwalletd rejected the transaction ({}): {}", resp.error_code, resp.error_message);
+        }
+        Ok(())
     }
 
     /// Resolve a recipient to the receiver we will actually pay. Under
@@ -407,35 +567,60 @@ impl Wallet {
         }
     }
 
-    async fn send_inner(&self, from_index: u32, request: TransactionRequest) -> anyhow::Result<String> {
-        let raw = {
-            let mut db = self.db.lock().await;
-            let uuid = Self::uuid_of(&db, from_index)?;
-            let usk = UnifiedSpendingKey::from_seed(
-                &self.params,
-                self.seed.expose_secret(),
-                zip32::AccountId::try_from(from_index).map_err(|_| anyhow!("bad account index"))?,
-            )
+    async fn build_and_broadcast(&self, opid: &str, account: &str, kind: SendKind) -> anyhow::Result<String> {
+        let uuid = Self::parse_account(account)?;
+        let seed = self.seeds.load(account)?;
+        let usk = UnifiedSpendingKey::from_seed(&self.params, seed.expose_secret(), zip32::AccountId::ZERO)
             .map_err(|e| anyhow!("key derivation failed: {e:?}"))?;
-            let change = SingleOutputChangeStrategy::new(
-                StandardFeeRule::Zip317,
-                None,
-                ShieldedPool::Orchard,
-                DustOutputPolicy::default(),
-            );
-            let proposal = propose_transfer::<_, _, _, _, std::convert::Infallible>(
-                &mut *db,
-                &self.params,
-                uuid,
-                &GreedyInputSelector::new(),
-                &change,
-                request,
-                ConfirmationsPolicy::default(),
-                &SpendPolicy::default(),
-                None,
-                None,
-            )
-            .map_err(|e| anyhow!("{e}"))?;
+        let (txid, amount, raw) = {
+            let mut db = self.db.lock().await;
+            let proposal = match kind {
+                SendKind::Transfer(request) => {
+                    let change = SingleOutputChangeStrategy::new(
+                        StandardFeeRule::Zip317,
+                        None,
+                        ShieldedPool::Orchard,
+                        DustOutputPolicy::default(),
+                    );
+                    propose_transfer::<_, _, _, _, std::convert::Infallible>(
+                        &mut *db,
+                        &self.params,
+                        uuid,
+                        &GreedyInputSelector::new(),
+                        &change,
+                        request,
+                        ConfirmationsPolicy::default(),
+                        &SpendPolicy::default(),
+                        None,
+                        None,
+                    )
+                    .map_err(|e| anyhow!("{e}"))?
+                }
+                SendKind::Sweep { to, memo } => propose_send_max_transfer::<_, _, _, std::convert::Infallible>(
+                    &mut *db,
+                    &self.params,
+                    uuid,
+                    &[ShieldedPool::Orchard],
+                    &StandardFeeRule::Zip317,
+                    to,
+                    Some(memo),
+                    // Fails while any funds are unconfirmed, so nothing is left behind.
+                    MaxSpendMode::Everything,
+                    ConfirmationsPolicy::default(),
+                    &LockedInputPolicy::default(),
+                    None,
+                )
+                .map_err(|e| anyhow!("{e}"))?,
+            };
+            let amount = proposal
+                .steps()
+                .first()
+                .transaction_request()
+                .total()
+                .ok()
+                .flatten()
+                .map(|z| z.into_u64())
+                .unwrap_or(0);
             // Proving is CPU-bound; keep it off the async workers.
             let txids = tokio::task::block_in_place(|| {
                 create_proposed_transactions::<_, _, std::convert::Infallible, _, std::convert::Infallible, _>(
@@ -456,14 +641,11 @@ impl Wallet {
             let tx = db.get_transaction(*txids.first())?.ok_or_else(|| anyhow!("built transaction not found"))?;
             let mut raw = RawTransaction::default();
             tx.write(&mut raw.data)?;
-            (tx.txid(), raw)
+            (tx.txid(), amount, raw)
         };
-        let (txid, raw) = raw;
-        let mut client = self.client().await?;
-        let resp = client.send_transaction(raw).await?.into_inner();
-        if resp.error_code != 0 {
-            bail!("lightwalletd rejected the transaction ({}): {}", resp.error_code, resp.error_message);
-        }
+        // Recorded before broadcasting: from here on, this key's money may be on its way.
+        self.ops.set_built(opid, &txid.to_string(), amount)?;
+        self.broadcast(raw).await?;
         Ok(txid.to_string())
     }
 

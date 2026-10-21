@@ -1,8 +1,10 @@
-"""Chain adapter for a real wallet speaking the zcashd JSON-RPC dialect.
+"""Chain adapter for unlisted-wallet's JSON-RPC (wallet/).
 
-Works against Zallet (the zcashd wallet successor) or a zcashd wallet. Each
-event gets its own account so its funds, refunds and forfeits never mix with
-another event's.
+The method names follow zcashd where one exists, but the semantics Unlisted
+needs (idempotent sends, sweeps, transaction expiry, account deletion) are
+unlisted-wallet extensions, so this adapter only supports that wallet. Each
+event gets its own account, with its own keys, so funds never mix and an
+event's keys can be destroyed when it is purged.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from decimal import Decimal
 import httpx
 
 from ..codec import ZAT_PER_ZEC, zat_to_zec_str
-from .base import ChainError, OpStatus, ReceivedNote, Recipient
+from .base import Balance, ChainError, OpStatus, ReceivedNote, Recipient, TxStatus
 
 
 def _zat(entry: dict, key: str = "amount") -> int:
@@ -30,7 +32,6 @@ class RpcChain:
         self._ids = itertools.count(1)
         self._policy = privacy_policy
         self._min_conf = min_conf
-        self._has_listreceived: bool | None = None
 
     def _call(self, method: str, *params):
         body = {"jsonrpc": "1.0", "id": next(self._ids), "method": method, "params": list(params)}
@@ -51,51 +52,36 @@ class RpcChain:
         return int(self._call("getblockcount"))
 
     def new_event_account(self) -> tuple[str, str]:
-        account = self._call("z_getnewaccount")["account"]
+        account = str(self._call("z_getnewaccount")["account"])
         # Orchard-only: payers and refunds stay inside one pool, so no
         # cross-pool transfer ever reveals an amount.
         addr = self._call("z_getaddressforaccount", account, ["orchard"])["address"]
-        return str(account), addr
+        return account, addr
 
-    def received(self, account_ref: str, address: str) -> list[ReceivedNote]:
-        tip = self.tip_height()
-        # z_listreceivedbyaddress includes spent notes, so a deposit cannot
-        # vanish from view by being spent in a refund before it is ingested.
-        if self._has_listreceived is not False:
-            try:
-                rows = self._call("z_listreceivedbyaddress", address, 0)
-                self._has_listreceived = True
-            except ChainError as e:
-                if self._has_listreceived is None and "not found" in str(e).lower():
-                    self._has_listreceived = False
-                else:
-                    raise
-        if self._has_listreceived is False:
-            rows = self._call("z_listunspent", 0, 9_999_999, False, [address])
-
+    def received(self, account_ref: str, address: str, since_height: int = 0) -> list[ReceivedNote]:
+        # Includes spent notes, so a deposit cannot vanish from view by being
+        # spent in a refund before it is ingested.
+        rows = self._call("z_listreceivedbyaddress", address, 0, since_height)
         notes = []
         for row in rows:
             if row.get("change"):
                 continue
-            conf = int(row.get("confirmations", 0))
-            height = int(row.get("blockheight") or (tip - conf + 1 if conf > 0 else 0))
-            index = row.get("actionIndex", row.get("outindex", row.get("jsoutindex", 0)))
             notes.append(ReceivedNote(
                 txid=row["txid"],
-                pool=row.get("pool", "orchard" if "actionIndex" in row else "sapling"),
-                out_index=int(index),
+                pool=row["pool"],
+                out_index=int(row.get("actionIndex", row.get("outindex", 0))),
                 amount_zat=_zat(row),
                 memo=bytes.fromhex(row.get("memo", "") or ""),
-                confirmations=conf,
-                height=height,
+                confirmations=int(row.get("confirmations", 0)),
+                height=int(row.get("blockheight") or 0),
             ))
         return notes
 
-    def spendable_zat(self, account_ref: str) -> int:
-        bal = self._call("z_getbalanceforaccount", int(account_ref), self._min_conf)
-        return sum(int(p.get("valueZat", 0)) for p in bal.get("pools", {}).values())
+    def balance(self, account_ref: str) -> Balance:
+        b = self._call("z_getbalanceforaccount", account_ref)
+        return Balance(int(b["spendableZat"]), int(b["pendingZat"]))
 
-    def send(self, account_ref: str, from_address: str, recipients: list[Recipient]) -> str:
+    def send(self, account_ref: str, from_address: str, recipients: list[Recipient], key: str) -> str:
         amounts = [
             {
                 "address": r.address,
@@ -105,7 +91,10 @@ class RpcChain:
             }
             for r in recipients
         ]
-        return self._call("z_sendmany", from_address, amounts, self._min_conf, None, self._policy)
+        return self._call("z_sendmany", from_address, amounts, self._min_conf, None, self._policy, key)
+
+    def sweep(self, account_ref: str, from_address: str, to_address: str, memo: bytes, key: str) -> str:
+        return self._call("z_sweep", from_address, to_address, memo.hex(), key)
 
     def op_status(self, opid: str) -> OpStatus:
         rows = self._call("z_getoperationstatus", [opid])
@@ -113,8 +102,18 @@ class RpcChain:
             return OpStatus("failed", error="operation unknown to wallet")
         row = rows[0]
         status = row.get("status")
+        result = row.get("result") or {}
         if status == "success":
-            return OpStatus("success", txid=row.get("result", {}).get("txid", ""))
+            amount = result.get("amountZat")
+            return OpStatus("success", txid=result.get("txid", ""),
+                            amount_zat=int(amount) if amount is not None else None)
         if status in ("failed", "cancelled"):
-            return OpStatus("failed", error=row.get("error", {}).get("message", status))
+            return OpStatus("failed", error=(row.get("error") or {}).get("message", status))
         return OpStatus("pending")
+
+    def tx_status(self, txid: str) -> TxStatus:
+        r = self._call("gettransaction", txid)
+        return TxStatus(r["status"], int(r.get("confirmations", 0)))
+
+    def delete_account(self, account_ref: str) -> None:
+        self._call("z_deleteaccount", account_ref)

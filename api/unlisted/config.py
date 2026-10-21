@@ -13,9 +13,10 @@ def _int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
-    # "rpc" talks to a real Zcash wallet (Zallet / zcashd JSON-RPC).
-    # "sim" is an in-process simulated chain for tests and local development.
-    chain_mode: str = field(default_factory=lambda: os.environ.get("UNLISTED_CHAIN", "sim"))
+    # "rpc" talks to the real wallet (unlisted-wallet). "sim" is an in-process
+    # simulated chain for tests and local development. No default: a server
+    # that forgot to set it must not quietly accept simulated payments.
+    chain_mode: str = field(default_factory=lambda: os.environ.get("UNLISTED_CHAIN", ""))
     network: str = field(default_factory=lambda: os.environ.get("UNLISTED_NETWORK", "main"))
     database_url: str = field(
         default_factory=lambda: os.environ.get("UNLISTED_DATABASE_URL", "sqlite:///./unlisted.db")
@@ -26,18 +27,27 @@ class Settings:
     rpc_url: str = field(default_factory=lambda: os.environ.get("UNLISTED_RPC_URL", "http://127.0.0.1:8232"))
     rpc_user: str = field(default_factory=lambda: os.environ.get("UNLISTED_RPC_USER", ""))
     rpc_password: str = field(default_factory=lambda: os.environ.get("UNLISTED_RPC_PASSWORD", ""))
-    # zcashd privacy policy for outgoing refunds. FullPrivacy refuses any send
+    # Privacy policy for outgoing refunds. FullPrivacy refuses any send
     # that would reveal amounts or recipients on chain.
     privacy_policy: str = field(
         default_factory=lambda: os.environ.get("UNLISTED_PRIVACY_POLICY", "FullPrivacy")
     )
 
     min_conf: int = field(default_factory=lambda: _int("UNLISTED_MIN_CONF", 1))
+    # Confirmations before a refund or sweep counts as paid.
+    payout_conf: int = field(default_factory=lambda: _int("UNLISTED_PAYOUT_CONF", 3))
     scan_interval_s: int = field(default_factory=lambda: _int("UNLISTED_SCAN_INTERVAL", 15))
     # Deducted from refunds of *rejected* payments (wrong amount, full, closed…),
     # so junk payments cannot drain the event's fee float. ZIP 317 minimum fee.
     reject_fee_zat: int = field(default_factory=lambda: _int("UNLISTED_REJECT_FEE_ZAT", 10_000))
     refund_batch_size: int = field(default_factory=lambda: _int("UNLISTED_REFUND_BATCH", 25))
+    # Left in an event wallet after the sweep (less than a fee): destroyed on purge.
+    dust_zat: int = field(default_factory=lambda: _int("UNLISTED_DUST_ZAT", 20_000))
+
+    # Every event is a wallet account the wallet must scan, so creation is
+    # capped. Global limits, because the server never sees who is asking.
+    create_per_hour: int = field(default_factory=lambda: _int("UNLISTED_CREATE_PER_HOUR", 60))
+    max_live_events: int = field(default_factory=lambda: _int("UNLISTED_MAX_LIVE_EVENTS", 500))
 
     cors_origins: tuple[str, ...] = field(
         default_factory=lambda: tuple(

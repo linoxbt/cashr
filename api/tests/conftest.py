@@ -29,7 +29,7 @@ def client(tmp_path, chain):
 @pytest.fixture
 def make_event(client):
     def _make(**overrides):
-        body = {"title": "Tuesday circle", "starts_at": "2026-10-27T19:00",
+        body = {"title": "Tuesday circle", "starts_at": "2026-10-27T19:00:00Z",
                 "location": "Shared on the ticket", "capacity": 3, "deposit_zat": 500_000}
         body.update(overrides)
         r = client.post("/events", json=body)

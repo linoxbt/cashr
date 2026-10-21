@@ -1,4 +1,6 @@
-//! A zcashd-compatible JSON-RPC subset: exactly the methods Unlisted's API uses.
+//! The JSON-RPC methods Unlisted's API uses. Names follow zcashd where one
+//! exists; idempotent sends, sweeps, transaction status and account deletion
+//! are unlisted-wallet extensions.
 
 use std::sync::Arc;
 
@@ -9,10 +11,11 @@ use axum::{
     Json,
 };
 use base64::Engine as _;
+use subtle::ConstantTimeEq;
 use serde_json::{json, Value};
 use zcash_protocol::{memo::MemoBytes, value::Zatoshis};
 
-use crate::wallet::{OpState, PrivacyPolicy, Recipient, Wallet};
+use crate::wallet::{OpState, PrivacyPolicy, Recipient, TxState, Wallet};
 
 pub struct RpcState {
     pub wallet: Arc<Wallet>,
@@ -41,8 +44,9 @@ fn param_err(msg: impl Into<String>) -> RpcError {
 
 pub async fn handle(State(state): State<Arc<RpcState>>, headers: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
     if let Some(expected) = &state.auth {
-        let given = headers.get("authorization").and_then(|v| v.to_str().ok());
-        if given != Some(expected.as_str()) {
+        let given = headers.get("authorization").map(|v| v.as_bytes()).unwrap_or_default();
+        // Constant time, so the password can't be recovered by timing guesses.
+        if !bool::from(given.ct_eq(expected.as_bytes())) {
             return (StatusCode::UNAUTHORIZED, Json(json!({"result": null, "error": {"code": -32600, "message": "unauthorized"}, "id": null})));
         }
     }
@@ -57,16 +61,14 @@ pub async fn handle(State(state): State<Arc<RpcState>>, headers: HeaderMap, Json
     }
 }
 
-fn u32_param(params: &[Value], i: usize, name: &str) -> Result<u32, RpcError> {
-    params
-        .get(i)
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-        .and_then(|v| u32::try_from(v).ok())
-        .ok_or_else(|| param_err(format!("{name} must be a non-negative integer")))
-}
-
 fn str_param<'a>(params: &'a [Value], i: usize, name: &str) -> Result<&'a str, RpcError> {
     params.get(i).and_then(Value::as_str).ok_or_else(|| param_err(format!("{name} must be a string")))
+}
+
+fn memo_param(v: Option<&Value>) -> Result<MemoBytes, RpcError> {
+    let memo_hex = v.and_then(Value::as_str).unwrap_or("");
+    let memo_bytes = hex::decode(memo_hex).map_err(|_| param_err("memo must be hex"))?;
+    MemoBytes::from_bytes(&memo_bytes).map_err(|_| param_err("memo longer than 512 bytes"))
 }
 
 /// Parse a ZEC amount exactly, from either a JSON string or number.
@@ -100,7 +102,7 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
         "z_getnewaccount" => Ok(json!({"account": w.new_account().await?})),
 
         "z_getaddressforaccount" => {
-            let account = u32_param(params, 0, "account")?;
+            let account = str_param(params, 0, "account")?;
             let receivers: Vec<String> = params
                 .get(1)
                 .and_then(Value::as_array)
@@ -118,8 +120,9 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
         "z_listreceivedbyaddress" => {
             let address = str_param(params, 0, "address")?;
             let minconf = params.get(1).and_then(Value::as_u64).unwrap_or(1) as u32;
+            let since = params.get(2).and_then(Value::as_u64).unwrap_or(0) as u32;
             let rows = w
-                .received_at(address)?
+                .received_at(address, since)?
                 .into_iter()
                 .map(|o| {
                     let conf = w.confirmations(o.mined_height);
@@ -131,7 +134,6 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
                     json!({
                         "pool": o.pool,
                         "txid": o.txid,
-                        "amount": o.value as f64 / 1e8,
                         "amountZat": o.value,
                         "memo": hex::encode(&o.memo),
                         index_key: o.index,
@@ -145,9 +147,8 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
         }
 
         "z_getbalanceforaccount" => {
-            let account = u32_param(params, 0, "account")?;
-            let (orchard, sapling) = w.spendable(account).await?;
-            Ok(json!({"pools": {"orchard": {"valueZat": orchard}, "sapling": {"valueZat": sapling}}}))
+            let (spendable, pending) = w.balance(str_param(params, 0, "account")?)?;
+            Ok(json!({"spendableZat": spendable, "pendingZat": pending}))
         }
 
         "z_sendmany" => {
@@ -157,17 +158,26 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
                 return Err(param_err("no recipients"));
             }
             let policy = PrivacyPolicy::parse(params.get(4).and_then(Value::as_str)).map_err(|e| param_err(e.to_string()))?;
+            let key = str_param(params, 5, "idempotency key")?;
             let mut recipients = vec![];
             for a in amounts {
                 let address = a.get("address").and_then(Value::as_str).ok_or_else(|| param_err("recipient address missing"))?;
                 let amount = parse_zec(a.get("amount").ok_or_else(|| param_err("amount missing"))?)?;
-                let memo_hex = a.get("memo").and_then(Value::as_str).unwrap_or("");
-                let memo_bytes = hex::decode(memo_hex).map_err(|_| param_err("memo must be hex"))?;
-                let memo = MemoBytes::from_bytes(&memo_bytes).map_err(|_| param_err("memo longer than 512 bytes"))?;
-                recipients.push(Recipient { address: address.to_string(), amount, memo });
+                recipients.push(Recipient { address: address.to_string(), amount, memo: memo_param(a.get("memo"))? });
             }
-            let account = w.account_for_address(from).await?;
-            Ok(json!(w.send(account, recipients, policy)?))
+            let account = w.account_for_address(from)?;
+            let kind = w.transfer_request(recipients, policy)?;
+            Ok(json!(w.submit(key, &account, kind)?))
+        }
+
+        "z_sweep" => {
+            let from = str_param(params, 0, "fromaddress")?;
+            let to = str_param(params, 1, "toaddress")?;
+            let memo = memo_param(params.get(2))?;
+            let key = str_param(params, 3, "idempotency key")?;
+            let account = w.account_for_address(from)?;
+            let kind = w.sweep_request(to, memo)?;
+            Ok(json!(w.submit(key, &account, kind)?))
         }
 
         "z_getoperationstatus" => {
@@ -176,15 +186,34 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
-            Ok(json!(ids
-                .iter()
-                .filter_map(|id| w.op_status(id).map(|s| (id, s)))
-                .map(|(id, s)| match s {
-                    OpState::Executing => json!({"id": id, "status": "executing"}),
-                    OpState::Success(txid) => json!({"id": id, "status": "success", "result": {"txid": txid}}),
-                    OpState::Failed(msg) => json!({"id": id, "status": "failed", "error": {"code": -6, "message": msg}}),
-                })
-                .collect::<Vec<_>>()))
+            let mut out = vec![];
+            for id in &ids {
+                if let Some(s) = w.op_status(id)? {
+                    out.push(match s {
+                        OpState::Executing => json!({"id": id, "status": "executing"}),
+                        OpState::Success { txid, amount } => {
+                            json!({"id": id, "status": "success", "result": {"txid": txid, "amountZat": amount}})
+                        }
+                        OpState::Failed(msg) => json!({"id": id, "status": "failed", "error": {"code": -6, "message": msg}}),
+                    });
+                }
+            }
+            Ok(json!(out))
+        }
+
+        "gettransaction" => {
+            let txid = str_param(params, 0, "txid")?;
+            match w.tx_state(txid)? {
+                Some(TxState::Mined { confirmations }) => Ok(json!({"txid": txid, "status": "mined", "confirmations": confirmations})),
+                Some(TxState::Pending) => Ok(json!({"txid": txid, "status": "pending", "confirmations": 0})),
+                Some(TxState::Expired) => Ok(json!({"txid": txid, "status": "expired", "confirmations": 0})),
+                None => Err(RpcError(-5, format!("transaction {txid} unknown to this wallet"))),
+            }
+        }
+
+        "z_deleteaccount" => {
+            w.delete_account(str_param(params, 0, "account")?).await?;
+            Ok(json!(true))
         }
 
         "z_listunifiedreceivers" => Ok(w.parse_ua_receivers(str_param(params, 0, "unified_address")?)?),

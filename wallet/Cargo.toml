@@ -29,10 +29,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = "0.37"
 rand = "0.8"
 secrecy = "0.8"
-bip39 = { version = "2", features = ["rand"] }
 hex = "0.4"
 base64 = "0.22"
-uuid = "1"
+uuid = { version = "1", features = ["v4"] }
+chacha20poly1305 = "0.10"
+subtle = "2"
 
 [profile.release]
 opt-level = 3
