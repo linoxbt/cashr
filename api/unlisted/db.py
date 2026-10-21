@@ -6,6 +6,7 @@ shielded refund address, and it is deleted when the event is purged.
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -19,6 +20,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    inspect,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -46,6 +49,8 @@ class Event(Base):
 
     # open → closed → settling → settled → purged
     status: Mapped[str] = mapped_column(String(12), default="open")
+    # Highest block whose deposits are ingested; scans start a little below it.
+    scan_height: Mapped[int] = mapped_column(Integer, default=0)
     account_ref: Mapped[str] = mapped_column(String(64))
     address: Mapped[str] = mapped_column(String(600))
     admin_token_hash: Mapped[str] = mapped_column(String(64))
@@ -59,6 +64,7 @@ class Event(Base):
     refunded_zat: Mapped[int] = mapped_column(BigInteger, default=0)
     forfeited_zat: Mapped[int] = mapped_column(BigInteger, default=0)
     float_zat: Mapped[int] = mapped_column(BigInteger, default=0)
+    swept_zat: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
 class Deposit(Base):
@@ -74,7 +80,7 @@ class Deposit(Base):
     out_index: Mapped[int] = mapped_column(Integer)
     amount_zat: Mapped[int] = mapped_column(BigInteger)
     height: Mapped[int] = mapped_column(Integer)
-    # rsvp | rejected | float
+    # rsvp | rejected | float (top-ups, payments without our memo, unrefundable)
     kind: Mapped[str] = mapped_column(String(10))
     reason: Mapped[str] = mapped_column(String(40), default="")
     ticket_hash: Mapped[str] = mapped_column(String(43), default="")
@@ -106,9 +112,15 @@ class Payout(Base):
     kind: Mapped[str] = mapped_column(String(10))
     # [{"address": str, "amount_zat": int, "memo": str, "rsvp_id": int | None}]
     recipients: Mapped[list] = mapped_column(JSON)
-    # queued | submitted | done | failed
+    # queued → submitted (wallet building) → broadcast (txid known, not yet
+    # confirmed) → done (mined and confirmed); failed needs the organiser.
     status: Mapped[str] = mapped_column(String(10), default="queued")
+    # Idempotency key: the wallet never builds a second transaction for it
+    # while the first could still be mined. Random, so a reset database can
+    # never collide with keys the wallet already knows.
+    key: Mapped[str] = mapped_column(String(32), default=lambda: secrets.token_hex(16))
     opid: Mapped[str] = mapped_column(String(80), default="")
+    polls: Mapped[int] = mapped_column(Integer, default=0)
     txid: Mapped[str] = mapped_column(String(64), default="")
     error: Mapped[str] = mapped_column(Text, default="")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
@@ -139,3 +151,19 @@ def make_sessionmaker(engine):
 
 def init_db(engine) -> None:
     Base.metadata.create_all(engine)
+    _add_missing_columns(engine)
+
+
+def _add_missing_columns(engine) -> None:
+    """Additive migrations: create columns added since a database was made."""
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have:
+                    continue
+                default = col.default.arg if col.default is not None and not callable(col.default.arg) else None
+                ddl = col.type.compile(engine.dialect)
+                clause = f" DEFAULT {default!r}" if isinstance(default, (int, str)) else ""
+                conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {ddl}{clause}'))

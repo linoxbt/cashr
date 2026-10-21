@@ -15,7 +15,7 @@ import base64
 import logging
 import threading
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,10 +24,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
 from .chain import ChainError, make_chain
-from .codec import address_kind, is_ticket_hash
+from .codec import is_ticket_hash
 from .config import Settings, get_settings
 from .db import Deposit, Event, Payout, Rsvp, init_db, make_engine, make_sessionmaker
-from .engine import Engine, EngineError
+from .engine import Engine, EngineError, accepting_rsvps
+from .locks import acquire_writer_lock
 
 log = logging.getLogger("unlisted")
 
@@ -37,6 +38,7 @@ MAX_DEPOSIT_ZAT = 100 * 100_000_000
 # ---- schemas -----------------------------------------------------------
 class CreateEvent(BaseModel):
     title: str = Field(min_length=1, max_length=120)
+    # An ISO 8601 time with its UTC offset, so every viewer sees the right time.
     starts_at: str = Field(min_length=1, max_length=40)
     location: str = Field(default="", max_length=200)
     details: str = Field(default="", max_length=4000)
@@ -49,6 +51,28 @@ class CreateEvent(BaseModel):
     @classmethod
     def _strip(cls, v: str) -> str:
         return v.strip()
+
+    @field_validator("starts_at")
+    @classmethod
+    def _aware_time(cls, v: str) -> str:
+        try:
+            t = datetime.fromisoformat(v)
+        except ValueError as e:
+            raise ValueError("starts_at must be an ISO 8601 date and time") from e
+        if t.tzinfo is None:
+            raise ValueError("starts_at needs a UTC offset, e.g. 2026-10-30T18:00:00Z")
+        return t.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @field_validator("rsvp_closes_at")
+    @classmethod
+    def _aware_close(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.tzinfo is None:
+            raise ValueError("rsvp_closes_at needs a UTC offset")
+        return v
+
+
+class FundAddress(BaseModel):
+    address: str = Field(min_length=1, max_length=600)
 
 
 class CheckIn(BaseModel):
@@ -81,6 +105,8 @@ def public_event(ev: Event) -> dict:
         "rsvp_count": ev.rsvp_count,
         "checked_in_count": ev.checked_in_count,
         "seats_left": max(0, ev.capacity - ev.rsvp_count),
+        # Open, and before the RSVP deadline. Payments sent when this is false are returned.
+        "accepting_rsvps": accepting_rsvps(ev),
     }
 
 
@@ -91,6 +117,7 @@ def admin_event(ev: Event) -> dict:
         "refunded_zat": ev.refunded_zat,
         "forfeited_zat": ev.forfeited_zat,
         "float_zat": ev.float_zat,
+        "swept_zat": ev.swept_zat,
     }
 
 
@@ -99,6 +126,9 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     if not settings.is_sim and settings.secret == "dev-only-secret":
         raise RuntimeError("Set UNLISTED_SECRET before running against a real wallet.")
     chain = chain or make_chain(settings)
+    # One process owns the database and the wallet's payouts: a second one
+    # would race on them. Refuse to start rather than risk paying twice.
+    writer_lock = acquire_writer_lock(settings.database_url)
     engine_db = make_engine(settings.database_url)
     init_db(engine_db)
     sessions = make_sessionmaker(engine_db)
@@ -108,6 +138,8 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     def scanner() -> None:
         while not stop.is_set():
             try:
+                if settings.is_sim:
+                    chain.mine()  # the simulated chain gets a block every cycle
                 engine.scan_once()
             except Exception:  # keep scanning whatever one cycle hit
                 log.exception("scan cycle failed")
@@ -123,11 +155,13 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         stop.set()
         if t:
             t.join(timeout=5)
+        writer_lock.release()
 
     app = FastAPI(title="Unlisted API", version="0.1.0", lifespan=lifespan,
                   docs_url="/docs", redoc_url=None)
     app.state.engine = engine
     app.state.chain = chain
+    app.state.writer_lock = writer_lock
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
@@ -196,8 +230,10 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         if ev is None:
             raise EngineError("not_found", "No such event.", 404)
         rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id)).all()
+        # Returned payments, and ones that can't be returned privately.
         rejected = db.scalars(select(Deposit).where(
-            Deposit.event_id == event_id, Deposit.kind == "rejected")).all()
+            Deposit.event_id == event_id,
+            (Deposit.kind == "rejected") | (Deposit.reason == "bad_refund_address"))).all()
         return {
             "status": ev.status,
             "tickets": [{"h": r.ticket_hash, "seat": r.seat, "status": r.status,
@@ -210,10 +246,10 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     def admin_view(event_id: str, token: str = Depends(bearer), db=Depends(db_session)):
         ev = engine.authorize(db, event_id, token, "admin")
         try:
-            balance = chain.spendable_zat(ev.account_ref)
-            wallet_error = ""
+            bal = engine.balance(ev)
+            balance, pending, wallet_error = bal.total_zat, bal.pending_zat, ""
         except ChainError as e:
-            balance, wallet_error = None, str(e)
+            balance, pending, wallet_error = None, None, str(e)
         rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id).order_by(Rsvp.seat)).all()
         deposits = db.scalars(select(Deposit).where(Deposit.event_id == event_id)
                               .order_by(Deposit.height, Deposit.id)).all()
@@ -222,6 +258,7 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         return {
             "event": admin_event(ev),
             "balance_zat": balance,
+            "pending_zat": pending,
             "wallet_error": wallet_error,
             "rsvps": [{"seat": r.seat, "ticket_hash": r.ticket_hash,
                        "refund_address": r.refund_address, "status": r.status,
@@ -235,18 +272,31 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
                          "txid": p.txid, "error": p.error} for p in payouts],
         }
 
+    @app.post("/events/{event_id}/admin/fund")
+    def admin_fund(event_id: str, body: FundAddress, token: str = Depends(bearer)):
+        """Set (or change) where no-show deposits are swept; sweeps a settled event's leftovers."""
+        with engine.lock, sessions() as db:
+            ev = engine.authorize(db, event_id, token, "admin")
+            engine.set_fund_address(db, ev, body.address)
+            db.commit()
+        engine.scan_event(event_id)
+        with sessions() as db:
+            return admin_event(db.get(Event, event_id))
+
     @app.post("/events/{event_id}/admin/{action}")
     def admin_action(event_id: str, action: str, token: str = Depends(bearer)):
         actions = {"close": engine.close, "reopen": engine.reopen, "settle": engine.settle,
-                   "retry": engine.retry_failed, "purge": engine.purge}
-        if action not in actions and action != "scan":
+                   "retry": engine.retry_failed}
+        if action not in actions and action not in ("scan", "purge"):
             raise EngineError("bad_action", "Unknown action.", 404)
         with engine.lock, sessions() as db:
             ev = engine.authorize(db, event_id, token, "admin")
-            if action != "scan":
+            if action in actions:
                 actions[action](db, ev)
                 db.commit()
-        if action in ("scan", "settle", "retry"):
+        if action == "purge":
+            engine.purge(event_id)
+        elif action in ("scan", "settle", "retry"):
             engine.scan_event(event_id)
         with sessions() as db:
             return admin_event(db.get(Event, event_id))
@@ -292,13 +342,13 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             pad = "=" * (-len(body.memo_b64url) % 4)
             memo = base64.urlsafe_b64decode(body.memo_b64url + pad)
             txid = chain.pay(body.address, body.amount_zat, memo)
-            engine.scan_once()
+            engine.scan_once(full=True)
             return {"txid": txid}
 
         @app.post("/sim/mine")
         def sim_mine(blocks: int = 1):
-            chain.mine(blocks)
-            engine.scan_once()
+            chain.mine(min(max(blocks, 1), 100))
+            engine.scan_once(full=True)
             return {"height": chain.tip_height()}
 
     return app

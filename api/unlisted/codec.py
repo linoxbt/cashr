@@ -8,7 +8,7 @@ RSVP memo (ASCII, single spaces, at most 512 bytes):
   The 32-byte secret is generated in the attendee's browser and never leaves
   it until it is shown as a QR code at the door.
 * ``refund_address`` is a shielded address of the attendee's choosing
-  (Unified or Sapling). Transparent addresses are refused.
+  (a Unified Address with an Orchard receiver). Anything else is refused.
 
 Payment request (ZIP 321): ``zcash:<addr>?amount=<ZEC>&memo=<base64url(memo)>``.
 """

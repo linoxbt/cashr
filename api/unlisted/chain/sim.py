@@ -1,9 +1,11 @@
 """A simulated chain for tests and local development.
 
-It is not a Zcash implementation. It models what Unlisted relies on: notes
-arrive at an address with a memo, gain confirmations, and outgoing sends spend
-from an account balance. The API refuses to run in this mode unless asked to,
-and the web app shows a banner whenever it is active.
+It is not a Zcash implementation, but it models the wallet behaviour Unlisted
+depends on, including the awkward parts: sends stay in the mempool until a
+block is mined, change is not spendable until it confirms, an unmined
+transaction expires, shortfalls are reported when the operation runs, and a
+send key is idempotent. It only runs when UNLISTED_CHAIN=sim is set
+explicitly, and the web app shows a banner whenever it is active.
 """
 
 from __future__ import annotations
@@ -15,9 +17,15 @@ from dataclasses import dataclass, field
 
 from ..codec import _CHARSET, _BECH32M_CONST, _hrp_expand, _polymod
 from ..ua import f4jumble
-from .base import ChainError, OpStatus, ReceivedNote, Recipient
+from .base import Balance, ChainError, OpStatus, ReceivedNote, Recipient, TxStatus
 
-FEE_ZAT = 10_000
+MARGINAL_FEE = 5_000
+EXPIRY_DELTA = 40
+DUST_ZAT = 10_000
+
+
+def zip317_fee(inputs: int, outputs: int) -> int:
+    return MARGINAL_FEE * max(2, inputs, outputs)
 
 
 def bech32m_encode(hrp: str, data5: list[int]) -> str:
@@ -65,26 +73,56 @@ class _Note:
     amount_zat: int
     memo: bytes
     height: int = 0  # 0 = in mempool
+    change: bool = False
+    spent_by: str = ""  # txid of the transaction spending it
+
+
+@dataclass
+class _Tx:
+    txid: str
+    account: str
+    recipients: list[Recipient]
+    inputs: list[_Note]
+    change: _Note | None
+    expiry: int
+    height: int = 0
+    in_mempool: bool = True
 
 
 @dataclass
 class _Account:
     address: str
     notes: list[_Note] = field(default_factory=list)
-    spent_zat: int = 0
+
+
+@dataclass
+class _Op:
+    key: str
+    account: str
+    txid: str = ""
+    state: str = "pending"
+    error: str = ""
+    amount_zat: int | None = None
 
 
 class SimChain:
-    def __init__(self, network: str = "main", auto_mine: bool = True):
+    def __init__(self, network: str = "main", auto_mine: bool = True,
+                 received_conf: int = 1, change_conf: int = 1):
         self.network = network
         self.auto_mine = auto_mine
+        self.received_conf = received_conf
+        self.change_conf = change_conf
         self.height = 3_100_000
         self._lock = threading.RLock()
         self._accounts: dict[str, _Account] = {}
-        self._ops: dict[str, OpStatus] = {}
+        self._txs: dict[str, _Tx] = {}
+        self._ops: dict[str, _Op] = {}
+        self._by_key: dict[str, str] = {}
         self._ids = itertools.count(1)
-        self.sent: list[tuple[str, list[Recipient], str]] = []  # (account, recipients, txid)
+        self.sent: list[tuple[str, list[Recipient], str]] = []  # every transaction built
         self.fail_sends = False
+        # Simulate a lost response: the wallet acts, the caller sees an error.
+        self.lose_responses = 0
 
     # ---- test / dev controls ------------------------------------------
     def pay(self, address: str, amount_zat: int, memo: bytes) -> str:
@@ -98,13 +136,24 @@ class SimChain:
             return txid
 
     def mine(self, blocks: int = 1) -> None:
+        """Mine blocks: payments and broadcast transactions in the mempool confirm."""
         with self._lock:
             for _ in range(blocks):
                 self.height += 1
                 for acct in self._accounts.values():
                     for n in acct.notes:
-                        if n.height == 0:
+                        if n.height == 0 and not n.change:
                             n.height = self.height
+                for tx in self._txs.values():
+                    if tx.height == 0 and tx.in_mempool and self.height <= tx.expiry:
+                        tx.height = self.height
+                        if tx.change:
+                            tx.change.height = self.height
+
+    def drop_from_mempool(self, txid: str) -> None:
+        """Simulate a transaction that fell out of the mempool unmined."""
+        with self._lock:
+            self._txs[txid].in_mempool = False
 
     def _by_address(self, address: str) -> _Account:
         for acct in self._accounts.values():
@@ -112,48 +161,150 @@ class SimChain:
                 return acct
         raise ChainError("address not in this wallet")
 
+    def _account(self, ref: str) -> _Account:
+        acct = self._accounts.get(ref)
+        if acct is None:
+            raise ChainError(f"no account {ref}")
+        return acct
+
+    def _confs(self, height: int) -> int:
+        return self.height - height + 1 if height else 0
+
+    def _expired(self, tx: _Tx) -> bool:
+        return tx.height == 0 and self.height > tx.expiry
+
+    def _spent(self, n: _Note) -> bool:
+        tx = self._txs.get(n.spent_by)
+        return tx is not None and not self._expired(tx)
+
+    def _split(self, acct: _Account) -> tuple[list[_Note], list[_Note]]:
+        spendable, pending = [], []
+        for n in acct.notes:
+            if self._spent(n):
+                continue
+            need = self.change_conf if n.change else self.received_conf
+            (spendable if self._confs(n.height) >= need else pending).append(n)
+        return spendable, pending
+
     # ---- Chain protocol -----------------------------------------------
     def tip_height(self) -> int:
         return self.height
 
     def new_event_account(self) -> tuple[str, str]:
         with self._lock:
-            ref = str(next(self._ids))
+            ref = f"acct-{next(self._ids)}"
             addr = random_unified_address(self.network)
             self._accounts[ref] = _Account(addr)
             return ref, addr
 
-    def received(self, account_ref: str, address: str) -> list[ReceivedNote]:
+    def received(self, account_ref: str, address: str, since_height: int = 0) -> list[ReceivedNote]:
         with self._lock:
-            acct = self._accounts[account_ref]
+            acct = self._account(account_ref)
             return [
                 ReceivedNote(
                     txid=n.txid, pool="orchard", out_index=n.index, amount_zat=n.amount_zat,
-                    memo=n.memo, confirmations=(self.height - n.height + 1) if n.height else 0,
-                    height=n.height,
+                    memo=n.memo, confirmations=self._confs(n.height), height=n.height,
                 )
                 for n in acct.notes
-                if n.address == address
+                if n.address == address and not n.change and (n.height == 0 or n.height >= since_height)
             ]
 
-    def spendable_zat(self, account_ref: str) -> int:
+    def balance(self, account_ref: str) -> Balance:
         with self._lock:
-            acct = self._accounts[account_ref]
-            return sum(n.amount_zat for n in acct.notes if n.height) - acct.spent_zat
+            spendable, pending = self._split(self._account(account_ref))
+            return Balance(sum(n.amount_zat for n in spendable), sum(n.amount_zat for n in pending))
 
-    def send(self, account_ref: str, from_address: str, recipients: list[Recipient]) -> str:
+    def _respond(self, opid: str) -> str:
+        if self.lose_responses:
+            self.lose_responses -= 1
+            raise ChainError("wallet unreachable: timed out")
+        return opid
+
+    def _submit(self, account_ref: str, key: str, build) -> str:
         with self._lock:
             if self.fail_sends:
                 raise ChainError("simulated wallet failure")
-            total = sum(r.amount_zat for r in recipients) + FEE_ZAT
-            if total > self.spendable_zat(account_ref):
-                raise ChainError("Insufficient funds")
-            self._accounts[account_ref].spent_zat += total
-            txid = secrets.token_hex(32)
-            opid = f"opid-sim-{secrets.token_hex(8)}"
-            self._ops[opid] = OpStatus("success", txid=txid)
-            self.sent.append((account_ref, list(recipients), txid))
-            return opid
+            self._account(account_ref)
+            opid = self._by_key.get(key)
+            if opid is None:
+                opid = f"opid-sim-{secrets.token_hex(8)}"
+                self._by_key[key] = opid
+                self._ops[opid] = _Op(key, account_ref)
+            op = self._ops[opid]
+            tx = self._txs.get(op.txid)
+            if tx is not None and not self._expired(tx):
+                tx.in_mempool = True  # rebroadcast; never a second transaction
+                return self._respond(opid)
+            op.state, op.error, op.txid = "pending", "", ""
+            try:
+                op.txid, op.amount_zat = build(self._account(account_ref))
+                op.state = "success"
+            except ChainError as e:
+                op.state, op.error = "failed", str(e)
+            return self._respond(opid)
+
+    def _build(self, account_ref: str, acct: _Account, recipients: list[Recipient], everything: bool):
+        spendable, pending = self._split(acct)
+        if everything:
+            if pending:
+                raise ChainError("Cannot send everything while funds are still unconfirmed")
+            inputs = sorted(spendable, key=lambda n: -n.amount_zat)
+            fee = zip317_fee(len(inputs), 1)
+            amount = sum(n.amount_zat for n in inputs) - fee
+            if amount <= 0:
+                raise ChainError("Insufficient balance to cover the fee")
+            recipients = [Recipient(recipients[0].address, amount, recipients[0].memo)]
+        else:
+            want = sum(r.amount_zat for r in recipients)
+            inputs, total = [], 0
+            for n in sorted(spendable, key=lambda n: -n.amount_zat):
+                if total >= want + zip317_fee(len(inputs), len(recipients) + 1):
+                    break
+                inputs.append(n)
+                total += n.amount_zat
+            fee = zip317_fee(len(inputs), len(recipients) + 1)
+            if total < want + fee:
+                raise ChainError(f"Insufficient balance (have {sum(n.amount_zat for n in spendable)}, need {want + fee} including fee)")
+        txid = secrets.token_hex(32)
+        left = sum(n.amount_zat for n in inputs) - sum(r.amount_zat for r in recipients) - fee
+        change = _Note(acct.address, txid, len(recipients), left, b"", change=True) if left > 0 else None
+        if change:
+            acct.notes.append(change)
+        for n in inputs:
+            n.spent_by = txid
+        self._txs[txid] = _Tx(txid, account_ref, list(recipients), inputs, change, self.height + EXPIRY_DELTA)
+        # Like the real chain, the transaction waits in the mempool for a block.
+        self.sent.append((account_ref, list(recipients), txid))
+        return txid, sum(r.amount_zat for r in recipients)
+
+    def send(self, account_ref: str, from_address: str, recipients: list[Recipient], key: str) -> str:
+        return self._submit(account_ref, key, lambda acct: self._build(account_ref, acct, recipients, False))
+
+    def sweep(self, account_ref: str, from_address: str, to_address: str, memo: bytes, key: str) -> str:
+        return self._submit(account_ref, key,
+                            lambda acct: self._build(account_ref, acct, [Recipient(to_address, 0, memo)], True))
 
     def op_status(self, opid: str) -> OpStatus:
-        return self._ops.get(opid, OpStatus("failed", error="unknown op"))
+        with self._lock:
+            op = self._ops.get(opid)
+            if op is None:
+                return OpStatus("failed", error="operation unknown to wallet")
+            return OpStatus(op.state, txid=op.txid, error=op.error, amount_zat=op.amount_zat)
+
+    def tx_status(self, txid: str) -> TxStatus:
+        with self._lock:
+            tx = self._txs.get(txid)
+            if tx is None:
+                raise ChainError(f"transaction {txid} unknown to wallet")
+            if tx.height:
+                return TxStatus("mined", self._confs(tx.height))
+            return TxStatus("expired" if self._expired(tx) else "pending")
+
+    def delete_account(self, account_ref: str) -> None:
+        with self._lock:
+            bal = self.balance(account_ref)
+            if bal.total_zat > DUST_ZAT:
+                raise ChainError("account still holds funds")
+            del self._accounts[account_ref]
+            for txid in [t for t, tx in self._txs.items() if tx.account == account_ref]:
+                del self._txs[txid]
