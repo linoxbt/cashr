@@ -1,0 +1,305 @@
+"""HTTP API.
+
+Privacy rules this module keeps:
+* No access logs and no IP addresses stored anywhere.
+* Attendees never send the server anything: the RSVP page builds the memo
+  in the browser, and confirmation is checked by downloading the event's whole
+  public ticket-hash list rather than asking about one ticket.
+* Organiser and door links carry their token in the URL fragment, which
+  browsers never send; the web app passes it as a bearer token instead.
+"""
+
+from __future__ import annotations
+
+import base64
+import logging
+import threading
+from contextlib import asynccontextmanager
+from datetime import datetime
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select
+
+from .chain import ChainError, make_chain
+from .codec import address_kind, is_ticket_hash
+from .config import Settings, get_settings
+from .db import Deposit, Event, Payout, Rsvp, init_db, make_engine, make_sessionmaker
+from .engine import Engine, EngineError
+
+log = logging.getLogger("unlisted")
+
+MAX_DEPOSIT_ZAT = 100 * 100_000_000
+
+
+# ---- schemas -----------------------------------------------------------
+class CreateEvent(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    starts_at: str = Field(min_length=1, max_length=40)
+    location: str = Field(default="", max_length=200)
+    details: str = Field(default="", max_length=4000)
+    capacity: int = Field(ge=1, le=5000)
+    deposit_zat: int = Field(ge=50_000, le=MAX_DEPOSIT_ZAT)
+    rsvp_closes_at: datetime | None = None
+    forfeit_address: str = Field(default="", max_length=600)
+
+    @field_validator("title", "starts_at", "location", "details", "forfeit_address")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+
+class CheckIn(BaseModel):
+    ticket_hash: str
+
+
+class SyncCheckIns(BaseModel):
+    ticket_hashes: list[str] = Field(max_length=5000)
+
+
+class SimPay(BaseModel):
+    address: str
+    amount_zat: int = Field(gt=0)
+    memo_b64url: str
+
+
+# ---- views ---------------------------------------------------------------
+def public_event(ev: Event) -> dict:
+    return {
+        "id": ev.id,
+        "title": ev.title,
+        "starts_at": ev.starts_at,
+        "location": ev.location,
+        "details": ev.details,
+        "capacity": ev.capacity,
+        "deposit_zat": ev.deposit_zat,
+        "rsvp_closes_at": ev.rsvp_closes_at.isoformat() if ev.rsvp_closes_at else None,
+        "status": ev.status,
+        "address": ev.address,
+        "rsvp_count": ev.rsvp_count,
+        "checked_in_count": ev.checked_in_count,
+        "seats_left": max(0, ev.capacity - ev.rsvp_count),
+    }
+
+
+def admin_event(ev: Event) -> dict:
+    return public_event(ev) | {
+        "forfeit_address": ev.forfeit_address,
+        "rejected_count": ev.rejected_count,
+        "refunded_zat": ev.refunded_zat,
+        "forfeited_zat": ev.forfeited_zat,
+        "float_zat": ev.float_zat,
+    }
+
+
+def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
+    settings = settings or get_settings()
+    if not settings.is_sim and settings.secret == "dev-only-secret":
+        raise RuntimeError("Set UNLISTED_SECRET before running against a real wallet.")
+    chain = chain or make_chain(settings)
+    engine_db = make_engine(settings.database_url)
+    init_db(engine_db)
+    sessions = make_sessionmaker(engine_db)
+    engine = Engine(settings, chain, sessions)
+    stop = threading.Event()
+
+    def scanner() -> None:
+        while not stop.is_set():
+            try:
+                engine.scan_once()
+            except Exception:  # keep scanning whatever one cycle hit
+                log.exception("scan cycle failed")
+            stop.wait(settings.scan_interval_s)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        t = None
+        if settings.run_scanner:
+            t = threading.Thread(target=scanner, name="unlisted-scanner", daemon=True)
+            t.start()
+        yield
+        stop.set()
+        if t:
+            t.join(timeout=5)
+
+    app = FastAPI(title="Unlisted API", version="0.1.0", lifespan=lifespan,
+                  docs_url="/docs", redoc_url=None)
+    app.state.engine = engine
+    app.state.chain = chain
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(settings.cors_origins),
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+    @app.exception_handler(EngineError)
+    async def _engine_error(_: Request, e: EngineError):
+        return JSONResponse({"error": e.code, "message": str(e)}, status_code=e.status)
+
+    @app.exception_handler(ChainError)
+    async def _chain_error(_: Request, e: ChainError):
+        return JSONResponse({"error": "wallet", "message": str(e)}, status_code=502)
+
+    def db_session():
+        with sessions() as db:
+            yield db
+
+    def bearer(authorization: str = Header(default="")) -> str:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token:
+            raise HTTPException(401, "Missing link token.")
+        return token
+
+    # ---- public -----------------------------------------------------------
+    @app.get("/health")
+    def health():
+        return {"ok": True}
+
+    @app.get("/meta")
+    def meta():
+        return {
+            "chain": settings.chain_mode,
+            "network": settings.network,
+            "min_conf": settings.min_conf,
+            "reject_fee_zat": settings.reject_fee_zat,
+        }
+
+    @app.post("/events", status_code=201)
+    def create_event(body: CreateEvent):
+        created = engine.create_event(**body.model_dump())
+        return {
+            "event": public_event(created.event),
+            "admin_token": created.admin_token,
+            "door_token": created.door_token,
+        }
+
+    @app.get("/events/{event_id}")
+    def get_event(event_id: str, db=Depends(db_session)):
+        ev = db.get(Event, event_id)
+        if ev is None:
+            raise EngineError("not_found", "No such event.", 404)
+        return public_event(ev)
+
+    @app.get("/events/{event_id}/tickets")
+    def tickets(event_id: str, db=Depends(db_session)):
+        """Every ticket hash for the event. Attendees look for theirs locally."""
+        ev = db.get(Event, event_id)
+        if ev is None:
+            raise EngineError("not_found", "No such event.", 404)
+        rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id)).all()
+        rejected = db.scalars(select(Deposit).where(
+            Deposit.event_id == event_id, Deposit.kind == "rejected")).all()
+        return {
+            "status": ev.status,
+            "tickets": [{"h": r.ticket_hash, "seat": r.seat, "status": r.status,
+                         "checked_in": r.checked_in} for r in rsvps],
+            "rejected": [{"h": d.ticket_hash, "reason": d.reason} for d in rejected],
+        }
+
+    # ---- organiser ----------------------------------------------------------
+    @app.get("/events/{event_id}/admin")
+    def admin_view(event_id: str, token: str = Depends(bearer), db=Depends(db_session)):
+        ev = engine.authorize(db, event_id, token, "admin")
+        try:
+            balance = chain.spendable_zat(ev.account_ref)
+            wallet_error = ""
+        except ChainError as e:
+            balance, wallet_error = None, str(e)
+        rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id).order_by(Rsvp.seat)).all()
+        deposits = db.scalars(select(Deposit).where(Deposit.event_id == event_id)
+                              .order_by(Deposit.height, Deposit.id)).all()
+        payouts = db.scalars(select(Payout).where(Payout.event_id == event_id)
+                             .order_by(Payout.id)).all()
+        return {
+            "event": admin_event(ev),
+            "balance_zat": balance,
+            "wallet_error": wallet_error,
+            "rsvps": [{"seat": r.seat, "ticket_hash": r.ticket_hash,
+                       "refund_address": r.refund_address, "status": r.status,
+                       "checked_in": r.checked_in} for r in rsvps],
+            "deposits": [{"txid": d.txid, "pool": d.pool, "index": d.out_index,
+                          "amount_zat": d.amount_zat, "height": d.height, "kind": d.kind,
+                          "reason": d.reason} for d in deposits],
+            "payouts": [{"id": p.id, "kind": p.kind, "status": p.status,
+                         "recipients": len(p.recipients),
+                         "amount_zat": sum(int(r["amount_zat"]) for r in p.recipients),
+                         "txid": p.txid, "error": p.error} for p in payouts],
+        }
+
+    @app.post("/events/{event_id}/admin/{action}")
+    def admin_action(event_id: str, action: str, token: str = Depends(bearer)):
+        actions = {"close": engine.close, "reopen": engine.reopen, "settle": engine.settle,
+                   "retry": engine.retry_failed, "purge": engine.purge}
+        if action not in actions and action != "scan":
+            raise EngineError("bad_action", "Unknown action.", 404)
+        with engine.lock, sessions() as db:
+            ev = engine.authorize(db, event_id, token, "admin")
+            if action != "scan":
+                actions[action](db, ev)
+                db.commit()
+        if action in ("scan", "settle", "retry"):
+            engine.scan_event(event_id)
+        with sessions() as db:
+            return admin_event(db.get(Event, event_id))
+
+    # ---- door -----------------------------------------------------------------
+    @app.get("/events/{event_id}/door/manifest")
+    def door_manifest(event_id: str, token: str = Depends(bearer), db=Depends(db_session)):
+        ev = engine.authorize(db, event_id, token, "door")
+        rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id,
+                                              Rsvp.status == "confirmed")).all()
+        return {
+            "event": public_event(ev),
+            "tickets": [{"h": r.ticket_hash, "seat": r.seat, "checked_in": r.checked_in}
+                        for r in rsvps],
+        }
+
+    @app.post("/events/{event_id}/door/checkin")
+    def door_checkin(event_id: str, body: CheckIn, token: str = Depends(bearer)):
+        if not is_ticket_hash(body.ticket_hash):
+            return {"result": "unknown", "seat": None}
+        with engine.lock, sessions() as db:
+            ev = engine.authorize(db, event_id, token, "door")
+            result, seat = engine.check_in(db, ev, body.ticket_hash)
+            db.commit()
+            return {"result": result, "seat": seat, "checked_in_count": ev.checked_in_count}
+
+    @app.post("/events/{event_id}/door/sync")
+    def door_sync(event_id: str, body: SyncCheckIns, token: str = Depends(bearer)):
+        """Upload check-ins a door device recorded while offline."""
+        with engine.lock, sessions() as db:
+            ev = engine.authorize(db, event_id, token, "door")
+            results = [
+                {"h": h, "result": engine.check_in(db, ev, h)[0] if is_ticket_hash(h) else "unknown"}
+                for h in body.ticket_hashes
+            ]
+            db.commit()
+            return {"results": results, "checked_in_count": ev.checked_in_count}
+
+    # ---- simulator (UNLISTED_CHAIN=sim only) ----------------------------------
+    if settings.is_sim:
+        @app.post("/sim/pay")
+        def sim_pay(body: SimPay):
+            pad = "=" * (-len(body.memo_b64url) % 4)
+            memo = base64.urlsafe_b64decode(body.memo_b64url + pad)
+            txid = chain.pay(body.address, body.amount_zat, memo)
+            engine.scan_once()
+            return {"txid": txid}
+
+        @app.post("/sim/mine")
+        def sim_mine(blocks: int = 1):
+            chain.mine(blocks)
+            engine.scan_once()
+            return {"height": chain.tip_height()}
+
+    return app
+
+
+def _silence_access_log() -> None:
+    logging.getLogger("uvicorn.access").disabled = True
+
+
+_silence_access_log()
