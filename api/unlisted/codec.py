@@ -119,6 +119,17 @@ def _hrp_expand(hrp: str) -> list[int]:
     return [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
 
 
+def is_orchard_address(address: str, network: str) -> bool:
+    """A Unified Address with an Orchard receiver: the only kind Unlisted pays.
+
+    Refunds go Orchard-to-Orchard so that no amount or recipient is revealed
+    on chain; an address without an Orchard receiver can't be refunded privately.
+    """
+    from .ua import has_orchard_receiver
+
+    return has_orchard_receiver(address, network)
+
+
 def address_kind(address: str, network: str) -> str | None:
     """Return "unified"/"sapling" for a well-formed shielded address, else None."""
     if address != address.lower() or "1" not in address:
