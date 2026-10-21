@@ -160,11 +160,17 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
 
     @app.get("/meta")
     def meta():
+        try:
+            tip = chain.tip_height()
+        except ChainError:
+            tip = None
         return {
             "chain": settings.chain_mode,
             "network": settings.network,
             "min_conf": settings.min_conf,
             "reject_fee_zat": settings.reject_fee_zat,
+            # None when the wallet is unreachable, so the UI can say so.
+            "tip": tip,
         }
 
     @app.post("/events", status_code=201)

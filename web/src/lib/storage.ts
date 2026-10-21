@@ -73,3 +73,39 @@ export function takeLinkToken(scope: string): string | null {
   }
   return read<string | null>(session(), key, null);
 }
+
+// ---- organiser links remembered on this device (opt-in) ----------------------
+
+export interface SavedEvent {
+  id: string;
+  title: string;
+  adminToken: string;
+  doorToken: string;
+  savedAt: string;
+}
+
+const EVENTS = "unlisted.events.v1";
+
+export function listTickets(): StoredTicket[] {
+  return Object.values(read<Record<string, StoredTicket>>(local(), TICKETS, {})).sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt),
+  );
+}
+
+export function listSavedEvents(): SavedEvent[] {
+  return Object.values(read<Record<string, SavedEvent>>(local(), EVENTS, {})).sort((a, b) =>
+    b.savedAt.localeCompare(a.savedAt),
+  );
+}
+
+export function saveEvent(e: SavedEvent): boolean {
+  const all = read<Record<string, SavedEvent>>(local(), EVENTS, {});
+  all[e.id] = e;
+  return write(local(), EVENTS, all);
+}
+
+export function forgetEvent(id: string): void {
+  const all = read<Record<string, SavedEvent>>(local(), EVENTS, {});
+  delete all[id];
+  write(local(), EVENTS, all);
+}

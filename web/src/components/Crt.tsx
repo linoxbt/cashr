@@ -8,7 +8,7 @@ import { useMeta } from "@/components/ui";
 import { readJson, writeJson } from "@/lib/storage";
 
 const NAV = [
-  { href: "/how-it-works", label: "How it works" },
+  { href: "/docs", label: "Docs" },
   { href: "/privacy", label: "Threat model" },
   { href: "/new", label: "Create event" },
 ];

@@ -48,6 +48,7 @@ export interface Meta {
   network: "main" | "test";
   min_conf: number;
   reject_fee_zat: number;
+  tip: number | null;
 }
 
 export interface Manifest {
