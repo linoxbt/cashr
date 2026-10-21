@@ -6,6 +6,7 @@ import { useState, type FormEvent } from "react";
 import { CopyField, Notice, Spinner, useMeta } from "@/components/ui";
 import { api, ApiError, type PublicEvent } from "@/lib/api";
 import { addressProblem, zatToZec, zecToZat } from "@/lib/codec";
+import { forgetEvent, saveEvent } from "@/lib/storage";
 
 interface Created {
   event: PublicEvent;
@@ -134,6 +135,15 @@ function CreatedPanel({ created }: { created: Created }) {
   const publicLink = `${origin}/e/${event.id}`;
   const manageLink = `${origin}/manage/${event.id}#k=${created.admin_token}`;
   const doorLink = `${origin}/door/${event.id}#k=${created.door_token}`;
+  const [remember, setRemember] = useState(false);
+  const toggleRemember = (on: boolean) => {
+    setRemember(on);
+    if (on) {
+      saveEvent({ id: event.id, title: event.title, adminToken: created.admin_token, doorToken: created.door_token, savedAt: new Date().toISOString() });
+    } else {
+      forgetEvent(event.id);
+    }
+  };
   return (
     <div className="mx-auto max-w-3xl px-4 py-14 sm:px-6">
       <p className="eyebrow">Event created</p>
@@ -149,6 +159,16 @@ function CreatedPanel({ created }: { created: Created }) {
         <CopyField label="Manage link (private)" value={manageLink} hint="Settle refunds, close RSVPs and purge data. Anyone with it controls the event." />
         <CopyField label="Door link (private)" value={doorLink} hint="Open on the phone that checks people in. It can only check tickets." />
       </div>
+      <label className="card mt-4 flex items-start gap-3 p-4 text-sm text-ink-2">
+        <input type="checkbox" className="mt-0.5 h-4 w-4 accent-[#F4B728]" checked={remember} onChange={(e) => toggleRemember(e.target.checked)} />
+        <span>
+          <span className="font-medium text-ink">Remember these links on this device</span>
+          <span className="block text-ink-3">
+            Lists the event under &ldquo;Your events&rdquo; on the home screen. Anyone using this browser could then manage
+            the event, so leave it off on shared or at-risk devices.
+          </span>
+        </span>
+      </label>
       <div className="mt-6 flex flex-wrap gap-3">
         <a href={manageLink} className="btn-primary">Open dashboard</a>
         <a href={publicLink} className="btn-secondary">View RSVP page</a>

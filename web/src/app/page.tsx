@@ -1,138 +1,268 @@
-import { TapeDeck, type Tape } from "@/components/TapeDeck";
+"use client";
 
-// ---- cover art (SVG, inherits the tape colour) --------------------------------
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 
-function RedactedList() {
-  const rows = [0.82, 0.64, 0.9, 0.55, 0.74, 0.6];
+import { Pill, Spinner, formatWhen, usePoll } from "@/components/ui";
+import { api, type Meta, type PublicEvent, type RsvpStatus } from "@/lib/api";
+import { zatToZec } from "@/lib/codec";
+import { linkTarget } from "@/lib/links";
+import { forgetEvent, listSavedEvents, listTickets, type SavedEvent, type StoredTicket } from "@/lib/storage";
+
+function Channel({ n, title, children }: { n: string; title: string; children: ReactNode }) {
   return (
-    <svg viewBox="0 0 100 90" className="h-full w-full" aria-hidden>
-      <text x="8" y="12" fontSize="6" fill="currentColor" fontFamily="monospace" opacity="0.8">GUEST LIST</text>
-      {rows.map((w, i) => (
-        <g key={i}>
-          <text x="8" y={24 + i * 11} fontSize="5.5" fill="currentColor" fontFamily="monospace" opacity="0.6">{String(i + 1).padStart(2, "0")}</text>
-          <rect x="18" y={19 + i * 11} width={74 * w} height="6" fill="currentColor" />
-        </g>
+    <section className="card flex flex-col p-6 sm:p-7">
+      <div className="osd flex items-center justify-between text-ink-3">
+        <span>CH {n}</span>
+        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-ink-4" />
+      </div>
+      <h2 className="mt-3 text-4xl leading-none">{title}</h2>
+      <div className="mt-5 flex flex-1 flex-col">{children}</div>
+    </section>
+  );
+}
+
+function ServerStatus() {
+  const [meta, setMeta] = useState<Meta | null | undefined>(undefined);
+  usePoll(
+    async () => {
+      try {
+        setMeta(await api.meta());
+      } catch {
+        setMeta(null);
+      }
+    },
+    15_000,
+    [],
+  );
+  if (meta === undefined) {
+    return <div className="osd flex items-center gap-2 text-ink-3"><Spinner className="h-3 w-3" /> Tuning in…</div>;
+  }
+  if (meta === null) {
+    return (
+      <div className="osd max-w-sm space-y-1 sm:text-right">
+        <div className="flex items-center gap-2 text-bad sm:justify-end">
+          <span className="blink inline-block h-2 w-2 rounded-full bg-bad" /> No signal
+        </div>
+        <div className="text-ink-3">
+          The Unlisted server can&rsquo;t be reached, so events can&rsquo;t be created or joined right now.{" "}
+          <Link href="/docs#self-hosting" className="text-ink-2 underline decoration-ink-4 underline-offset-4 hover:text-ink">Run your own</Link>
+        </div>
+      </div>
+    );
+  }
+  const network = meta.chain === "sim" ? "Simulated chain" : meta.network === "main" ? "Zcash mainnet" : "Zcash testnet";
+  return (
+    <div className="osd flex flex-wrap items-center gap-x-5 gap-y-1">
+      <span className="flex items-center gap-2 text-ok"><span className="inline-block h-2 w-2 rounded-full bg-ok" /> On air</span>
+      <span className={meta.chain === "sim" ? "text-gold-ink" : "text-ink-2"}>{network}</span>
+      {meta.tip !== null ? (
+        <span className="tabular-nums text-ink-3">Block {meta.tip.toLocaleString("en-US")}</span>
+      ) : (
+        <span className="text-warn">Wallet syncing</span>
+      )}
+    </div>
+  );
+}
+
+function OpenLink() {
+  const router = useRouter();
+  const [value, setValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const target = linkTarget(value);
+    if (!target) return setError("Paste the whole link you were sent, or a 10-character event code.");
+    router.push(target);
+  };
+  return (
+    <form onSubmit={submit} className="flex flex-1 flex-col">
+      <p className="text-sm leading-relaxed text-ink-2">Paste an invite to RSVP. Organiser and door links work here too.</p>
+      <label htmlFor="open-link" className="sr-only">Event link or code</label>
+      <input
+        id="open-link"
+        className="input mt-4 font-mono text-[13px]"
+        placeholder="https://…/e/abc123defg  or  abc123defg"
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value);
+          setError(null);
+        }}
+        spellCheck={false}
+        autoComplete="off"
+      />
+      {error && <p className="mt-2 text-sm text-bad">{error}</p>}
+      <button type="submit" className="btn-primary mt-5 self-start">Open</button>
+    </form>
+  );
+}
+
+type TicketRow = {
+  ticket: StoredTicket;
+  event?: PublicEvent;
+  status?: RsvpStatus | "pending" | "returned";
+  checkedIn?: boolean;
+  gone?: boolean;
+};
+
+function ticketPill(row: TicketRow) {
+  if (row.gone) return <Pill>Event over</Pill>;
+  switch (row.status) {
+    case undefined: return <Pill>…</Pill>;
+    case "pending": return <Pill tone="warn">Awaiting payment</Pill>;
+    case "returned": return <Pill tone="bad">Payment returned</Pill>;
+    case "refunded": return <Pill tone="ok">Refunded</Pill>;
+    case "refunding": return <Pill tone="ok">Refund sending</Pill>;
+    case "forfeited": return <Pill tone="warn">Forfeited</Pill>;
+    default: return row.checkedIn ? <Pill tone="ok">Checked in</Pill> : <Pill tone="gold">Going</Pill>;
+  }
+}
+
+function MyTickets() {
+  const [rows, setRows] = useState<TicketRow[] | null>(null);
+  useEffect(() => {
+    const tickets = listTickets();
+    setRows(tickets.map((ticket) => ({ ticket })));
+    tickets.forEach(async (ticket, i) => {
+      try {
+        // Fetch the event's whole ticket list, never one ticket, so the server can't tell which is ours.
+        const [event, list] = await Promise.all([api.event(ticket.eventId), api.tickets(ticket.eventId)]);
+        const mine = list.tickets.find((t) => t.h === ticket.hash);
+        const returned = list.rejected.some((r) => r.h === ticket.hash);
+        const next: TicketRow = {
+          ticket,
+          event,
+          status: mine ? mine.status : returned ? "returned" : "pending",
+          checkedIn: mine?.checked_in,
+          gone: event.status === "purged",
+        };
+        setRows((prev) => prev && prev.map((r, j) => (j === i ? next : r)));
+      } catch {
+        /* offline: keep the row without live status */
+      }
+    });
+  }, []);
+
+  if (rows === null) return <Spinner />;
+  if (rows.length === 0) {
+    return (
+      <p className="text-sm leading-relaxed text-ink-3">
+        No tickets on this device yet. When you RSVP, your ticket is kept here, and only here.
+      </p>
+    );
+  }
+  return (
+    <ul className="-mx-2 divide-y divide-ink/[0.08]">
+      {rows.map((row) => (
+        <li key={row.ticket.eventId}>
+          <Link href={`/e/${row.ticket.eventId}`} className="flex items-center justify-between gap-4 rounded px-2 py-3 hover:bg-white/[0.03]">
+            <div className="min-w-0">
+              <div className="truncate font-medium">{row.event?.title ?? row.ticket.eventId}</div>
+              <div className="osd mt-0.5 text-[11px] text-ink-4">
+                {row.event ? `${formatWhen(row.event.starts_at)} · ${zatToZec(row.event.deposit_zat)} ZEC` : "Loading…"}
+              </div>
+            </div>
+            <div className="shrink-0">{ticketPill(row)}</div>
+          </Link>
+        </li>
       ))}
-    </svg>
+    </ul>
   );
 }
 
-function Coin() {
+function MyEvents() {
+  const [events, setEvents] = useState<(SavedEvent & { live?: PublicEvent })[] | null>(null);
+  useEffect(() => {
+    const saved = listSavedEvents();
+    setEvents(saved);
+    saved.forEach(async (s, i) => {
+      try {
+        const live = await api.event(s.id);
+        setEvents((prev) => prev && prev.map((e, j) => (j === i ? { ...e, live } : e)));
+      } catch {
+        /* keep the saved row */
+      }
+    });
+  }, []);
+
+  if (events === null) return <Spinner />;
+  if (events.length === 0) {
+    return (
+      <div className="flex flex-1 flex-col">
+        <p className="text-sm leading-relaxed text-ink-3">
+          Events you run appear here if you choose to remember their links on this device when you create them.
+          Otherwise, open the manage link you saved.
+        </p>
+        <Link href="/new" className="btn-secondary mt-5 self-start">Create an event</Link>
+      </div>
+    );
+  }
   return (
-    <svg viewBox="0 0 100 90" className="h-full w-full" aria-hidden>
-      {[34, 27, 20].map((r) => (
-        <circle key={r} cx="50" cy="45" r={r} fill="none" stroke="currentColor" strokeWidth={r === 34 ? 2 : 1} opacity={r === 20 ? 0.6 : 1} />
+    <ul className="-mx-2 divide-y divide-ink/[0.08]">
+      {events.map((e) => (
+        <li key={e.id} className="flex items-center justify-between gap-3 px-2 py-3">
+          <div className="min-w-0">
+            <div className="truncate font-medium">{e.live?.title ?? e.title}</div>
+            <div className="osd mt-0.5 text-[11px] text-ink-4">
+              {e.live ? `${e.live.status} · ${e.live.rsvp_count}/${e.live.capacity} RSVPs · ${e.live.checked_in_count} in` : "…"}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <a href={`/manage/${e.id}#k=${e.adminToken}`} className="btn-secondary px-2.5 py-1.5 text-[11px]">Manage</a>
+            <a href={`/door/${e.id}#k=${e.doorToken}`} className="btn-secondary px-2.5 py-1.5 text-[11px]">Door</a>
+            <button
+              className="btn-ghost px-2 py-1.5 text-[11px]"
+              aria-label={`Forget ${e.title} on this device`}
+              onClick={() => {
+                if (!window.confirm("Forget this event's links on this device? Make sure you saved them somewhere else.")) return;
+                forgetEvent(e.id);
+                setEvents((prev) => prev && prev.filter((x) => x.id !== e.id));
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        </li>
       ))}
-      <text x="50" y="49" fontSize="10" textAnchor="middle" fill="currentColor" fontFamily="monospace">ZEC</text>
-    </svg>
+    </ul>
   );
 }
-
-function TicketGrid() {
-  // Deterministic "QR" pattern.
-  const cells = Array.from({ length: 121 }, (_, i) => ((i * 7919) % 13) % 3 === 0);
-  return (
-    <svg viewBox="0 0 100 90" className="h-full w-full" aria-hidden>
-      <g transform="translate(23 18)">
-        {cells.map((on, i) =>
-          on ? <rect key={i} x={(i % 11) * 5} y={Math.floor(i / 11) * 5} width="4.4" height="4.4" fill="currentColor" /> : null,
-        )}
-        {[[0, 0], [40, 0], [0, 40]].map(([x, y]) => (
-          <g key={`${x}${y}`}>
-            <rect x={x} y={y} width="15" height="15" fill="#070707" stroke="currentColor" strokeWidth="2.2" />
-            <rect x={x + 5} y={y + 5} width="5" height="5" fill="currentColor" />
-          </g>
-        ))}
-      </g>
-    </svg>
-  );
-}
-
-function RefundLoop() {
-  return (
-    <svg viewBox="0 0 100 90" className="h-full w-full" aria-hidden>
-      <path d="M28 45a22 22 0 0 1 38-15" fill="none" stroke="currentColor" strokeWidth="3" />
-      <path d="M72 45a22 22 0 0 1-38 15" fill="none" stroke="currentColor" strokeWidth="3" />
-      <path d="M60 24l8 6-9 4z" fill="currentColor" />
-      <path d="M40 66l-8-6 9-4z" fill="currentColor" />
-      <text x="50" y="49" fontSize="9" textAnchor="middle" fill="currentColor" fontFamily="monospace">ZEC</text>
-    </svg>
-  );
-}
-
-function SeizedLaptop() {
-  return (
-    <svg viewBox="0 0 100 90" className="h-full w-full" aria-hidden>
-      <rect x="22" y="18" width="56" height="38" fill="none" stroke="currentColor" strokeWidth="2.2" />
-      <path d="M14 64h72l-6 7H20z" fill="currentColor" />
-      <text x="50" y="35" fontSize="6" textAnchor="middle" fill="currentColor" fontFamily="monospace">0 NAMES</text>
-      <text x="50" y="45" fontSize="6" textAnchor="middle" fill="currentColor" fontFamily="monospace" opacity="0.6">0 EMAILS</text>
-      <path d="M8 8l84 74" stroke="currentColor" strokeWidth="1" opacity="0.5" />
-    </svg>
-  );
-}
-
-const TAPES: Tape[] = [
-  {
-    id: "no-list",
-    title: ["No", "Guest", "List"],
-    color: "#E0262B",
-    caption: "RSVPs for groups whose attendee list would hurt people if it leaked.",
-    tags: ["Create an event", "Shielded ZEC"],
-    href: "/new",
-  },
-  {
-    id: "deposit",
-    title: ["The", "Deposit"],
-    color: "#F4B728",
-    caption: "A small refundable deposit stops no-shows. Nobody can see who paid, not even you.",
-    tags: ["Orchard", "ZIP 321"],
-    href: "/how-it-works",
-    art: <Coin />,
-  },
-  {
-    id: "door",
-    title: ["The", "Door"],
-    color: "#7C5CFF",
-    caption: "Your ticket is a secret made on your phone. The door checks a hash, never a name.",
-    tags: ["SHA-256", "Works offline"],
-    href: "/how-it-works",
-    art: <TicketGrid />,
-  },
-  {
-    id: "refund",
-    title: ["The", "Refund"],
-    color: "#3DD68C",
-    caption: "Show up, and your deposit returns to an address only you know.",
-    tags: ["Orchard → Orchard", "Full privacy"],
-    href: "/how-it-works",
-    art: <RefundLoop />,
-  },
-  {
-    id: "seized",
-    title: ["Seized"],
-    color: "#3B6CFF",
-    caption: "If the organiser's laptop is taken tonight, there is nothing on it to find.",
-    tags: ["Threat model"],
-    href: "/privacy",
-    art: <SeizedLaptop />,
-  },
-  {
-    id: "purge",
-    title: ["Purge"],
-    color: "#E8E1D0",
-    caption: "One click after the event and even the ticket hashes are gone.",
-    tags: ["Retention: zero"],
-    href: "/privacy",
-    art: <RedactedList />,
-  },
-];
 
 export default function Home() {
   return (
-    <div className="flex min-h-[calc(100dvh-var(--bezel)*2-14rem)] w-full flex-col items-center justify-center pb-4">
-      <h1 className="sr-only">Unlisted: RSVPs without a guest list</h1>
-      <TapeDeck tapes={TAPES} />
+    <div className="mx-auto max-w-page px-4 sm:px-8">
+      <div className="flex flex-col gap-6 border-b border-ink/10 pb-6 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="text-5xl leading-[0.95] sm:text-6xl">RSVPs without a guest list.</h1>
+          <p className="mt-3 max-w-xl text-ink-2">
+            Refundable shielded-ZEC deposits stop no-shows. Nobody, not even the organiser, ever holds a list of who came.{" "}
+            <Link href="/docs" className="whitespace-nowrap text-ink underline decoration-gold decoration-2 underline-offset-4">
+              Read the docs
+            </Link>
+          </p>
+        </div>
+        <ServerStatus />
+      </div>
+
+      <div className="mt-6 grid gap-5 md:grid-cols-2">
+        <Channel n="01" title="Host an event">
+          <p className="text-sm leading-relaxed text-ink-2">
+            Set a refundable deposit and a capacity. You&rsquo;ll get a public RSVP link, a dashboard link and a door
+            link. No account, no email.
+          </p>
+          <Link href="/new" className="btn-primary mt-5 self-start">Create an event</Link>
+        </Channel>
+        <Channel n="02" title="Got an invite?">
+          <OpenLink />
+        </Channel>
+        <Channel n="03" title="Your tickets">
+          <MyTickets />
+        </Channel>
+        <Channel n="04" title="Your events">
+          <MyEvents />
+        </Channel>
+      </div>
     </div>
   );
 }

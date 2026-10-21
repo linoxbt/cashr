@@ -198,3 +198,8 @@ def test_async_shortfall_waits_for_top_up(client, make_event, attendee):
 
 
 MAX_POLLS = 8
+
+
+def test_meta_reports_wallet_tip(client):
+    m = client.get("/meta").json()
+    assert m["chain"] == "sim" and m["tip"] == client.chain.tip_height()
