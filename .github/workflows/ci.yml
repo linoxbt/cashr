@@ -25,6 +25,22 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: pytest -q
 
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Production images build
+        run: |
+          docker build -t unlisted-api ./api
+          docker build -t unlisted-wallet ./wallet
+      - name: Compose file is valid
+        run: |
+          cp .env.example .env
+          sed -i 's/^UNLISTED_SECRET=.*/UNLISTED_SECRET=x/; s/^UW_RPC_PASSWORD=.*/UW_RPC_PASSWORD=x/; s/^UW_SEED_KEY=.*/UW_SEED_KEY=x/; s/^API_DOMAIN=.*/API_DOMAIN=example.com/' .env
+          docker compose --profile https config -q
+      - name: Installer parses
+        run: bash -n deploy/install.sh
+
   web:
     runs-on: ubuntu-latest
     steps:

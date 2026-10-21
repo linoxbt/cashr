@@ -25,6 +25,22 @@ that models the mempool, confirmation policy, expiry and lost responses. Before 
 with a small amount: create an event with a fund address, pay the deposit from ZODL, check in, settle, and confirm
 the refund lands in ZODL and the remainder in the fund.
 
+## One command on a VPS (recommended)
+
+On a fresh Ubuntu 22.04/24.04 server with at least 2 GB of memory (4 GB builds faster), as root:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linoxbt/cashr/main/deploy/install.sh | bash -s -- api.example.com
+```
+
+`deploy/install.sh` installs Docker, generates every secret into `/opt/unlisted/.env` (mode 600), opens only
+SSH/HTTP/HTTPS in the firewall, builds and starts the wallet, the API and Caddy, and waits until
+`https://<domain>/meta` answers. Caddy gets a Let's Encrypt certificate and writes no access logs. Without a domain
+argument it uses `<server-ip>.sslip.io`, which needs no DNS setup. It prints the API URL to put in the web app's
+`NEXT_PUBLIC_API_URL`, the backup commands, and (on first run) `UW_SEED_KEY`.
+
+Re-run the same command to update: it pulls the latest code and restarts, keeping the secrets and data volumes.
+
 ## Quick start (Docker Compose)
 
 ```bash
@@ -32,11 +48,11 @@ cp .env.example .env      # fill in UNLISTED_SECRET, UW_RPC_PASSWORD, UW_SEED_KE
 docker compose up -d --build
 ```
 
-This runs two containers:
+This runs two containers (add `--profile https` and set `API_DOMAIN` for a third, Caddy, serving HTTPS):
 * `wallet`: `unlisted-wallet`. It is not exposed publicly. Its `wallet-data` volume holds `wallet.sqlite`,
   `ops.sqlite` and `seeds/` (one encrypted seed per live event).
-* `api`: the FastAPI service on port 8000, with no access logs. Put TLS in front of it (Caddy, a load balancer, or
-  your host's HTTPS).
+* `api`: the FastAPI service on `127.0.0.1:8000`, with no access logs. The `https` profile puts Caddy in front of
+  it; otherwise use your own TLS proxy.
 
 **Back up the `wallet-data` volume and, separately, `UW_SEED_KEY`.** Together they control every live event's
 deposits; neither alone is enough. Purging an event deletes its seed on purpose, after its money has been swept out.
