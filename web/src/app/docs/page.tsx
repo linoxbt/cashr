@@ -207,10 +207,9 @@ export default function Docs() {
               Unlisted is three pieces: this web app, a FastAPI service, and <C>unlisted-wallet</C>, a light-client Zcash
               wallet built on librustzcash that syncs from a public lightwalletd server, so no full node is needed.
             </p>
-            <pre className="panel overflow-x-auto p-4 font-mono text-[12.5px] leading-relaxed text-ink">{`git clone https://github.com/linoxbt/cashr && cd cashr
-cp .env.example .env         # set UNLISTED_SECRET, UW_RPC_PASSWORD, UW_SEED_KEY, UNLISTED_CORS_ORIGINS
-docker compose up -d --build # wallet + API on :8000
-# Back up the wallet volume (/data) and, separately, UW_SEED_KEY. Both are needed to move funds.`}</pre>
+            <pre className="panel overflow-x-auto p-4 font-mono text-[12.5px] leading-relaxed text-ink">{`# On a fresh Ubuntu server, as root: wallet + API + HTTPS, secrets generated for you
+curl -fsSL https://raw.githubusercontent.com/linoxbt/cashr/main/deploy/install.sh | bash -s -- api.example.com
+# Back up the wallet volume and, separately, UW_SEED_KEY. Both are needed to move funds.`}</pre>
             <p>
               Put HTTPS in front of the API, then deploy <C>web/</C> to Netlify or Vercel with{" "}
               <C>NEXT_PUBLIC_API_URL</C> set to the API&rsquo;s URL. Run exactly one API process: it refuses to start if

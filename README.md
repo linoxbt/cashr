@@ -37,7 +37,13 @@ docs/    SPEC.md · PROTOCOL.md · DEPLOY.md
 
 ## Run it
 
-**Against Zcash mainnet** (real wallet, real ZEC): see [docs/DEPLOY.md](docs/DEPLOY.md), or in short:
+**Against Zcash mainnet** (real wallet, real ZEC), on a fresh Ubuntu server as root:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linoxbt/cashr/main/deploy/install.sh | bash -s -- api.example.com
+```
+
+Details and other options in [docs/DEPLOY.md](docs/DEPLOY.md). By hand:
 
 ```bash
 cp .env.example .env && docker compose up -d --build     # wallet + API

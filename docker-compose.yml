@@ -1,6 +1,8 @@
 # The Unlisted backend: light-client wallet + API.
 #   cp .env.example .env   # set secrets
-#   docker compose up -d
+#   docker compose up -d                       # API on 127.0.0.1:8000 only
+#   docker compose --profile https up -d       # plus Caddy serving https://$API_DOMAIN
+# On a fresh server, deploy/install.sh does all of this for you.
 # The web app (web/) deploys separately (Netlify) with NEXT_PUBLIC_API_URL.
 services:
   wallet:
@@ -31,8 +33,24 @@ services:
     volumes:
       - api-data:/data
     ports:
-      - "8000:8000"
+      # Local only: the public reaches the API through Caddy (profile "https").
+      - "127.0.0.1:8000:8000"
+
+  caddy:
+    image: caddy:2.8.4
+    profiles: ["https"]
+    restart: unless-stopped
+    depends_on: [api]
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?set API_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
 
 volumes:
   wallet-data:
   api-data:
+  caddy-data:
