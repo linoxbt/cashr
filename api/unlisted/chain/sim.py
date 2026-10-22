@@ -321,6 +321,8 @@ class SimChain:
 
     def delete_account(self, account_ref: str) -> None:
         with self._lock:
+            if account_ref not in self._accounts:
+                return  # like the real wallet: deleting a deleted account succeeds
             bal = self.balance(account_ref)
             if bal.total_zat > DUST_ZAT:
                 raise ChainError("account still holds funds")

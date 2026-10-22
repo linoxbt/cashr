@@ -58,6 +58,11 @@ IDLE_RETIRE_AFTER = timedelta(days=1)
 _ID_ALPHABET = string.ascii_lowercase + string.digits
 
 
+def _account_gone(e: ChainError) -> bool:
+    """The wallet no longer has the account (its delete already happened)."""
+    return "no account" in str(e).lower()
+
+
 def _starts_before(starts_at: str, cutoff: datetime) -> bool:
     try:
         start = datetime.fromisoformat(starts_at.replace("Z", "+00:00"))
@@ -618,7 +623,14 @@ class Engine:
         if db.scalar(select(Payout.id).where(Payout.event_id == ev.id, Payout.status.in_(IN_FLIGHT))) is not None:
             raise EngineError("payouts_pending", "A payout (such as a returned late payment) is still in progress. "
                               "Purge once it has confirmed.", 409)
-        bal = self.balance(ev, fresh=True)
+        try:
+            bal = self.balance(ev, fresh=True)
+        except ChainError as e:
+            if not _account_gone(e):
+                raise
+            # An earlier purge deleted the wallet account and was interrupted
+            # before recording it: nothing is left to lose, so finish the purge.
+            return
         if bal.total_zat > self.settings.dust_zat:
             raise EngineError(
                 "funds_left",
