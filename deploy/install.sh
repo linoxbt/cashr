@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command install of the Unlisted backend (wallet + API + HTTPS) on a fresh
+# One-command install of the cashr backend (wallet + API + HTTPS) on a fresh
 # Ubuntu 22.04/24.04 server. Run as root:
 #
 #   curl -fsSL https://raw.githubusercontent.com/linoxbt/cashr/main/deploy/install.sh | bash -s -- [api-domain] [web-origin]
@@ -13,9 +13,9 @@ set -euo pipefail
 
 DOMAIN="${1:-}"
 WEB_ORIGIN="${2:-https://cashr.site}"
-REPO="${UNLISTED_REPO:-https://github.com/linoxbt/cashr.git}"
-BRANCH="${UNLISTED_BRANCH:-main}"
-DIR="${UNLISTED_DIR:-/opt/unlisted}"
+REPO="${CASHR_REPO:-https://github.com/linoxbt/cashr.git}"
+BRANCH="${CASHR_BRANCH:-main}"
+DIR="${CASHR_DIR:-/opt/cashr}"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 [ "$(id -u)" = 0 ] || { echo "Run this as root (sudo -i)." >&2; exit 1; }
@@ -32,19 +32,46 @@ fi
 free_mb=$(df -Pm /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}')
 [ -n "$free_mb" ] || free_mb=$(df -Pm / | awk 'NR==2 {print $4}')
 if [ "$free_mb" -lt 2048 ]; then
-  echo "Only ${free_mb} MB of disk is free; Unlisted needs at least 2 GB. Free some space and re-run." >&2
+  echo "Only ${free_mb} MB of disk is free; cashr needs at least 2 GB. Free some space and re-run." >&2
   echo "Biggest directories:  du -xh / --max-depth=2 2>/dev/null | sort -h | tail -15" >&2
   echo "Unused Docker data:   docker system df   (then e.g. docker builder prune)" >&2
   exit 1
 fi
 
-say "Fetching Unlisted ($BRANCH)"
+# Installs from before the rename lived in /opt/unlisted: move them, keeping
+# their secrets.
+if [ ! -e "$DIR" ] && [ -d /opt/unlisted/.git ]; then
+  say "Moving the old install from /opt/unlisted to $DIR"
+  (cd /opt/unlisted && docker compose -p unlisted down) || true
+  mv /opt/unlisted "$DIR"
+fi
+
+say "Fetching cashr ($BRANCH)"
 if [ -d "$DIR/.git" ]; then
   git -C "$DIR" fetch -q --depth 1 origin "$BRANCH" && git -C "$DIR" reset -q --hard FETCH_HEAD
 else
   git clone -q --depth 1 --branch "$BRANCH" "$REPO" "$DIR"
 fi
 cd "$DIR"
+
+if [ -f .env ] && grep -qE '^(UNLISTED_|UW_)' .env; then
+  say "Renaming settings to the cashr names"
+  cp .env .env.before-rename
+  sed -i -E 's/^UW_/CASHR_WALLET_/; s/^UNLISTED_/CASHR_/' .env
+  chmod 600 .env .env.before-rename
+fi
+
+# Data volumes were named after the old "unlisted" project: copy them once into
+# the cashr ones (the old volumes are kept until you remove them).
+for v in wallet-data api-data caddy-data; do
+  if docker volume inspect "unlisted_$v" >/dev/null 2>&1 && ! docker volume inspect "cashr_$v" >/dev/null 2>&1; then
+    say "Copying volume unlisted_$v to cashr_$v"
+    docker compose -p unlisted down >/dev/null 2>&1 || true
+    docker volume create "cashr_$v" >/dev/null
+    docker run --rm -v "unlisted_$v:/from:ro" -v "cashr_$v:/to" alpine:3.20 sh -c \
+      'cp -a /from/. /to/ && if [ -f /to/unlisted.db ]; then mv /to/unlisted.db /to/cashr.db; rm -f /to/unlisted.db.lock; fi'
+  fi
+done
 
 if [ -z "$DOMAIN" ]; then
   ip=$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')
@@ -59,16 +86,16 @@ if [ ! -f .env ]; then
   say "Generating secrets"
   umask 077
   cat > .env <<EOF
-UNLISTED_NETWORK=main
-UNLISTED_SECRET=$(openssl rand -hex 32)
-UW_RPC_PASSWORD=$(openssl rand -hex 24)
-UW_SEED_KEY=$(openssl rand -hex 32)
-UNLISTED_CORS_ORIGINS=$WEB_ORIGIN
+CASHR_NETWORK=main
+CASHR_SECRET=$(openssl rand -hex 32)
+CASHR_WALLET_RPC_PASSWORD=$(openssl rand -hex 24)
+CASHR_WALLET_SEED_KEY=$(openssl rand -hex 32)
+CASHR_CORS_ORIGINS=$WEB_ORIGIN
 API_DOMAIN=$DOMAIN
 EOF
   NEW=1
 else
-  sed -i "s|^API_DOMAIN=.*|API_DOMAIN=$DOMAIN|; s|^UNLISTED_CORS_ORIGINS=.*|UNLISTED_CORS_ORIGINS=$WEB_ORIGIN|" .env
+  sed -i "s|^API_DOMAIN=.*|API_DOMAIN=$DOMAIN|; s|^CASHR_CORS_ORIGINS=.*|CASHR_CORS_ORIGINS=$WEB_ORIGIN|" .env
 fi
 chmod 600 .env
 
@@ -114,22 +141,22 @@ done
 
 cat <<EOF
 
-Unlisted backend is running.
+cashr backend is running.
 
   API URL:   https://$DOMAIN
   Next step: set NEXT_PUBLIC_API_URL=https://$DOMAIN on the web app and redeploy it.
 
 Back up, separately and offline:
   1. The wallet volume, encrypted (you choose a passphrase):
-       docker run --rm -v unlisted_wallet-data:/d alpine tar cz -C /d . | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -out wallet-backup.tgz.enc
+       docker run --rm -v cashr_wallet-data:/d alpine tar cz -C /d . | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -out wallet-backup.tgz.enc
      Restore:
-       openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in wallet-backup.tgz.enc | docker run --rm -i -v unlisted_wallet-data:/d alpine tar xz -C /d
-  2. UW_SEED_KEY from $DIR/.env
+       openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in wallet-backup.tgz.enc | docker run --rm -i -v cashr_wallet-data:/d alpine tar xz -C /d
+  2. CASHR_WALLET_SEED_KEY from $DIR/.env
 Spending needs both. Privacy doesn't: the volume alone holds every live event's ticket hashes and refund
 addresses, so never keep it unencrypted. A backup also keeps events purged after it was taken: replace old
 backups after a purge.
 EOF
 if [ "$NEW" = 1 ]; then
   echo
-  echo "UW_SEED_KEY (shown once here; it is also in $DIR/.env): $(grep '^UW_SEED_KEY=' .env | cut -d= -f2)"
+  echo "CASHR_WALLET_SEED_KEY (shown once here; it is also in $DIR/.env): $(grep '^CASHR_WALLET_SEED_KEY=' .env | cut -d= -f2)"
 fi

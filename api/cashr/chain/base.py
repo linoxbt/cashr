@@ -1,4 +1,4 @@
-"""The interface between Unlisted and its Zcash wallet (unlisted-wallet)."""
+"""The interface between cashr and its Zcash wallet (cashr-wallet)."""
 
 from __future__ import annotations
 

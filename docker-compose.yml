@@ -1,9 +1,12 @@
-# The Unlisted backend: light-client wallet + API.
+# The cashr backend: light-client wallet + API.
 #   cp .env.example .env   # set secrets
 #   docker compose up -d                       # API on 127.0.0.1:8000 only
 #   docker compose --profile https up -d       # plus Caddy serving https://$API_DOMAIN
 # On a fresh server, deploy/install.sh does all of this for you.
 # The web app (web/) deploys separately (Netlify) with NEXT_PUBLIC_API_URL.
+
+# Fixed, so volume names (cashr_wallet-data, ...) never depend on the folder name.
+name: cashr
 
 # Logs are small and rotated: they live outside the database, so a purge can't
 # reach them. Nothing here logs visitors, ticket hashes, addresses or txids.
@@ -20,50 +23,50 @@ services:
   # and can match them to the attendees' own wallets broadcasting them.
   tor:
     build: ./deploy/tor
-    image: unlisted-tor:local
+    image: cashr-tor:local
     restart: unless-stopped
     logging: *logging
     # Not published: only the wallet uses it.
 
   wallet:
     # Prebuilt by CI; `docker compose build` builds it from source instead.
-    image: ghcr.io/linoxbt/cashr-wallet:${UNLISTED_TAG:-main}
+    image: ghcr.io/linoxbt/cashr-wallet:${CASHR_TAG:-main}
     build: ./wallet
     restart: unless-stopped
     depends_on: [tor]
     logging: *logging
     environment:
-      UW_NETWORK: ${UNLISTED_NETWORK:-main}
+      CASHR_WALLET_NETWORK: ${CASHR_NETWORK:-main}
       # Or your own lightwalletd/Zaino, e.g. http://lightwalletd:9067, for no third party at all.
-      UW_LIGHTWALLETD: ${UW_LIGHTWALLETD:-https://zec.rocks:443}
-      # Set UW_SOCKS_PROXY= (empty) in .env to connect directly instead.
-      UW_SOCKS_PROXY: ${UW_SOCKS_PROXY-tor:9050}
-      UW_RPC_USER: unlisted
-      UW_RPC_PASSWORD: ${UW_RPC_PASSWORD:?set UW_RPC_PASSWORD}
-      UW_SEED_KEY: ${UW_SEED_KEY:?set UW_SEED_KEY}
+      CASHR_WALLET_LIGHTWALLETD: ${CASHR_WALLET_LIGHTWALLETD:-https://zec.rocks:443}
+      # Set CASHR_WALLET_SOCKS_PROXY= (empty) in .env to connect directly instead.
+      CASHR_WALLET_SOCKS_PROXY: ${CASHR_WALLET_SOCKS_PROXY-tor:9050}
+      CASHR_WALLET_RPC_USER: cashr
+      CASHR_WALLET_RPC_PASSWORD: ${CASHR_WALLET_RPC_PASSWORD:?set CASHR_WALLET_RPC_PASSWORD}
+      CASHR_WALLET_SEED_KEY: ${CASHR_WALLET_SEED_KEY:?set CASHR_WALLET_SEED_KEY}
     volumes:
       - wallet-data:/data   # per-event seeds (encrypted) and wallet state: back it up
     # Not published: only the API talks to the wallet.
 
   api:
-    image: ghcr.io/linoxbt/cashr-api:${UNLISTED_TAG:-main}
+    image: ghcr.io/linoxbt/cashr-api:${CASHR_TAG:-main}
     build: ./api
     restart: unless-stopped
     depends_on: [wallet]
     logging: *logging
     environment:
-      UNLISTED_CHAIN: rpc
-      UNLISTED_NETWORK: ${UNLISTED_NETWORK:-main}
-      UNLISTED_SECRET: ${UNLISTED_SECRET:?set UNLISTED_SECRET}
-      UNLISTED_RPC_URL: http://wallet:8232
-      UNLISTED_RPC_USER: unlisted
-      UNLISTED_RPC_PASSWORD: ${UW_RPC_PASSWORD}
-      UNLISTED_CORS_ORIGINS: ${UNLISTED_CORS_ORIGINS:?set your web origin}
+      CASHR_CHAIN: rpc
+      CASHR_NETWORK: ${CASHR_NETWORK:-main}
+      CASHR_SECRET: ${CASHR_SECRET:?set CASHR_SECRET}
+      CASHR_RPC_URL: http://wallet:8232
+      CASHR_RPC_USER: cashr
+      CASHR_RPC_PASSWORD: ${CASHR_WALLET_RPC_PASSWORD}
+      CASHR_CORS_ORIGINS: ${CASHR_CORS_ORIGINS:?set your web origin}
     volumes:
       - api-data:/data
     ports:
       # Local only: the public reaches the API through Caddy (profile "https").
-      - "127.0.0.1:${UNLISTED_API_PORT:-8000}:8000"
+      - "127.0.0.1:${CASHR_API_PORT:-8000}:8000"
 
   caddy:
     image: caddy:2.8.4

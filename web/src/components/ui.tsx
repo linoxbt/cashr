@@ -6,7 +6,7 @@ import { api, type Meta } from "@/lib/api";
 
 export function Pill({ tone = "neutral", children }: { tone?: "neutral" | "ok" | "warn" | "bad" | "gold"; children: ReactNode }) {
   const tones = {
-    neutral: "bg-white/[0.06] text-ink-2",
+    neutral: "bg-ink/[0.06] text-ink-2",
     ok: "bg-ok-soft text-ok",
     warn: "bg-warn-soft text-warn",
     bad: "bg-bad-soft text-bad",
@@ -31,7 +31,7 @@ export function Stat({ label, value, sub }: { label: string; value: ReactNode; s
 
 export function Notice({ tone = "neutral", title, children }: { tone?: "neutral" | "ok" | "warn" | "bad"; title?: string; children: ReactNode }) {
   const tones = {
-    neutral: "border-ink/10 bg-white/[0.03]",
+    neutral: "border-ink/10 bg-ink/[0.03]",
     ok: "border-ok/20 bg-ok-soft",
     warn: "border-warn/20 bg-warn-soft",
     bad: "border-bad/20 bg-bad-soft",
@@ -72,7 +72,7 @@ export function CopyField({ label, value, hint }: { label: string; value: string
         <span className="label mb-0">{label}</span>
         <CopyButton value={value} />
       </div>
-      <div className="mono-break mt-1.5 rounded-[4px] border border-ink/10 bg-black/40 px-3 py-2 text-ink-2">{value}</div>
+      <div className="mono-break mt-1.5 rounded-[4px] border border-ink/10 bg-well/40 px-3 py-2 text-ink-2">{value}</div>
       {hint && <p className="hint">{hint}</p>}
     </div>
   );

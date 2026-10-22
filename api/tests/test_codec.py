@@ -1,7 +1,7 @@
 import pytest
 
-from unlisted.chain.sim import random_unified_address
-from unlisted.codec import (
+from cashr.chain.sim import random_unified_address
+from cashr.codec import (
     _CHARSET,
     _hrp_expand,
     _polymod,
@@ -35,8 +35,8 @@ def test_memo_round_trip_and_padding():
     assert decode_memo(raw.ljust(512, b"\x00")) == m
 
 
-@pytest.mark.parametrize("raw", [b"", b"hello", b"UNL1 short", b"UNL2 abcde12345 " + b"A" * 43 + b" u1x",
-                                 b"UNL1 ABCDE12345 " + b"A" * 43 + b" u1x"])
+@pytest.mark.parametrize("raw", [b"", b"hello", b"CSH1 short", b"UNL2 abcde12345 " + b"A" * 43 + b" u1x",
+                                 b"CSH1 ABCDE12345 " + b"A" * 43 + b" u1x"])
 def test_memo_rejects_garbage(raw):
     with pytest.raises(MemoError):
         decode_memo(raw)

@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { DEMO_URL } from "@/lib/site";
+
 
 export const metadata: Metadata = { title: "Docs" };
 
@@ -61,7 +63,7 @@ function Table({ head, rows }: { head: string[]; rows: ReactNode[][] }) {
 }
 
 const C = ({ children }: { children: ReactNode }) => (
-  <code className="rounded-[3px] bg-white/[0.06] px-1.5 py-0.5 font-mono text-[12.5px] text-ink">{children}</code>
+  <code className="rounded-[3px] bg-ink/[0.06] px-1.5 py-0.5 font-mono text-[12.5px] text-ink">{children}</code>
 );
 
 export default function Docs() {
@@ -69,10 +71,15 @@ export default function Docs() {
     <div className="mx-auto max-w-page px-4 sm:px-8">
       <div className="max-w-3xl">
         <p className="eyebrow">Documentation</p>
-        <h1 className="mt-3 text-5xl sm:text-6xl">Unlisted, end to end.</h1>
+        <h1 className="mt-3 text-5xl sm:text-6xl">cashr, end to end.</h1>
         <p className="mt-4 text-lg leading-relaxed text-ink-2">
-          Everything an organiser, attendee, door volunteer or self-hoster needs: how to use Unlisted, what it protects,
+          Everything an organiser, attendee, door volunteer or self-hoster needs: how to use cashr, what it protects,
           what it costs, and how it works underneath.
+        </p>
+        <p className="mt-3 text-ink-2">
+          To try every step without ZEC, use the demo at{" "}
+          <a href={DEMO_URL} className="underline decoration-ink-4 underline-offset-4 hover:text-ink">{DEMO_URL.replace(/^https?:\/\//, "")}</a>:
+          the same app on a simulated chain.
         </p>
       </div>
 
@@ -89,7 +96,7 @@ export default function Docs() {
           <section id="overview" className="scroll-mt-32">
             <div className="docs-prose max-w-3xl space-y-4 text-[15px] leading-relaxed text-ink-2">
               <p>
-                Unlisted is RSVPs for groups whose attendee list would hurt people if it leaked: support groups, union
+                cashr is RSVPs for groups whose attendee list would hurt people if it leaked: support groups, union
                 organisers, journalists and their sources, activists. A small refundable deposit in shielded ZEC stops
                 no-shows. The deposit hides who paid, the ticket is a secret that lives only on the attendee&rsquo;s
                 phone, and the refund goes back to an address only the attendee knows.
@@ -105,7 +112,7 @@ export default function Docs() {
             <Steps
               items={[
                 ["Create the event", <>On <Link href="/new" className="text-ink underline underline-offset-4">Create event</Link>, set a name, time, capacity and refundable deposit (minimum 0.0005 ZEC). The place is public: for sensitive venues, write something like &ldquo;sent on Signal after you RSVP&rdquo;.</>],
-                ["Save your two private links", "You get a manage link and a door link, shown once. Unlisted stores only a hash of them, so it can't recover them. Keep them in a password manager. You can also choose to remember them on this device."],
+                ["Save your two private links", "You get a manage link and a door link, shown once. cashr stores only a hash of them, so it can't recover them. Keep them in a password manager. You can also choose to remember them on this device."],
                 ["Share the public RSVP link", "Send it however your group already talks. Anyone with it can RSVP until the event is full or you close RSVPs."],
                 ["Check people in", "Open the door link on the phone at the entrance and scan tickets. It works offline and syncs when the connection returns."],
                 ["End the event & refund", "On the dashboard, End event & refund sends everyone who checked in their deposit back. Deposits of people who didn't come are forfeited, and swept to your group's fund address if you set one."],
@@ -124,7 +131,7 @@ export default function Docs() {
             <Steps
               items={[
                 ["Open the invite", "Paste the link on the home screen, or open it directly."],
-                ["Give a refund address", <>In your wallet, open <em>Receive</em> and copy the shielded address (it starts with <C>u1</C>). It must be fresh: never one you used for another Unlisted RSVP. The page checks it can receive a private (Orchard) refund before you pay.</>],
+                ["Give a refund address", <>In your wallet, open <em>Receive</em> and copy the shielded address (it starts with <C>u1</C>). It must be fresh: never one you used for another cashr RSVP. The page checks it can receive a private (Orchard) refund before you pay.</>],
                 ["Pay the deposit", "Scan the QR code or tap Open in wallet app. The amount and memo are filled in; don't change them. Confirmation takes about a minute."],
                 ["Keep your ticket", "Your ticket appears as a QR code. Save the image: it is stored only in this browser, and it is the only way in and the only way to get your deposit back."],
                 ["Show it at the door, get refunded", "After the event, the deposit returns to your refund address."],
@@ -161,7 +168,7 @@ export default function Docs() {
               items={[
                 ["One wallet account per event", "Each event gets its own account from its own random seed (encrypted at rest), with an Orchard-only (shielded) address and a birthday at the current block. Purging the event deletes the seed."],
                 ["A secret on the attendee's phone", "The browser makes 32 random bytes and keeps them. Only SHA-256 of that secret leaves the device."],
-                ["The memo", <>The payment carries one encrypted line: <C>UNL1 &lt;event&gt; &lt;ticket hash&gt; &lt;refund address&gt;</C>. Only the event&rsquo;s wallet can read it.</>],
+                ["The memo", <>The payment carries one encrypted line: <C>CSH1 &lt;event&gt; &lt;ticket hash&gt; &lt;refund address&gt;</C>. Only the event&rsquo;s wallet can read it.</>],
                 ["The wallet reads it", "A light-client wallet syncs from lightwalletd, fetches the full transaction over Tor to decrypt the memo, and the API records the hash and refund address."],
                 ["The door checks a hash", "The ticket QR holds the secret; the door hashes it and looks the hash up."],
                 ["Refunds stay in Orchard", "Refunds are batched Orchard-to-Orchard sends with the FullPrivacy policy, so no amount or recipient is revealed on chain."],
@@ -184,7 +191,7 @@ export default function Docs() {
                 ["When a refund counts as paid", "Once its transaction is mined with 3 confirmations. One that expires unmined is sent again automatically; it is never paid twice."],
                 ["No-show money", "Swept, minus the network fee, to the organiser's no-show fund address once refunds have confirmed. Without an address it waits in the event wallet, and the event can't be purged until it is swept."],
                 ["When refunds can go out", "A deposit becomes spendable after 10 confirmations (about 12 minutes). Refunds queued earlier simply wait."],
-                ["Who holds the money", "Unlisted's wallet holds deposits until the event is settled. Keep deposits small: the price of a coffee."],
+                ["Who holds the money", "cashr's wallet holds deposits until the event is settled. Keep deposits small: the price of a coffee."],
               ]}
             />
           </Section>
@@ -204,12 +211,12 @@ export default function Docs() {
 
           <Section id="self-hosting" title="Self-hosting">
             <p>
-              Unlisted is three pieces: this web app, a FastAPI service, and <C>unlisted-wallet</C>, a light-client Zcash
+              cashr is three pieces: this web app, a FastAPI service, and <C>cashr-wallet</C>, a light-client Zcash
               wallet built on librustzcash that syncs from a public lightwalletd server over Tor, so no full node is needed.
             </p>
             <pre className="panel overflow-x-auto p-4 font-mono text-[12.5px] leading-relaxed text-ink">{`# On a fresh Ubuntu server, as root: wallet + API + HTTPS, secrets generated for you
 curl -fsSL https://raw.githubusercontent.com/linoxbt/cashr/main/deploy/install.sh | bash -s -- api.example.com
-# Back up the wallet volume and, separately, UW_SEED_KEY. Both are needed to move funds.`}</pre>
+# Back up the wallet volume and, separately, CASHR_WALLET_SEED_KEY. Both are needed to move funds.`}</pre>
             <p>
               Put HTTPS in front of the API, then deploy <C>web/</C> to Netlify or Vercel with{" "}
               <C>NEXT_PUBLIC_API_URL</C> set to the API&rsquo;s URL. Run exactly one API process: it refuses to start if

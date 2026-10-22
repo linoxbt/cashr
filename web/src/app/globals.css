@@ -11,6 +11,70 @@
   /* Height of the visible screen, for full-screen sections inside it. */
   --stage-h: calc(100dvh - var(--bezel) * 2);
   color-scheme: dark;
+
+  /* Dark theme (the default): phosphor cream on a dark tube. "r g b" triplets. */
+  --ink: 236 233 225;
+  --ink-2: 207 203 194;
+  --ink-3: 154 150 142;
+  --ink-4: 107 104 98;
+  --paper: 17 17 17;
+  --paper-2: 25 25 25;
+  --paper-3: 34 34 34;
+  --screen: 17 17 17;
+  --screen-2: 22 22 22;
+  --screen-3: 29 29 29;
+  --bezel-tone: 5 5 5;
+  --well: 0 0 0;
+  --gold: 244 183 40;
+  --gold-soft: 42 35 18;
+  --gold-ink: 244 201 90;
+  --on-gold: 17 17 17;
+  --ok: 47 163 107;
+  --ok-soft: 18 37 27;
+  --warn: 217 154 30;
+  --warn-soft: 42 33 18;
+  --bad: 229 72 77;
+  --bad-soft: 44 20 22;
+  /* The CRT around the screen. */
+  --tube-outer: radial-gradient(120% 90% at 50% 0%, #121212 0%, #070707 60%, #030303 100%);
+  --tube-glass: radial-gradient(130% 120% at 50% 45%, #1b1b1b 0%, #131313 45%, #0b0b0b 100%);
+  --tube-rim: 0 0 0 1px #000, 0 0 0 3px #0d0d0d, 0 30px 80px rgba(0, 0, 0, 0.7);
+  --tube-shade: inset 0 0 140px 30px rgba(0, 0, 0, 0.75), inset 0 0 18px 4px rgba(0, 0, 0, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --scanline: rgba(255, 255, 255, 0.022);
+  --glare: 1;
+}
+
+/* White theme: ink on paper, the tube reduced to a light frame. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --ink: 22 20 15;
+  --ink-2: 61 58 51;
+  --ink-3: 99 95 87;
+  --ink-4: 140 136 128;
+  --paper: 255 255 255;
+  --paper-2: 244 242 236;
+  --paper-3: 233 230 222;
+  --screen: 251 250 247;
+  --screen-2: 244 242 236;
+  --screen-3: 236 233 225;
+  --bezel-tone: 217 213 203;
+  --well: 255 255 255;
+  --gold: 232 166 12;
+  --gold-soft: 251 240 213;
+  --gold-ink: 138 93 0;
+  --on-gold: 17 17 17;
+  --ok: 31 122 77;
+  --ok-soft: 227 243 234;
+  --warn: 154 106 0;
+  --warn-soft: 251 240 213;
+  --bad: 198 47 53;
+  --bad-soft: 251 229 230;
+  --tube-outer: linear-gradient(180deg, #e7e3d9 0%, #d9d5cb 100%);
+  --tube-glass: radial-gradient(130% 120% at 50% 45%, #ffffff 0%, #fbfaf7 55%, #f1eee7 100%);
+  --tube-rim: 0 0 0 1px rgba(0, 0, 0, 0.12), 0 20px 60px rgba(0, 0, 0, 0.12);
+  --tube-shade: inset 0 0 60px 6px rgba(0, 0, 0, 0.05);
+  --scanline: rgba(0, 0, 0, 0.018);
+  --glare: 0;
 }
 
 @media (max-width: 640px) {
@@ -23,8 +87,8 @@
 html,
 body {
   height: 100%;
-  background: #050505;
-  color: #ece9e1;
+  background: rgb(var(--bezel-tone));
+  color: rgb(var(--ink));
 }
 
 body {
@@ -49,8 +113,7 @@ h2 {
   position: fixed;
   inset: 0;
   padding: var(--bezel);
-  background:
-    radial-gradient(120% 90% at 50% 0%, #121212 0%, #070707 60%, #030303 100%);
+  background: var(--tube-outer);
 }
 
 .crt-screen {
@@ -59,11 +122,8 @@ h2 {
   border-radius: var(--screen-radius) / calc(var(--screen-radius) * 0.9);
   overflow: hidden;
   isolation: isolate;
-  background: radial-gradient(130% 120% at 50% 45%, #1b1b1b 0%, #131313 45%, #0b0b0b 100%);
-  box-shadow:
-    0 0 0 1px #000,
-    0 0 0 3px #0d0d0d,
-    0 30px 80px rgba(0, 0, 0, 0.7);
+  background: var(--tube-glass);
+  box-shadow: var(--tube-rim);
   transition: filter 300ms ease;
 }
 
@@ -78,7 +138,7 @@ h2 {
   overflow-x: hidden;
   overscroll-behavior: contain;
   scrollbar-width: thin;
-  scrollbar-color: rgba(236, 233, 225, 0.18) transparent;
+  scrollbar-color: rgb(var(--ink) / 0.18) transparent;
 }
 
 /* Overlays sit above content and never take clicks. */
@@ -91,14 +151,11 @@ h2 {
 }
 
 .crt-vignette {
-  box-shadow:
-    inset 0 0 140px 30px rgba(0, 0, 0, 0.75),
-    inset 0 0 18px 4px rgba(0, 0, 0, 0.9),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  box-shadow: var(--tube-shade);
 }
 
 .crt-scanlines {
-  background: repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.022) 0 1px, transparent 1px 3px);
+  background: repeating-linear-gradient(to bottom, var(--scanline) 0 1px, transparent 1px 3px);
   mix-blend-mode: screen;
 }
 
@@ -107,6 +164,7 @@ h2 {
     linear-gradient(105deg, transparent 58%, rgba(255, 255, 255, 0.035) 64%, transparent 70%),
     linear-gradient(105deg, transparent 70%, rgba(255, 255, 255, 0.025) 74%, transparent 78%),
     radial-gradient(60% 18% at 50% 3%, rgba(255, 255, 255, 0.05), transparent 70%);
+  opacity: var(--glare);
 }
 
 .crt-grain {
@@ -206,25 +264,25 @@ h2 {
       disabled:cursor-not-allowed disabled:opacity-40;
   }
   .btn-primary {
-    @apply btn bg-ink text-screen hover:bg-white;
+    @apply btn bg-ink text-screen hover:bg-ink/85;
   }
   .btn-secondary {
-    @apply btn border border-ink/20 bg-transparent text-ink hover:border-ink/45 hover:bg-white/[0.03];
+    @apply btn border border-ink/20 bg-transparent text-ink hover:border-ink/45 hover:bg-ink/[0.04];
   }
   .btn-danger {
     @apply btn border border-bad/40 bg-transparent text-bad hover:bg-bad-soft;
   }
   .btn-ghost {
-    @apply btn text-ink-2 hover:bg-white/[0.04] hover:text-ink;
+    @apply btn text-ink-2 hover:bg-ink/[0.05] hover:text-ink;
   }
   .card {
-    @apply rounded-md border border-ink/[0.11] bg-white/[0.025] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)];
+    @apply rounded-md border border-ink/[0.11] bg-ink/[0.025] shadow-[inset_0_1px_0_rgb(var(--ink)/0.03)];
   }
   .panel {
-    @apply rounded-md border border-ink/[0.11] bg-black/40;
+    @apply rounded-md border border-ink/[0.11] bg-well/40;
   }
   .input {
-    @apply block w-full rounded-[4px] border border-ink/15 bg-black/40 px-3 py-2.5 text-sm text-ink placeholder:text-ink-4
+    @apply block w-full rounded-[4px] border border-ink/15 bg-well/40 px-3 py-2.5 text-sm text-ink placeholder:text-ink-4
       focus:border-gold/60 focus:outline-none focus:ring-2 focus:ring-gold/20;
   }
   .label {

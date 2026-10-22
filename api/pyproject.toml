@@ -1,7 +1,7 @@
 [project]
-name = "unlisted-api"
+name = "cashr-api"
 version = "0.1.0"
-description = "Unlisted: RSVPs with refundable shielded-ZEC deposits and no attendee list."
+description = "cashr: RSVPs with refundable shielded-ZEC deposits and no attendee list."
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",
@@ -19,7 +19,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["unlisted*"]
+include = ["cashr*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,8 +1,8 @@
-"""Chain adapter for unlisted-wallet's JSON-RPC (wallet/).
+"""Chain adapter for cashr-wallet's JSON-RPC (wallet/).
 
-The method names follow zcashd where one exists, but the semantics Unlisted
+The method names follow zcashd where one exists, but the semantics cashr
 needs (idempotent sends, sweeps, transaction expiry, account deletion) are
-unlisted-wallet extensions, so this adapter only supports that wallet. Each
+cashr-wallet extensions, so this adapter only supports that wallet. Each
 event gets its own account, with its own keys, so funds never mix and an
 event's keys can be destroyed when it is purged.
 """
@@ -109,7 +109,7 @@ class RpcChain:
             }
             for r in recipients
         ]
-        # minconf keeps zcashd's parameter order; unlisted-wallet applies librustzcash's
+        # minconf keeps zcashd's parameter order; cashr-wallet applies librustzcash's
         # own confirmation policy (10 for received notes, 3 for change) instead.
         return self._call("z_sendmany", from_address, amounts, self._min_conf, None, self._policy, key)
 

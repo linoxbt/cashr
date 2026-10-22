@@ -1,4 +1,4 @@
-# HTTPS in front of the Unlisted API. Certificates come from Let's Encrypt.
+# HTTPS in front of the cashr API. Certificates come from Let's Encrypt.
 # Caddy writes no access logs unless told to, and this file never does:
 # visitor IP addresses are not recorded anywhere on this server.
 {$API_DOMAIN} {

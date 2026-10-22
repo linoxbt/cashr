@@ -30,7 +30,7 @@ from .db import Deposit, Event, Payout, Rsvp, init_db, make_engine, make_session
 from .engine import DOOR_OPEN, Engine, EngineError, accepting_rsvps
 from .locks import acquire_writer_lock
 
-log = logging.getLogger("unlisted")
+log = logging.getLogger("cashr")
 
 MAX_DEPOSIT_ZAT = 100 * 100_000_000
 
@@ -138,7 +138,7 @@ def admin_event(ev: Event) -> dict:
 def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     settings = settings or get_settings()
     if not settings.is_sim and settings.secret == "dev-only-secret":
-        raise RuntimeError("Set UNLISTED_SECRET before running against a real wallet.")
+        raise RuntimeError("Set CASHR_SECRET before running against a real wallet.")
     chain = chain or make_chain(settings)
     # One process owns the database and the wallet's payouts: a second one
     # would race on them. Refuse to start rather than risk paying twice.
@@ -163,7 +163,7 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     async def lifespan(_: FastAPI):
         t = None
         if settings.run_scanner:
-            t = threading.Thread(target=scanner, name="unlisted-scanner", daemon=True)
+            t = threading.Thread(target=scanner, name="cashr-scanner", daemon=True)
             t.start()
         yield
         stop.set()
@@ -171,7 +171,7 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             t.join(timeout=5)
         writer_lock.release()
 
-    app = FastAPI(title="Unlisted API", version="0.1.0", lifespan=lifespan,
+    app = FastAPI(title="cashr API", version="0.1.0", lifespan=lifespan,
                   # The interactive API docs are for development only.
                   docs_url="/docs" if settings.is_sim else None, openapi_url="/openapi.json" if settings.is_sim else None,
                   redoc_url=None)
@@ -362,7 +362,7 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             db.commit()
             return {"results": results, "checked_in_count": ev.checked_in_count}
 
-    # ---- simulator (UNLISTED_CHAIN=sim only) ----------------------------------
+    # ---- simulator (CASHR_CHAIN=sim only) ----------------------------------
     if settings.is_sim:
         @app.post("/sim/pay")
         def sim_pay(body: SimPay):

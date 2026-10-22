@@ -2,7 +2,7 @@
 
 RSVP memo (ASCII, single spaces, at most 512 bytes):
 
-    UNL1 <event_id> <ticket_hash> <refund_address>
+    CSH1 <event_id> <ticket_hash> <refund_address>
 
 * ``ticket_hash`` is base64url(SHA-256(secret)) without padding (43 chars).
   The 32-byte secret is generated in the attendee's browser and never leaves
@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal
 
-MEMO_TAG = "UNL1"
+MEMO_TAG = "CSH1"
 MEMO_MAX = 512
 ZAT_PER_ZEC = 100_000_000
 
@@ -64,7 +64,7 @@ def decode_memo(raw: bytes) -> RsvpMemo:
     text = raw.rstrip(b"\x00").decode("ascii", errors="strict").strip()
     parts = text.split(" ")
     if len(parts) != 4 or parts[0] != MEMO_TAG:
-        raise MemoError("not an Unlisted memo")
+        raise MemoError("not an cashr memo")
     _, event_id, th, addr = parts
     if not _EVENT_RE.match(event_id):
         raise MemoError("bad event id")
@@ -120,7 +120,7 @@ def _hrp_expand(hrp: str) -> list[int]:
 
 
 def is_orchard_address(address: str, network: str) -> bool:
-    """A Unified Address with an Orchard receiver: the only kind Unlisted pays.
+    """A Unified Address with an Orchard receiver: the only kind cashr pays.
 
     Refunds go Orchard-to-Orchard so that no amount or recipient is revealed
     on chain; an address without an Orchard receiver can't be refunded privately.

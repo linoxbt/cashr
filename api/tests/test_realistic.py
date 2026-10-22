@@ -1,7 +1,7 @@
 """The money paths under the real wallet's timing.
 
 The other tests use a sim with 1-confirmation spending and instant sends to stay
-short. These run against SimChain's defaults, which match unlisted-wallet:
+short. These run against SimChain's defaults, which match cashr-wallet:
 received notes spendable after 10 confirmations, change after 3, payments
 invisible until mined, and sends that report "executing" before they finish.
 """
@@ -11,9 +11,9 @@ from conftest import auth
 from fastapi.testclient import TestClient
 from test_lifecycle import admin_view, checkin, refunds_to, status, tickets
 
-from unlisted.app import create_app
-from unlisted.chain.sim import EXPIRY_DELTA, SimChain, random_unified_address
-from unlisted.config import Settings
+from cashr.app import create_app
+from cashr.chain.sim import EXPIRY_DELTA, SimChain, random_unified_address
+from cashr.config import Settings
 
 
 @pytest.fixture

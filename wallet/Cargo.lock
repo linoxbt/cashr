@@ -302,6 +302,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "cashr-wallet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "hex",
+ "hyper-util",
+ "orchard",
+ "rand",
+ "rusqlite",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tokio",
+ "tokio-socks",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zcash_address",
+ "zcash_client_backend",
+ "zcash_client_sqlite",
+ "zcash_keys",
+ "zcash_primitives",
+ "zcash_proofs",
+ "zcash_protocol",
+ "zip32",
+ "zip321",
+]
+
+[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2775,42 +2811,6 @@ checksum = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
 dependencies = [
  "crypto-common 0.1.7",
  "subtle",
-]
-
-[[package]]
-name = "unlisted-wallet"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "chacha20poly1305",
- "hex",
- "hyper-util",
- "orchard",
- "rand",
- "rusqlite",
- "secrecy",
- "serde",
- "serde_json",
- "subtle",
- "tokio",
- "tokio-socks",
- "tonic",
- "tower",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zcash_address",
- "zcash_client_backend",
- "zcash_client_sqlite",
- "zcash_keys",
- "zcash_primitives",
- "zcash_proofs",
- "zcash_protocol",
- "zip32",
- "zip321",
 ]
 
 [[package]]

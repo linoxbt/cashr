@@ -1,10 +1,10 @@
 """A simulated chain for tests and local development.
 
-It is not a Zcash implementation, but it models the wallet behaviour Unlisted
+It is not a Zcash implementation, but it models the wallet behaviour cashr
 depends on, including the awkward parts: sends stay in the mempool until a
 block is mined, change is not spendable until it confirms, an unmined
 transaction expires, shortfalls are reported when the operation runs, and a
-send key is idempotent. It only runs when UNLISTED_CHAIN=sim is set
+send key is idempotent. It only runs when CASHR_CHAIN=sim is set
 explicitly, and the web app shows a banner whenever it is active.
 """
 

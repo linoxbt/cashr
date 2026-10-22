@@ -25,7 +25,7 @@ export function TapeCover({ tape }: { tape: Tape }) {
     >
       <header className="text-center" style={{ color: c }}>
         <div className="h-px w-full opacity-80" style={{ background: c }} />
-        <div className="mt-[3%] font-mono text-[0.48em] font-medium uppercase tracking-[0.1em] opacity-70">Unlisted</div>
+        <div className="mt-[3%] font-mono text-[0.48em] font-medium uppercase tracking-[0.1em] opacity-70">cashr</div>
         <div className="font-display text-[0.95em] italic leading-tight">Shielded Tape</div>
         <div className="mt-[2%] h-px w-full opacity-80" style={{ background: c }} />
       </header>
@@ -187,7 +187,7 @@ export function TapeDeck({ tapes }: { tapes: Tape[] }) {
           style={{ height: "calc(var(--tape-w) * 2.1)" }}
           role="region"
           aria-roledescription="carousel"
-          aria-label="What Unlisted does"
+          aria-label="What cashr does"
         >
           {tapes.map((tape, i) => {
             const d = i - pos;
@@ -219,7 +219,7 @@ export function TapeDeck({ tapes }: { tapes: Tape[] }) {
         <div className="osd relative z-[200] min-h-[112px] max-w-md px-4 text-center" aria-live="polite">
           <div className="text-ink-3">{current_.title.join(" ")}</div>
           <p className="mt-1.5 text-[13px] leading-snug text-ink">{current_.caption}</p>
-          <Link href={current_.href} className="btn bg-gold mt-3 px-3 py-1.5 text-[12px] text-screen hover:bg-gold/90">
+          <Link href={current_.href} className="btn bg-gold mt-3 px-3 py-1.5 text-[12px] text-gold-on hover:bg-gold/90">
             {current_.tags[0]}
           </Link>
         </div>

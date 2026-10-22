@@ -395,7 +395,7 @@ function SeizedTab({ view }: { view: AdminView }) {
       <div className="space-y-4 text-sm leading-relaxed text-ink-2">
         <h2 className="text-3xl text-ink">Imagine this server was seized tonight.</h2>
         <p>
-          On the right is every record Unlisted holds for this event, except two it can&rsquo;t show you: the SHA-256
+          On the right is every record cashr holds for this event, except two it can&rsquo;t show you: the SHA-256
           hashes of your manage and door links, and the event wallet&rsquo;s encrypted seed. Look for a name, an email, a
           phone number or the address someone paid from. None of them exist.
         </p>
@@ -409,7 +409,7 @@ function SeizedTab({ view }: { view: AdminView }) {
           so not even the server can decrypt the event&rsquo;s memos from the chain again. Only the totals remain.
         </p>
       </div>
-      <pre className="max-h-[36rem] overflow-auto whitespace-pre-wrap break-all panel bg-black/60 p-5 font-mono text-xs leading-relaxed text-ink-2">
+      <pre className="max-h-[36rem] overflow-auto whitespace-pre-wrap break-all panel bg-well/60 p-5 font-mono text-xs leading-relaxed text-ink-2">
         {JSON.stringify(dump, null, 2)}
       </pre>
     </div>

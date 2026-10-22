@@ -248,7 +248,7 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
       <label className="mt-4 flex items-start gap-3 text-sm text-ink-2">
         <input type="checkbox" className="mt-0.5 h-4 w-4 accent-ink" checked={fresh} onChange={(e) => setFresh(e.target.checked)} />
         <span>
-          This address is fresh: I haven&rsquo;t used it for another Unlisted RSVP.{" "}
+          This address is fresh: I haven&rsquo;t used it for another cashr RSVP.{" "}
           <span className="text-ink-3">ZODL gives you a new one each time you open Receive.</span>
         </span>
       </label>
@@ -291,7 +291,7 @@ function TicketCard({ event, ticket, list, persisted, onForget }: { event: Publi
       </div>
       <p className="mt-5 text-center text-sm text-ink-2">{state.text}</p>
       <div className="mt-5 grid gap-2">
-        <button className="btn-secondary" onClick={() => downloadQrPng(qr, `unlisted-${event.id}.png`)}>
+        <button className="btn-secondary" onClick={() => downloadQrPng(qr, `cashr-${event.id}.png`)}>
           Save ticket image
         </button>
         <ForgetButton onForget={onForget} warn={mine.status === undefined || mine.status === "confirmed"} />
@@ -366,7 +366,7 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onForget }: 
 
   const qr = ticketQr(event.id, ticket.secret);
   const saveImage = (
-    <button className="btn-secondary w-full" onClick={() => downloadQrPng(qr, `unlisted-${event.id}.png`)}>
+    <button className="btn-secondary w-full" onClick={() => downloadQrPng(qr, `cashr-${event.id}.png`)}>
       Save ticket image
     </button>
   );

@@ -1,4 +1,4 @@
-# Unlisted: product spec (as built)
+# cashr: product spec (as built)
 
 ## 1. Problem
 Groups whose attendee list endangers people (support groups, organisers, journalists, activists) still need RSVPs
@@ -34,5 +34,5 @@ Accounts, emails, notifications, ticket transfer, paid (non-refundable) tickets,
   0.001 ZEC, no memo), as the dashboard asks.
 * Event creation is limited globally (per hour and live events), since the server never sees who is asking. One
   person could use up that allowance; events that never received anything are retired a day after they start.
-* An RSVP counts after `UNLISTED_MIN_CONF` confirmations (default 1). A deeper chain reorganisation that removed
+* An RSVP counts after `CASHR_MIN_CONF` confirmations (default 1). A deeper chain reorganisation that removed
   the deposit afterwards is not undone; refunds are only built from deposits with 10 confirmations.

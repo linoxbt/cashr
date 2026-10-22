@@ -109,7 +109,7 @@ const TIMEOUT_MS = 12_000;
 
 async function request<T>(path: string, init: RequestInit & { token?: string; timeoutMs?: number } = {}): Promise<T> {
   if (!API_CONFIGURED) {
-    throw new ApiError(0, "no_backend", "This copy of Unlisted isn't connected to a server yet, so nothing can be created or paid here.");
+    throw new ApiError(0, "no_backend", "This copy of cashr isn't connected to a server yet, so nothing can be created or paid here.");
   }
   // Only requests with a body declare one: a JSON content type on a GET would
   // make every poll a two-request CORS preflight.
@@ -126,7 +126,7 @@ async function request<T>(path: string, init: RequestInit & { token?: string; ti
       signal: AbortSignal.timeout(init.timeoutMs ?? TIMEOUT_MS),
     });
   } catch {
-    throw new ApiError(0, "network", "Can't reach the Unlisted server. Check your connection.");
+    throw new ApiError(0, "network", "Can't reach the cashr server. Check your connection.");
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {

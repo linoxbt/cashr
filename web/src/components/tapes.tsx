@@ -1,4 +1,4 @@
-// The six VHS sleeves: one per idea in Unlisted. Shown on the docs page.
+// The six VHS sleeves: one per idea in cashr. Shown on the docs page.
 import type { Tape } from "@/components/TapeDeck";
 
 // ---- cover art (SVG, inherits the tape colour) --------------------------------

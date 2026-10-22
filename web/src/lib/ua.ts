@@ -1,4 +1,4 @@
-// Unified Address decoding (ZIP 316). Mirrors api/unlisted/ua.py.
+// Unified Address decoding (ZIP 316). Mirrors api/cashr/ua.py.
 // Lets the RSVP page refuse a refund address without an Orchard receiver
 // before the attendee pays, without sending the address anywhere.
 import { blake2b } from "@noble/hashes/blake2.js";
@@ -77,7 +77,7 @@ export function f4jumbleInv(m: Uint8Array): Uint8Array {
   return out;
 }
 
-/** A Bitcoin-style CompactSize, as in api/unlisted/ua.py: [value, next position], or null if truncated. */
+/** A Bitcoin-style CompactSize, as in api/cashr/ua.py: [value, next position], or null if truncated. */
 function compactSize(buf: Uint8Array, pos: number): [number, number] | null {
   if (pos >= buf.length) return null;
   const first = buf[pos];

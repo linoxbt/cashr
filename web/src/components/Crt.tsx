@@ -6,7 +6,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { useMeta } from "@/components/ui";
 import { API_CONFIGURED } from "@/lib/api";
-import { readJson, writeJson } from "@/lib/storage";
+import { BrandMark, Wordmark } from "@/components/Logo";
+import { DEMO_URL, SITE_URL } from "@/lib/site";
+import { THEME_KEY, readJson, writeJson, type Theme } from "@/lib/storage";
 
 const NAV = [
   { href: "/new", label: "Host" },
@@ -16,23 +18,11 @@ const NAV = [
   { href: "/docs", label: "Docs" },
 ];
 
-/** The wordmark: a striped "redaction" glyph and a serif name. */
+/** The logo in the header: the brand mark and the name. */
 export function Logo({ compact = false }: { compact?: boolean }) {
   return (
-    <Link href="/" className="group flex flex-col items-center" aria-label="Unlisted home">
-      <span className="flex items-center gap-2">
-        {/* A guest list with one line redacted: the list nobody keeps. */}
-        <svg width={compact ? 26 : 30} height={compact ? 20 : 24} viewBox="0 0 30 24" aria-hidden className="shrink-0">
-          <rect x="0" y="1" width="22" height="2.5" fill="#ECE9E1" opacity="0.55" />
-          <rect x="0" y="8" width="30" height="7" fill="#F4B728" />
-          <rect x="0" y="20" width="16" height="2.5" fill="#ECE9E1" opacity="0.55" />
-        </svg>
-        {!compact && (
-          <span className="font-display text-[30px] leading-none tracking-[-0.02em] text-ink">
-            Unlisted
-          </span>
-        )}
-      </span>
+    <Link href="/" className="group flex flex-col items-center text-ink" aria-label="cashr home">
+      {compact ? <BrandMark size={20} /> : <Wordmark size={24} />}
       {!compact && (
         <span className="osd mt-1 flex w-full justify-between gap-6 border-t border-ink/25 pt-0.5 text-[10px] text-ink-3">
           <span>Shielded</span>
@@ -41,6 +31,19 @@ export function Logo({ compact = false }: { compact?: boolean }) {
       )}
     </Link>
   );
+}
+
+/** White or dark. Stored on this device; applied before paint by the root layout. */
+function useTheme(): [Theme, () => void] {
+  const [theme, setTheme] = useState<Theme>("dark");
+  useEffect(() => setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark"), []);
+  const toggle = () => {
+    const next: Theme = theme === "light" ? "dark" : "light";
+    document.documentElement.dataset.theme = next;
+    writeJson(THEME_KEY, next);
+    setTheme(next);
+  };
+  return [theme, toggle];
 }
 
 function useNow(intervalMs: number) {
@@ -93,6 +96,28 @@ function ChainStatus() {
   return <span>Chain: {meta.network === "main" ? "Mainnet" : "Testnet"}</span>;
 }
 
+/** Main site: a link to the demo. Demo site: a banner back to the real app. */
+function DemoLink({ className = "" }: { className?: string }) {
+  const meta = useMeta();
+  if (meta?.chain === "sim") return null;
+  return (
+    <a href={DEMO_URL} className={`glitch inline-block text-gold-ink hover:text-ink ${className}`}>
+      Demo
+    </a>
+  );
+}
+
+function DemoBanner() {
+  const meta = useMeta();
+  if (meta?.chain !== "sim") return null;
+  return (
+    <div className="relative z-30 bg-gold px-4 py-1.5 text-center font-mono text-[12px] font-medium uppercase tracking-[-0.02em] text-gold-on">
+      Demo · simulated chain, no real ZEC ·{" "}
+      <a href={SITE_URL} className="underline underline-offset-2">Use the real app at {SITE_URL.replace(/^https?:\/\//, "")}</a>
+    </div>
+  );
+}
+
 function NavLink({ href, label, active }: { href: string; label: string; active: boolean }) {
   return (
     <Link href={href} className={`glitch inline-block ${active ? "text-ink" : "text-ink-2 hover:text-ink"}`} aria-current={active ? "page" : undefined}>
@@ -107,8 +132,9 @@ export function Crt({ children }: { children: ReactNode }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [bw, setBw] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [theme, toggleTheme] = useTheme();
 
-  useEffect(() => setBw(readJson<boolean>("unlisted.bw", false)), []);
+  useEffect(() => setBw(readJson<boolean>("cashr.bw", false)), []);
   useEffect(() => {
     scroller.current?.scrollTo({ top: 0 });
     setMenu(false);
@@ -116,7 +142,7 @@ export function Crt({ children }: { children: ReactNode }) {
 
   const toggleBw = () => {
     setBw((v) => {
-      writeJson("unlisted.bw", !v);
+      writeJson("cashr.bw", !v);
       return !v;
     });
   };
@@ -125,11 +151,12 @@ export function Crt({ children }: { children: ReactNode }) {
     <div className="crt">
       <div className={`crt-screen crt-boot ${bw ? "bw" : ""}`}>
         <div ref={scroller} className="crt-scroll">
+          <DemoBanner />
           <div className="min-h-full px-1 pb-24 pt-24 sm:pb-24 sm:pt-32">{children}</div>
         </div>
 
         {/* On-screen display: top */}
-        <header className="osd absolute inset-x-0 top-0 z-20 bg-gradient-to-b from-[#141414] via-[#141414]/90 to-transparent px-5 pb-6 pt-5 sm:px-12 sm:pt-9">
+        <header className="osd absolute inset-x-0 top-0 z-20 bg-gradient-to-b from-screen-2 via-screen-2/90 to-transparent px-5 pb-6 pt-5 sm:px-12 sm:pt-9">
           <div className="hidden grid-cols-[1fr_auto_1fr] items-start sm:grid">
             <div className="flex items-center gap-8 pt-1.5 lg:gap-28">
               <Link href="/" className="glitch flex items-center gap-1.5 text-ink-2 hover:text-ink">
@@ -141,6 +168,7 @@ export function Crt({ children }: { children: ReactNode }) {
             <Logo />
             <nav className="flex justify-end gap-6 pt-1.5 lg:gap-10" aria-label="Main">
               {NAV.map((n) => <NavLink key={n.href} {...n} active={pathname === n.href} />)}
+              <DemoLink />
             </nav>
           </div>
           <div className="flex items-center justify-between sm:hidden">
@@ -156,21 +184,28 @@ export function Crt({ children }: { children: ReactNode }) {
         </header>
 
         {menu && (
-          <nav id="osd-menu" className="absolute inset-0 z-[25] flex flex-col justify-center gap-6 bg-[#111]/95 px-8 sm:hidden" aria-label="Main">
+          <nav id="osd-menu" className="absolute inset-0 z-[25] flex flex-col justify-center gap-6 bg-screen/95 px-8 sm:hidden" aria-label="Main">
             {[{ href: "/", label: "Home" }, ...NAV].map((n) => (
               <Link key={n.href} href={n.href} className="font-display text-5xl text-ink">
                 {n.label}
               </Link>
             ))}
+            <DemoLink className="font-display text-5xl normal-case" />
+            <button onClick={toggleTheme} className="self-start font-mono text-sm uppercase text-ink-2">
+              Theme [{theme === "light" ? "White" : "Dark"}]
+            </button>
           </nav>
         )}
 
         {/* On-screen display: bottom */}
-        <footer className="osd absolute inset-x-0 bottom-0 z-20 flex items-end justify-between bg-gradient-to-t from-[#121212] via-[#121212]/85 to-transparent px-5 pb-5 pt-8 text-ink-3 sm:px-14 sm:pb-9">
+        <footer className="osd absolute inset-x-0 bottom-0 z-20 flex items-end justify-between bg-gradient-to-t from-screen via-screen/85 to-transparent px-5 pb-5 pt-8 text-ink-3 sm:px-14 sm:pb-9">
           <div className="flex items-center gap-6 lg:gap-24">
             <Clock />
             <button onClick={toggleBw} className="glitch hidden text-ink-2 hover:text-ink sm:inline-block" aria-pressed={bw}>
               B&amp;W [{bw ? "On" : "Off"}]
+            </button>
+            <button onClick={toggleTheme} className="glitch hidden text-ink-2 hover:text-ink sm:inline-block" aria-pressed={theme === "light"}>
+              Theme [{theme === "light" ? "White" : "Dark"}]
             </button>
           </div>
           <div className="flex items-center gap-6 lg:gap-24">
