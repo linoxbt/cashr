@@ -22,8 +22,28 @@ Unlisted replaces the list with:
    wallet keys so its memos can never be decrypted again. The title, date and place go too. Only totals remain, plus
    a keyed hash of each refund address used, kept for a year or two so no address can be reused for another RSVP.
 
-The organiser's dashboard has a **"What a seizure reveals"** tab showing every record held for the event, exactly
-as stored. There is nothing in it that names anyone.
+The organiser's dashboard has a **"What a seizure reveals"** tab showing every record held for the event. There is
+nothing in it that names anyone.
+
+## Try it
+
+| | Link | Chain |
+|---|---|---|
+| **Live app** | https://unlisted-zec.netlify.app | Zcash **mainnet**. Pay real shielded ZEC from ZODL (or any wallet that pays ZIP 321 links with memos). |
+| **Demo without ZEC** | https://unlisted-zec-sim.netlify.app | A **simulated** chain. The RSVP page shows *Simulate this payment*, so the whole flow works without a wallet. |
+
+Both run the same code. The only thing mocked anywhere is the simulated chain behind the demo site: an in-memory
+Zcash stand-in that mines a block every few seconds and resets when its server restarts. The live app's wallet is
+a real librustzcash light client that reaches lightwalletd through Tor.
+
+A two-minute tour: create an event (keep the two private links), open the invite link in another browser, RSVP
+with a fresh refund address and pay, then open the door link and scan or paste the ticket. End the event from the
+dashboard to refund everyone who came, and purge it.
+
+**Trust model.** The server's wallet holds deposits between payment and settlement, so attendees trust its
+operator not to keep them; deposits should stay small. Anyone can run their own server with one command
+([DEPLOY.md](docs/DEPLOY.md)), and the [threat model](https://unlisted-zec.netlify.app/privacy) lists what is
+stored and what could still leak.
 
 ## Repository
 
