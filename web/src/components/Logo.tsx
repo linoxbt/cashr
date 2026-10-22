@@ -40,8 +40,8 @@ export function CoinMark({ size = 32, className, title }: MarkProps) {
   );
 }
 
-/** The mark the app uses. Switch to `CoinMark` to use concept 2. */
-export const BrandMark = TicketMark;
+/** The mark the app uses: concept 2, the shielded coin (chosen over the ticket). */
+export const BrandMark = CoinMark;
 
 /** The mark with the name, for the header. */
 export function Wordmark({ size = 24, mark: Mark = BrandMark }: { size?: number; mark?: typeof TicketMark }) {
