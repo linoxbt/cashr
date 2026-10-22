@@ -84,8 +84,11 @@ Refunds, returns and sweeps are payouts: `queued → submitted → broadcast →
 
 ## Settlement
 
-* Checked-in RSVPs are refunded the full deposit in batched sends (`CASHR_REFUND_BATCH` recipients each) with
-  the `FullPrivacy` policy. Server-written memos never name the event, because they stay in the recipient's wallet
+* Checked-in RSVPs are refunded the full deposit, one per transaction (`CASHR_REFUND_BATCH`, default 1), each at
+  a random time within `CASHR_REFUND_SPREAD_MIN` minutes (default 180) of settling (`Payout.not_before`), with the
+  `FullPrivacy` policy. A transaction paying several attendees would be fetched by each of their wallets from a
+  sync server, showing its operator who came together. Each refund pays its own fee, so when nearly everyone comes
+  the organiser tops up about 0.00015 ZEC per refund. Server-written memos never name the event, because they stay in the recipient's wallet
   for good: refunds say `cashr: deposit refunded.`, returns `cashr: payment returned (<reason>).`, sweeps
   `cashr: no-show deposits.` Fees come from forfeits and float. RSVPs that were not checked in are forfeited.
 * When every payout is `done` and nothing in the event wallet is still confirming, the whole spendable balance minus
@@ -102,9 +105,13 @@ Refunds, returns and sweeps are payouts: `queued → submitted → broadcast →
 ## Privacy-relevant request patterns
 
 * Attendees never POST anything. Confirmation polling fetches `GET /events/{id}/tickets` (every hash) and matches
-  locally. The list is sorted by hash. While the event is open or closed it holds hashes only (`{"h": …}`), never
-  check-ins: anyone can read it, and watching flags flip would time each ticket at the door. Once settlement starts,
-  every ticket's `status` (`refunding`, `refunded`, `forfeited`) appears at once.
+  locally, at one jittered pace (15–25 s) whatever the ticket's state, so request timing says nothing about it.
+* The public list is a snapshot, not a feed: new tickets join it in batches (`Rsvp.listed`), once
+  `CASHR_LIST_BATCH` (3) are waiting, at a random time around `CASHR_LIST_DELAY_MIN` (120) minutes after the first,
+  or when RSVPs close or the event settles. It is sorted by hash and holds hashes only (`{"h": …}`) while the event
+  runs; at settlement every ticket's `status` appears at once. Rejections say only `returned` or `kept`.
+* `GET /events/{id}` shows `rsvp_count` and `seats_left` from listed tickets, a `full` flag from the real count, and
+  `checked_in_count` only once the event settles. The organiser's dashboard and the door see the real, live state.
 * The ticket list page (`/tickets`) never fetches all held events together, which would link them; each is checked
   only when its holder asks.
 * The door phone keeps the event's ticket hashes and check-in flags (to work offline) and its unsynced queue, and
@@ -112,8 +119,11 @@ Refunds, returns and sweeps are payouts: `queued → submitted → broadcast →
 * Events that started over a day ago and never received anything are retired: their wallet account is deleted
   and their details wiped, as a purge does.
 * The wallet reaches lightwalletd through Tor by default (`CASHR_WALLET_SOCKS_PROXY`), with a fresh circuit for every
-  transaction it fetches. Otherwise lightwalletd's operator sees the server fetch exactly the RSVP transactions, and
-  can match them to attendees' wallets broadcasting them through the same server. Txids are logged at debug only.
+  transaction it fetches, each fetched a random 1–5 minutes after the wallet first sees it. lightwalletd still sees
+  which transactions are fetched, but not from where, and not in step with their broadcast. Attendees' own wallets
+  are outside cashr's control; the threat model advises a wallet that connects over Tor. Txids are logged at debug only.
+* Refund addresses are kept as their Orchard receiver only (`ua.orchard_only`); the browser builds the memo that way.
+* Purge also wipes `created_at`, `scan_height` and `close_height`, which could date the event.
 * Admin/door tokens live in the URL fragment, which browsers never send. The client moves them to `sessionStorage`,
   strips them from the address bar, and sends them as `Authorization: Bearer`.
 * The API runs with `--no-access-log` and keeps no IP addresses. Hosting providers in front of it may still log them.

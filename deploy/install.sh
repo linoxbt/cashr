@@ -42,7 +42,7 @@ fi
 # their secrets.
 if [ ! -e "$DIR" ] && [ -d /opt/unlisted/.git ]; then
   say "Moving the old install from /opt/unlisted to $DIR"
-  (cd /opt/unlisted && docker compose -p unlisted down) || true
+  (cd /opt/unlisted && docker compose -p unlisted --profile https down) || true
   mv /opt/unlisted "$DIR"
 fi
 
@@ -62,15 +62,25 @@ if [ -f .env ] && grep -qE '^(UNLISTED_|UW_)' .env; then
 fi
 
 # Data volumes were named after the old "unlisted" project: copy them once into
-# the cashr ones (the old volumes are kept until you remove them).
+# the cashr ones. A marker written last proves a copy finished; without it the
+# copy is redone, so an interrupted run can't leave the wallet on partial data.
+OLD_VOLUMES=""
 for v in wallet-data api-data caddy-data; do
-  if docker volume inspect "unlisted_$v" >/dev/null 2>&1 && ! docker volume inspect "cashr_$v" >/dev/null 2>&1; then
-    say "Copying volume unlisted_$v to cashr_$v"
-    docker compose -p unlisted down >/dev/null 2>&1 || true
-    docker volume create "cashr_$v" >/dev/null
-    docker run --rm -v "unlisted_$v:/from:ro" -v "cashr_$v:/to" alpine:3.20 sh -c \
-      'cp -a /from/. /to/ && if [ -f /to/unlisted.db ]; then mv /to/unlisted.db /to/cashr.db; rm -f /to/unlisted.db.lock; fi'
+  docker volume inspect "unlisted_$v" >/dev/null 2>&1 || continue
+  OLD_VOLUMES="$OLD_VOLUMES unlisted_$v"
+  if docker volume inspect "cashr_$v" >/dev/null 2>&1 &&
+     docker run --rm -v "cashr_$v:/to:ro" alpine:3.20 test -f /to/.migrated-from-unlisted; then
+    continue
   fi
+  say "Copying volume unlisted_$v to cashr_$v"
+  docker compose -p unlisted --profile https down >/dev/null 2>&1 || true
+  docker volume create "cashr_$v" >/dev/null
+  docker run --rm -v "unlisted_$v:/from:ro" -v "cashr_$v:/to" alpine:3.20 sh -c \
+    'set -e; cp -a /from/. /to/; cd /to
+     for f in unlisted.db unlisted.db.lock unlisted.db-wal unlisted.db-shm; do
+       if [ -e "$f" ]; then mv "$f" "cashr${f#unlisted}"; fi
+     done
+     touch /to/.migrated-from-unlisted'
 done
 
 if [ -z "$DOMAIN" ]; then
@@ -130,6 +140,10 @@ fi
 docker image prune -f >/dev/null
 
 say "Waiting for https://$DOMAIN/meta"
+if [ -n "$OLD_VOLUMES" ]; then
+  echo "Once cashr is confirmed working, delete the old copies (they still hold pre-rename data):"
+  echo "  docker volume rm$OLD_VOLUMES"
+fi
 for _ in $(seq 1 120); do
   if meta=$(curl -fsS "https://$DOMAIN/meta" 2>/dev/null); then
     echo "$meta"

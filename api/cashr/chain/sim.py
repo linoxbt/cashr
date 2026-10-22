@@ -16,8 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from ..codec import _CHARSET, _BECH32M_CONST, _hrp_expand, _polymod
-from ..ua import f4jumble
+from ..ua import unified_address
 from .base import Balance, ChainError, OpStatus, ReceivedNote, Recipient, TxStatus
 
 MARGINAL_FEE = 5_000
@@ -27,34 +26,6 @@ DUST_ZAT = 20_000  # matches the real wallet's delete limit
 
 def zip317_fee(inputs: int, outputs: int) -> int:
     return MARGINAL_FEE * max(2, inputs, outputs)
-
-
-def bech32m_encode(hrp: str, data5: list[int]) -> str:
-    values = _hrp_expand(hrp) + data5
-    pm = _polymod(values + [0] * 6) ^ _BECH32M_CONST
-    checksum = [(pm >> 5 * (5 - i)) & 31 for i in range(6)]
-    return hrp + "1" + "".join(_CHARSET[d] for d in data5 + checksum)
-
-
-def _to_5bit(data: bytes) -> list[int]:
-    acc = bits = 0
-    out = []
-    for b in data:
-        acc = (acc << 8) | b
-        bits += 8
-        while bits >= 5:
-            bits -= 5
-            out.append((acc >> bits) & 31)
-    if bits:
-        out.append((acc << (5 - bits)) & 31)
-    return out
-
-
-def unified_address(network: str, receivers: dict[int, bytes]) -> str:
-    """Encode a ZIP 316 Unified Address from {typecode: raw receiver}."""
-    hrp = "u" if network == "main" else "utest"
-    body = b"".join(bytes([t, len(r)]) + r for t, r in sorted(receivers.items()))
-    return bech32m_encode(hrp, _to_5bit(f4jumble(body + hrp.encode().ljust(16, b"\x00"))))
 
 
 def random_unified_address(network: str = "main", orchard: bool = True, sapling: bool = False) -> str:

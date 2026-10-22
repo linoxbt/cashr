@@ -61,7 +61,8 @@ export function ticketQr(eventId: string, secret: string): string {
 }
 
 export function parseTicketQr(text: string): { eventId: string; secret: string } | null {
-  const m = text.trim().match(/^cashr:([a-z0-9]{10}):([A-Za-z0-9_-]{43})$/);
+  // "unlisted:" is the prefix from before the rename to cashr: old tickets still work.
+  const m = text.trim().match(/^(?:cashr|unlisted):([a-z0-9]{10}):([A-Za-z0-9_-]{43})$/);
   return m ? { eventId: m[1], secret: m[2] } : null;
 }
 
@@ -133,6 +134,11 @@ export function addressProblem(address: string, network: string): string | null 
 }
 
 export const REJECTION_TEXT: Record<string, string> = {
+  // What attendees see: the public list says only whether the money comes back.
+  returned:
+    "The payment couldn't be accepted: for example the event was full, RSVPs had closed, the amount didn't match the deposit, or the refund address had been used for another RSVP.",
+  kept: "The refund address in the memo can't receive a private (Orchard) refund, so this payment can't be returned automatically. Ask the organiser.",
+  // What the organiser sees on the dashboard.
   full: "The event was already full.",
   wrong_amount: "The amount did not match the deposit.",
   wrong_event: "The payment was for a different event.",

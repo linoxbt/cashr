@@ -131,3 +131,55 @@ export function decodeUnified(address: string, network: string): Receivers | nul
 export function hasOrchardReceiver(address: string, network: string): boolean {
   return Boolean(decodeUnified(address, network)?.orchard);
 }
+
+export function f4jumble(m: Uint8Array): Uint8Array {
+  const lL = Math.min(64, Math.floor(m.length / 2));
+  const lR = m.length - lL;
+  const a = m.subarray(0, lL);
+  const b = m.subarray(lL);
+  const x = xor(b, G(0, a, lR));
+  const y = xor(a, H(0, x, lL));
+  const d = xor(x, G(1, y, lR));
+  const c = xor(y, H(1, d, lL));
+  const out = new Uint8Array(m.length);
+  out.set(c);
+  out.set(d, lL);
+  return out;
+}
+
+function to5bit(data: Uint8Array): number[] {
+  let acc = 0;
+  let bits = 0;
+  const out: number[] = [];
+  for (const b of data) {
+    acc = ((acc << 8) | b) & 0xffff;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      out.push((acc >> bits) & 31);
+    }
+  }
+  if (bits) out.push((acc << (5 - bits)) & 31);
+  return out;
+}
+
+function bech32mEncode(hrp: string, data5: number[]): string {
+  const pm = polymod([...hrpExpand(hrp), ...data5, 0, 0, 0, 0, 0, 0]) ^ BECH32M;
+  const checksum = Array.from({ length: 6 }, (_, i) => (pm >>> (5 * (5 - i))) & 31);
+  return hrp + "1" + [...data5, ...checksum].map((d) => CHARSET[d]).join("");
+}
+
+/**
+ * The same address with only its Orchard receiver (mirrors orchard_only in
+ * api/cashr/ua.py). Some wallets put a transparent receiver in their Unified
+ * Address; refunds only use the Orchard one, so nothing else goes in the memo.
+ */
+export function orchardOnly(address: string, network: string): string | null {
+  const orchard = decodeUnified(address, network)?.orchard;
+  if (!orchard || orchard.length > 0xfc) return null;
+  const hrp = network === "main" ? "u" : "utest";
+  const pad = new Uint8Array(16);
+  pad.set(enc.encode(hrp));
+  const raw = Uint8Array.from([3, orchard.length, ...orchard, ...pad]);
+  return bech32mEncode(hrp, to5bit(f4jumble(raw)));
+}

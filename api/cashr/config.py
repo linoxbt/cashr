@@ -43,7 +43,17 @@ class Settings:
     # Deducted from refunds of *rejected* payments (wrong amount, full, closed…),
     # so junk payments cannot drain the event's fee float. ZIP 317 minimum fee.
     reject_fee_zat: int = field(default_factory=lambda: _int("CASHR_REJECT_FEE_ZAT", 10_000))
-    refund_batch_size: int = field(default_factory=lambda: _int("CASHR_REFUND_BATCH", 25))
+    # One refund per transaction: a batch is fetched by every recipient's wallet,
+    # which shows a sync server which attendees came together.
+    refund_batch_size: int = field(default_factory=lambda: _int("CASHR_REFUND_BATCH", 1))
+    # Refunds go out at random times within this many minutes of settling, so
+    # they don't line up with the event's end or with each other.
+    refund_spread_min: int = field(default_factory=lambda: _int("CASHR_REFUND_SPREAD_MIN", 180))
+    # New tickets join the public list in batches: once this many are waiting, or
+    # at a random time around this many minutes after the first one, so polling
+    # the list doesn't reveal when each ticket was paid.
+    list_batch: int = field(default_factory=lambda: _int("CASHR_LIST_BATCH", 3))
+    list_delay_min: int = field(default_factory=lambda: _int("CASHR_LIST_DELAY_MIN", 120))
     # Left in an event wallet after the sweep (less than a fee): destroyed on purge.
     # Capped at the wallet's own delete limit (DELETE_MAX_ZAT), above which it refuses every purge.
     dust_zat: int = field(default_factory=lambda: min(_int("CASHR_DUST_ZAT", 20_000), 20_000))

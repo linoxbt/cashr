@@ -142,7 +142,8 @@ try {
     body: JSON.stringify({ address: ev.address, amount_zat: ev.deposit_zat + 1, memo_b64url: memoB64 }),
   });
   const list = await (await fetch(`${API}/events/${t.eventId}/tickets`)).json();
-  if (!list.rejected.some((r) => r.reason === "wrong_amount")) throw new Error("wrong-amount payment was not rejected");
+  // Publicly only "returned": the specific reason stays with the organiser.
+  if (!list.rejected.some((r) => r.reason === "returned")) throw new Error("wrong-amount payment was not rejected");
   step("wrong-amount payment rejected for return");
 
   // Everyone came, so no forfeit pays the refund fees: the organiser tops up
@@ -184,10 +185,11 @@ try {
   await p.evaluate((t) => localStorage.setItem("cashr.tickets.v1", JSON.stringify({ [t.eventId]: t })), tickets[0]);
   await p.goto(BASE + "/tickets");
   await p.getByRole("button", { name: "Check status" }).first().click();
-  await p.getByText("Event over", { exact: true }).waitFor({ timeout: 15000 });
-  await p.getByRole("button", { name: /Remove 1 ticket for past events/ }).click();
+  await p.getByText("Event over · ticket removed", { exact: true }).waitFor({ timeout: 15000 });
+  // Purged on the server, so the ticket is gone from this device too.
+  await p.reload();
   await p.getByText("No tickets on this device yet").waitFor();
-  step("/tickets shows the event is over, and clears its ticket");
+  step("/tickets shows the event is over, and removes its ticket by itself");
 
   if (errors.length) throw new Error("page errors: " + errors.join("; "));
   console.log("JOURNEY OK");

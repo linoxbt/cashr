@@ -33,18 +33,41 @@ export function Logo({ compact = false }: { compact?: boolean }) {
   );
 }
 
-/**
- * Back: the previous page when you got here inside the app; the home page when
- * you arrived from a link (going "back" would leave the site). Hidden at home.
- */
-function BackButton({ inApp, className = "" }: { inApp: boolean; className?: string }) {
+// The pages visited in this tab, so Back knows whether there is a page of this
+// site to return to (going back past the first one would leave the site).
+const TRAIL_KEY = "cashr.trail";
+function readTrail(): string[] {
+  try {
+    return JSON.parse(sessionStorage.getItem(TRAIL_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+function writeTrail(trail: string[]) {
+  try {
+    sessionStorage.setItem(TRAIL_KEY, JSON.stringify(trail.slice(-50)));
+  } catch {
+    /* storage blocked: Back falls back to the home page */
+  }
+}
+/** Record a page: returning to the previous one shortens the trail, anything else extends it. */
+function stepTrail(path: string): string[] {
+  const trail = readTrail();
+  if (trail[trail.length - 1] === path) return trail;
+  const next = trail[trail.length - 2] === path ? trail.slice(0, -1) : [...trail, path];
+  writeTrail(next);
+  return next;
+}
+
+/** Back: the previous page of this site, or the home page when there is none. Hidden at home. */
+function BackButton({ canGoBack, className = "" }: { canGoBack: boolean; className?: string }) {
   const router = useRouter();
   const pathname = usePathname();
   if (pathname === "/") return null;
   return (
     <button
       type="button"
-      onClick={() => (inApp ? router.back() : router.push("/"))}
+      onClick={() => (canGoBack ? router.back() : router.push("/"))}
       className={`glitch flex items-center gap-1.5 text-ink-2 hover:text-ink sm:uppercase ${className}`}
       aria-label="Go back"
     >
@@ -53,15 +76,25 @@ function BackButton({ inApp, className = "" }: { inApp: boolean; className?: str
   );
 }
 
+/** Phones colour their browser bar from <meta name="theme-color">: match the theme. */
+function paintBrowserBar(theme: Theme) {
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "light" ? "#D9D5CB" : "#050505");
+}
+
 /** White or dark. Stored on this device; applied before paint by the root layout. */
 function useTheme(): [Theme, () => void] {
   const [theme, setTheme] = useState<Theme>("dark");
-  useEffect(() => setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark"), []);
+  useEffect(() => {
+    const t = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+    setTheme(t);
+    paintBrowserBar(t);
+  }, []);
   const toggle = () => {
     const next: Theme = theme === "light" ? "dark" : "light";
     document.documentElement.dataset.theme = next;
     writeJson(THEME_KEY, next);
     setTheme(next);
+    paintBrowserBar(next);
   };
   return [theme, toggle];
 }
@@ -127,11 +160,11 @@ function DemoLink({ className = "" }: { className?: string }) {
   );
 }
 
-function DemoBanner() {
+function DemoBanner({ className = "" }: { className?: string }) {
   const meta = useMeta();
   if (meta?.chain !== "sim") return null;
   return (
-    <div className="relative z-30 bg-gold px-4 py-1.5 text-center font-mono text-[12px] font-medium uppercase tracking-[-0.02em] text-gold-on">
+    <div className={`bg-gold px-4 py-1.5 text-center font-mono text-[12px] font-medium uppercase tracking-[-0.02em] text-gold-on ${className}`}>
       Demo · simulated chain, no real ZEC ·{" "}
       <a href={SITE_URL} className="underline underline-offset-2">Use the real app at {SITE_URL.replace(/^https?:\/\//, "")}</a>
     </div>
@@ -153,13 +186,18 @@ export function Crt({ children }: { children: ReactNode }) {
   const [bw, setBw] = useState(false);
   const [menu, setMenu] = useState(false);
   const [theme, toggleTheme] = useTheme();
-  // Pages seen in this tab, so Back knows whether there's an in-app page to return to.
-  const pagesSeen = useRef(0);
-  const [inApp, setInApp] = useState(false);
+  const [canGoBack, setCanGoBack] = useState(false);
+  useEffect(() => setCanGoBack(stepTrail(pathname ?? "/").length > 1), [pathname]);
+  const meta = useMeta();
+  const demo = meta?.chain === "sim";
+  const firstMenuLink = useRef<HTMLAnchorElement>(null);
   useEffect(() => {
-    pagesSeen.current += 1;
-    setInApp(pagesSeen.current > 1);
-  }, [pathname]);
+    if (!menu) return;
+    firstMenuLink.current?.focus();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMenu(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menu]);
 
   useEffect(() => setBw(readJson<boolean>("cashr.bw", false)), []);
   useEffect(() => {
@@ -178,15 +216,16 @@ export function Crt({ children }: { children: ReactNode }) {
     <div className="crt">
       <div className={`crt-screen crt-boot ${bw ? "bw" : ""}`}>
         <div ref={scroller} className="crt-scroll">
-          <DemoBanner />
-          <div className="min-h-full px-1 pb-24 pt-24 sm:pb-24 sm:pt-36">{children}</div>
+          <div className={`min-h-full px-1 pb-24 ${demo ? "pt-32 sm:pt-44" : "pt-24 sm:pt-36"}`}>{children}</div>
         </div>
 
         {/* On-screen display: top */}
         <header className="osd absolute inset-x-0 top-0 z-20 bg-gradient-to-b from-screen-2 via-screen-2/90 to-transparent px-5 pb-6 pt-5 sm:px-12 sm:pt-9">
+          {/* Part of the header, not over it: it must never cover the logo, Back or Menu. */}
+          <DemoBanner className="-mx-5 -mt-5 mb-4 sm:-mx-12 sm:-mt-9 sm:mb-5" />
           <div className="hidden grid-cols-[1fr_auto_1fr] items-start sm:grid">
             <div className="flex items-center gap-8 pt-1.5 lg:gap-16">
-              <BackButton inApp={inApp} />
+              <BackButton canGoBack={canGoBack} />
               <Link href="/" className="glitch flex items-center gap-1.5 text-ink-2 hover:text-ink">
                 <span aria-hidden className="inline-block h-2.5 w-2.5 bg-current" />
                 Home
@@ -202,7 +241,7 @@ export function Crt({ children }: { children: ReactNode }) {
           <div className="flex items-center justify-between gap-3 sm:hidden">
             <Logo compact />
             <div className="flex items-center gap-5">
-              <BackButton inApp={inApp} />
+              <BackButton canGoBack={canGoBack} />
               <button className="text-ink-2" onClick={() => setMenu((m) => !m)} aria-expanded={menu} aria-controls="osd-menu">
                 Menu [{menu ? "–" : "+"}]
               </button>
@@ -212,8 +251,12 @@ export function Crt({ children }: { children: ReactNode }) {
 
         {menu && (
           <nav id="osd-menu" className="absolute inset-0 z-[25] flex flex-col justify-center gap-6 bg-screen/95 px-8 sm:hidden" aria-label="Main">
-            {[{ href: "/", label: "Home" }, ...NAV].map((n) => (
-              <Link key={n.href} href={n.href} className="font-display text-5xl text-ink">
+            <button onClick={() => setMenu(false)} className="absolute right-5 top-5 font-mono text-sm uppercase text-ink-2" aria-label="Close menu">
+              Close [–]
+            </button>
+            {[{ href: "/", label: "Home" }, ...NAV].map((n, i) => (
+              <Link key={n.href} href={n.href} ref={i === 0 ? firstMenuLink : undefined} onClick={() => setMenu(false)}
+                className="font-display text-5xl text-ink">
                 {n.label}
               </Link>
             ))}

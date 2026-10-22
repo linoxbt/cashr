@@ -12,6 +12,9 @@ import { takeLinkToken } from "@/lib/storage";
 
 type Tab = "overview" | "money" | "seized";
 
+// A one-recipient Orchard refund's ZIP 317 fee is 0.0001 ZEC; the margin covers change.
+const FEE_PER_REFUND_ZAT = 15_000;
+
 const ACTIONS: Record<string, { label: string; confirm: string; tone: "primary" | "secondary" | "danger" }> = {
   close: { label: "Close RSVPs", confirm: "Stop taking new RSVPs? Payments that arrive after this are returned.", tone: "secondary" },
   reopen: { label: "Reopen RSVPs", confirm: "Start taking RSVPs again?", tone: "secondary" },
@@ -96,6 +99,7 @@ function ManageFor({ id }: { id: string }) {
     purged: [],
   }[ev.status];
   const shortfall = view.payouts.find((p) => p.status === "queued" && /insufficient/i.test(p.error));
+  const waitingRefunds = view.payouts.filter((p) => p.kind === "refund" && p.status !== "done").length;
   // A shortfall while deposits are still confirming is just waiting, not a missing fee.
   const confirming = (view.pending_zat ?? 0) > 0;
   const leftover = view.balance_zat ?? 0;
@@ -143,9 +147,10 @@ function ManageFor({ id }: { id: string }) {
         )}
         {shortfall && !confirming && (
           <Notice tone="warn" title="Refunds are waiting for network fees">
-            There isn&rsquo;t enough in the event wallet to pay the network fee, usually because everyone came and no
-            deposits were forfeited. Send about 0.001 ZEC to the event address under <strong>Money</strong> (no memo
-            needed) and refunds go out automatically.
+            There isn&rsquo;t enough in the event wallet to pay the network fees, usually because everyone came and no
+            deposits were forfeited. Each refund is its own transaction (so nobody can tell who came together), with
+            its own fee. Send about {zatToZec(Math.max(1, waitingRefunds) * FEE_PER_REFUND_ZAT)} ZEC to the event
+            address under <strong>Money</strong> (no memo needed) and refunds go out automatically.
           </Notice>
         )}
         {ev.status === "settled" && leftover > 0 && !ev.forfeit_address && (

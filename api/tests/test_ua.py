@@ -55,3 +55,16 @@ MULTIBYTE_UA = "u1rexdud0f8y83nem3s7shlu2edrrwhjz79r5t8mmxgf582lhlg8ss89qera4wxq
 
 def test_multibyte_compact_sizes():
     assert decode_unified(MULTIBYTE_UA, "u")["orchard"] == bytes(range(43))
+
+
+# The same vector as web/src/lib/codec.test.ts: transparent (bytes 0..19), Sapling
+# (0..42) and Orchard (50..92) receivers, and its Orchard-only form.
+UA_WITH_TRANSPARENT = "u1883eq6gafdkmysp0haxfzeqz3fgpjn5sxleva0rs56s04uyz5r6zth60s04lscad0a9pwafma6jm3pa4fqlxva279gcw5efkdsdkhru5jgza34vuknm9dlrhp6sfn9a5zluxawa4jwpk3jvxfkxrt5pnzrfjvxqvpughaljh8z9tqtkr9kqae7vuvghyu3lywfxvzxffv9ts2qzw85l"
+UA_ORCHARD_ONLY = "u1rdgxj9gscehn48q8qzsff2t8wszlasc0ldqgzkns6ctqhwd4ea6nsfjr000ggtr3c0em2pz9jankcrv9luusr0t69hgnctswxcplaffy"
+
+
+def test_orchard_only_keeps_just_the_orchard_receiver():
+    from cashr.ua import orchard_only
+
+    assert orchard_only(UA_WITH_TRANSPARENT, "main") == UA_ORCHARD_ONLY
+    assert decode_unified(UA_ORCHARD_ONLY, "u") == {"orchard": bytes(range(50, 93))}

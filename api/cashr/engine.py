@@ -17,7 +17,7 @@ import string
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -25,8 +25,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .chain import Balance, Chain, ChainError, Recipient
 from .codec import is_orchard_address, try_decode_memo
+from .ua import orchard_only
 from .config import Settings
-from .db import Deposit, Event, Payout, Rsvp, SeenAddress
+from .db import Deposit, Event, Payout, Rsvp, SeenAddress, compact_sqlite
 
 log = logging.getLogger("cashr.engine")
 
@@ -47,6 +48,8 @@ BALANCE_TTL_S = 10.0
 REFUND_MEMO = "cashr: deposit refunded."
 NO_SHOW_MEMO = "cashr: no-show deposits."
 PURGED_TITLE = "Purged event"
+# Stands in for the creation time after purge, which would otherwise date the event.
+PURGED_AT = datetime(1970, 1, 1, tzinfo=timezone.utc)
 # A payment sent just before RSVPs closed can be mined a block or two later;
 # it still counts. Measured from the chain height when RSVPs closed.
 RSVP_GRACE_BLOCKS = 2
@@ -278,6 +281,7 @@ class Engine:
             for note in fresh:
                 self._ingest(db, ev, note)
                 ev.scan_height = max(ev.scan_height, note.height)
+            self._publish(db, ev)
             db.commit()
         if fresh:
             self._balances.pop(event_id, None)
@@ -301,6 +305,9 @@ class Engine:
             ev.float_zat += note.amount_zat
             return
 
+        # Only the Orchard receiver is kept: a transparent one in the same Unified
+        # Address could link the attendee to their transparent history.
+        memo = replace(memo, refund_address=orchard_only(memo.refund_address, self.settings.network))
         reason = self._rejection(db, ev, memo, note.amount_zat, note.height)
         if reason:
             dep.kind, dep.reason = "rejected", reason
@@ -320,6 +327,8 @@ class Engine:
         ev.rsvp_count += 1
         db.add(Rsvp(event_id=ev.id, ticket_hash=memo.ticket_hash,
                     refund_address=memo.refund_address, seat=self._free_seat(db, ev)))
+        if ev.list_publish_at is None:
+            ev.list_publish_at = self._publish_time()
         db.add(SeenAddress(digest=self._address_digest(memo.refund_address), period=self._period()))
         db.flush()
 
@@ -334,6 +343,31 @@ class Engine:
         """A random free seat. Counting up would reveal the order people paid in."""
         taken = set(db.scalars(select(Rsvp.seat).where(Rsvp.event_id == ev.id)))
         return secrets.choice([n for n in range(1, ev.capacity + 1) if n not in taken])
+
+    def _publish_time(self) -> datetime:
+        """A random moment between half and one and a half list delays from now."""
+        delay_s = max(0, self.settings.list_delay_min) * 60
+        jitter = secrets.randbelow(delay_s + 1) if delay_s else 0
+        return datetime.now(timezone.utc) + timedelta(seconds=delay_s // 2 + jitter)
+
+    def _publish(self, db: Session, ev: Event, now: bool = False) -> None:
+        """Move waiting tickets onto the public list, all together.
+
+        Listing each ticket as its payment confirmed would let anyone polling the
+        list note when each ticket was paid, and match it to the chain. Tickets
+        join in batches instead: once enough are waiting, at a random time after
+        the first one arrived, or when RSVPs close or the event settles.
+        """
+        waiting = db.scalars(select(Rsvp).where(Rsvp.event_id == ev.id, Rsvp.listed.is_(False))).all()
+        if not waiting:
+            ev.list_publish_at = None
+            return
+        due = ev.list_publish_at is None or _aware(ev.list_publish_at) <= datetime.now(timezone.utc)
+        if now or due or len(waiting) >= max(1, self.settings.list_batch):
+            for r in waiting:
+                r.listed = True
+            ev.listed_count += len(waiting)
+            ev.list_publish_at = None
 
     def _rejection(self, db: Session, ev: Event, memo, amount_zat: int, height: int = 0) -> str:
         if memo.event_id != ev.id:
@@ -367,11 +401,14 @@ class Engine:
             for p in db.scalars(select(Payout).where(Payout.event_id == event_id, Payout.key.is_(None))):
                 p.key = secrets.token_hex(16)  # rows from before keys existed
             db.commit()
+            now = datetime.now(timezone.utc)
             snaps = [
                 _Snapshot(p.id, p.kind, p.status, p.key, p.opid, p.txid, p.polls, list(p.recipients))
                 for p in db.scalars(select(Payout).where(Payout.event_id == event_id,
                                                          Payout.status.in_(IN_FLIGHT))
                                     .order_by(Payout.id))
+                # A queued refund waits for its own time (sent ones are tracked as usual).
+                if not (p.status == "queued" and p.not_before is not None and _aware(p.not_before) > now)
             ]
         for snap in snaps:
             # Wallet I/O happens without the lock; door check-ins never wait on it.
@@ -514,6 +551,7 @@ class Engine:
         if ev.status != "open":
             raise EngineError("bad_state", "RSVPs are already closed.")
         ev.status = "closed"
+        self._publish(db, ev, now=True)
         if ev.close_height is None:
             try:
                 ev.close_height = self.chain.tip_height()
@@ -530,6 +568,7 @@ class Engine:
         if ev.status not in DOOR_OPEN:
             raise EngineError("bad_state", "This event is already settling or settled.")
         ev.status = "settling"
+        self._publish(db, ev, now=True)
         refunds = []
         for r in db.scalars(select(Rsvp).where(Rsvp.event_id == ev.id,
                                                Rsvp.status == "confirmed").order_by(Rsvp.seat)):
@@ -542,8 +581,11 @@ class Engine:
                 r.status = "forfeited"
                 ev.forfeited_zat += ev.deposit_zat
         size = max(1, self.settings.refund_batch_size)
+        spread_s = max(0, self.settings.refund_spread_min) * 60
+        start = datetime.now(timezone.utc)
         for i in range(0, len(refunds), size):
-            db.add(Payout(event_id=ev.id, kind="refund", recipients=refunds[i:i + size]))
+            delay = timedelta(seconds=secrets.randbelow(spread_s + 1)) if spread_s else timedelta(0)
+            db.add(Payout(event_id=ev.id, kind="refund", recipients=refunds[i:i + size], not_before=start + delay))
 
     def retry_failed(self, db: Session, ev: Event) -> int:
         failed = db.scalars(select(Payout).where(Payout.event_id == ev.id,
@@ -588,6 +630,10 @@ class Engine:
             self._wipe(db, ev)
             db.commit()
         self._balances.pop(ev_id, None)
+        try:
+            compact_sqlite(self.sessions.kw["bind"])
+        except Exception:  # the purge stands; the rewrite is retried at the next purge
+            log.exception("could not rewrite the database after a purge")
 
     @staticmethod
     def _wipe(db: Session, ev: Event) -> None:
@@ -603,6 +649,10 @@ class Engine:
         ev.address = ""
         ev.account_ref = ""
         ev.forfeit_address = ""
+        ev.created_at = PURGED_AT
+        ev.scan_height = 0
+        ev.close_height = None
+        ev.list_publish_at = None
         ev.status = "purged"
 
     def retire_idle_events(self) -> None:

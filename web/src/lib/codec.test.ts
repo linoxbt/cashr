@@ -87,3 +87,14 @@ test("UA receivers with multi-byte CompactSizes parse like the Python side", () 
   assert.ok(r?.orchard);
   assert.deepEqual([...r.orchard], Array.from({ length: 43 }, (_, i) => i));
 });
+
+// A UA with transparent (bytes 0..19), Sapling (0..42) and Orchard (50..92)
+// receivers, and its Orchard-only form: the same vector as api/tests/test_ua.py.
+const UA_WITH_TRANSPARENT = "u1883eq6gafdkmysp0haxfzeqz3fgpjn5sxleva0rs56s04uyz5r6zth60s04lscad0a9pwafma6jm3pa4fqlxva279gcw5efkdsdkhru5jgza34vuknm9dlrhp6sfn9a5zluxawa4jwpk3jvxfkxrt5pnzrfjvxqvpughaljh8z9tqtkr9kqae7vuvghyu3lywfxvzxffv9ts2qzw85l";
+const UA_ORCHARD_ONLY = "u1rdgxj9gscehn48q8qzsff2t8wszlasc0ldqgzkns6ctqhwd4ea6nsfjr000ggtr3c0em2pz9jankcrv9luusr0t69hgnctswxcplaffy";
+
+test("only the Orchard receiver is kept, byte-identical to the Python side", async () => {
+  const { orchardOnly } = await import("./ua.ts");
+  assert.equal(orchardOnly(UA_WITH_TRANSPARENT, "main"), UA_ORCHARD_ONLY);
+  assert.deepEqual(Object.keys(decodeUnified(UA_ORCHARD_ONLY, "main") ?? {}), ["orchard"]);
+});

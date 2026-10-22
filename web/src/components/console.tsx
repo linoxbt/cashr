@@ -126,8 +126,8 @@ type TicketStatus = RsvpStatus | "going" | "pending" | "returned" | "gone";
 function ticketPill(status: TicketStatus | undefined) {
   switch (status) {
     case undefined: return null;
-    case "gone": return <Pill>Event over</Pill>;
-    case "pending": return <Pill tone="warn">Awaiting payment</Pill>;
+    case "gone": return <Pill>Event over · ticket removed</Pill>;
+    case "pending": return <Pill tone="warn">Not listed yet</Pill>;
     case "returned": return <Pill tone="bad">Payment returned</Pill>;
     case "refunded": return <Pill tone="ok">Refunded</Pill>;
     case "refunding": return <Pill tone="ok">Refund sending</Pill>;
@@ -157,6 +157,8 @@ export function MyTickets() {
     setStatus((s) => ({ ...s, [ticket.eventId]: "checking" }));
     try {
       const st = await checkTicket(ticket);
+      // The event was purged: nothing is left on the server, so nothing stays here.
+      if (st === "gone") forgetTicket(ticket.eventId);
       setStatus((s) => ({ ...s, [ticket.eventId]: st }));
     } catch {
       setStatus((s) => ({ ...s, [ticket.eventId]: "offline" }));
@@ -258,7 +260,7 @@ export function MyEvents({ mode = "both" }: { mode?: "both" | "door" } = {}) {
             <div className="truncate font-medium">{e.title}</div>
             <div className="osd mt-0.5 text-[11px] text-ink-4">
               {e.live ? (
-                `${e.live.status} · ${e.live.rsvp_count}/${e.live.capacity} RSVPs · ${e.live.checked_in_count} in`
+                `${e.live.status} · ${e.live.rsvp_count}/${e.live.capacity} listed${e.live.checked_in_count === null ? "" : ` · ${e.live.checked_in_count} came`}`
               ) : (
                 <button className="underline decoration-ink-4 underline-offset-2 hover:text-ink-2" onClick={() => check(e.id)}>
                   {e.live === null ? "Offline · retry" : "Check status"}
