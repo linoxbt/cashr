@@ -99,7 +99,8 @@ services:
       CASHR_LIST_DELAY_MIN: "0"
       CASHR_LIST_BATCH: "1"
       CASHR_REFUND_SPREAD_MIN: "0"
-      CASHR_SECRET: ${CASHR_DEMO_SECRET:?set CASHR_DEMO_SECRET}
+      # Simulated data only, so a default is safe; set it anyway for a public demo.
+      CASHR_SECRET: ${CASHR_DEMO_SECRET:-demo-only-secret}
       CASHR_CORS_ORIGINS: ${CASHR_DEMO_CORS_ORIGINS:-https://demo.cashr.site}
     volumes:
       - demo-data:/data
