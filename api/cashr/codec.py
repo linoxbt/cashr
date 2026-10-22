@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 MEMO_TAG = "CSH1"
+LEGACY_MEMO_TAG = "UNL1"
 MEMO_MAX = 512
 ZAT_PER_ZEC = 100_000_000
 
@@ -63,8 +64,10 @@ def decode_memo(raw: bytes) -> RsvpMemo:
     # Memos are zero-padded to 512 bytes on chain.
     text = raw.rstrip(b"\x00").decode("ascii", errors="strict").strip()
     parts = text.split(" ")
-    if len(parts) != 4 or parts[0] != MEMO_TAG:
-        raise MemoError("not an cashr memo")
+    # UNL1 is the tag from before the rename to cashr: a payment built from an old
+    # page must still count, not be kept as a fee top-up.
+    if len(parts) != 4 or parts[0] not in (MEMO_TAG, LEGACY_MEMO_TAG):
+        raise MemoError("not a cashr memo")
     _, event_id, th, addr = parts
     if not _EVENT_RE.match(event_id):
         raise MemoError("bad event id")

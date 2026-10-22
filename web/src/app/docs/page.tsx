@@ -132,7 +132,7 @@ export default function Docs() {
               items={[
                 ["Open the invite", "Paste the link on the home screen, or open it directly."],
                 ["Give a refund address", <>In your wallet, open <em>Receive</em> and copy the shielded address (it starts with <C>u1</C>). It must be fresh: never one you used for another cashr RSVP. The page checks it can receive a private (Orchard) refund before you pay.</>],
-                ["Pay the deposit", "Scan the QR code or tap Open in wallet app. The amount and memo are filled in; don't change them. Confirmation takes about a minute."],
+                ["Pay the deposit", "Scan the QR code or tap Open in wallet app. The amount and memo are filled in; don't change them. Your ticket shows as confirmed within about two hours: tickets join the public list in batches, so nobody can time yours."],
                 ["Keep your ticket", "Your ticket appears as a QR code. Save the image: it is stored only in this browser, and it is the only way in and the only way to get your deposit back."],
                 ["Show it at the door, get refunded", "After the event, the deposit returns to your refund address."],
               ]}
@@ -169,9 +169,9 @@ export default function Docs() {
                 ["One wallet account per event", "Each event gets its own account from its own random seed (encrypted at rest), with an Orchard-only (shielded) address and a birthday at the current block. Purging the event deletes the seed."],
                 ["A secret on the attendee's phone", "The browser makes 32 random bytes and keeps them. Only SHA-256 of that secret leaves the device."],
                 ["The memo", <>The payment carries one encrypted line: <C>CSH1 &lt;event&gt; &lt;ticket hash&gt; &lt;refund address&gt;</C>. Only the event&rsquo;s wallet can read it.</>],
-                ["The wallet reads it", "A light-client wallet syncs from lightwalletd, fetches the full transaction over Tor to decrypt the memo, and the API records the hash and refund address."],
+                ["The wallet reads it", "A light-client wallet syncs from lightwalletd, fetches the full transaction over Tor (after a random delay) to decrypt the memo, and the API records the hash and the refund address's Orchard receiver."],
                 ["The door checks a hash", "The ticket QR holds the secret; the door hashes it and looks the hash up."],
-                ["Refunds stay in Orchard", "Refunds are batched Orchard-to-Orchard sends with the FullPrivacy policy, so no amount or recipient is revealed on chain."],
+                ["Refunds stay in Orchard", "Each refund is its own Orchard-to-Orchard send with the FullPrivacy policy, at a random time within about three hours, so no amount, recipient or group of attendees is revealed."],
               ]}
             />
             <p>

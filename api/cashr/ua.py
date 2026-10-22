@@ -142,3 +142,44 @@ def has_orchard_receiver(address: str, network: str) -> bool:
         return "orchard" in decode_unified(address, "u" if network == "main" else "utest")
     except UAError:
         return False
+
+
+def _bech32m_encode(hrp: str, data5: list[int]) -> str:
+    values = _hrp_expand(hrp) + data5
+    pm = _polymod(values + [0] * 6) ^ _BECH32M_CONST
+    checksum = [(pm >> 5 * (5 - i)) & 31 for i in range(6)]
+    return hrp + "1" + "".join(_CHARSET[d] for d in data5 + checksum)
+
+
+def _to_5bit(data: bytes) -> list[int]:
+    acc = bits = 0
+    out = []
+    for b in data:
+        acc = (acc << 8) | b
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            out.append((acc >> bits) & 31)
+    if bits:
+        out.append((acc << (5 - bits)) & 31)
+    return out
+
+
+def unified_address(network: str, receivers: dict[int, bytes]) -> str:
+    """Encode a ZIP 316 Unified Address from {typecode: raw receiver}."""
+    hrp = "u" if network == "main" else "utest"
+    body = b"".join(bytes([t, len(r)]) + r for t, r in sorted(receivers.items()))
+    return _bech32m_encode(hrp, _to_5bit(f4jumble(body + hrp.encode().ljust(16, b"\x00"))))
+
+
+def orchard_only(address: str, network: str) -> str:
+    """The same address with only its Orchard receiver.
+
+    Some wallets put a transparent receiver in their Unified Address. Refunds only
+    ever use the Orchard one, so nothing else is kept: a stored t-address could
+    link an attendee to their transparent history. Raises UAError without one.
+    """
+    receivers = decode_unified(address.strip(), "u" if network == "main" else "utest")
+    if "orchard" not in receivers:
+        raise UAError("no Orchard receiver")
+    return unified_address(network, {0x03: receivers["orchard"]})

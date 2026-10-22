@@ -20,7 +20,9 @@ def chain():
 @pytest.fixture
 def client(tmp_path, chain):
     settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/t.db",
-                        run_scanner=False, secret="test-secret")
+                        run_scanner=False, secret="test-secret",
+                        # No batching or spreading in logic tests; test_privacy covers both.
+                        list_delay_min=0, list_batch=1, refund_spread_min=0)
     app = create_app(settings, chain)
     with TestClient(app) as c:
         c.chain = chain

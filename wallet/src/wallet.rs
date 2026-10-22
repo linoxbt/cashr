@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail};
-use rand::rngs::OsRng;
+use rand::{rngs::OsRng, RngCore};
 use secrecy::ExposeSecret;
 use tokio::sync::Mutex;
 use tonic::Code;
@@ -60,6 +60,9 @@ const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 /// Syncs in a row a received transaction may be missing from lightwalletd
 /// (about an hour at the default interval) before its memo is given up on.
 const ENHANCE_MAX_MISSES: u32 = 360;
+/// A received transaction is fetched this many seconds after it is first seen.
+const ENHANCE_DELAY_MIN_S: u32 = 60;
+const ENHANCE_DELAY_MAX_S: u32 = 300;
 /// Blocks past its expiry height before an unmined transaction counts as
 /// expired, so a short reorg can't make a transaction that may still be mined
 /// look dead (and be rebuilt).
@@ -144,6 +147,8 @@ pub struct Wallet {
     prover: LocalTxProver,
     /// How many syncs in a row lightwalletd answered "not found" for a received transaction.
     misses: Mutex<std::collections::HashMap<TxId, u32>>,
+    /// When each received transaction may be fetched (see `due`).
+    deferred: Mutex<std::collections::HashMap<TxId, std::time::Instant>>,
 }
 
 impl Wallet {
@@ -173,6 +178,7 @@ impl Wallet {
             scanned: AtomicU32::new(scanned),
             prover: LocalTxProver::bundled(),
             misses: Default::default(),
+            deferred: Default::default(),
         });
         if owes_compaction {
             // A delete's rewrite was interrupted by a restart: finish it before serving.
@@ -280,12 +286,34 @@ impl Wallet {
                 return;
             }
             for request in requests {
+                if !self.due(&request).await {
+                    done.insert(request);
+                    continue;
+                }
                 if let Err(e) = self.serve(client, tip, &request).await {
                     warn!(error = %format!("{e:#}"), "could not fetch a transaction; retrying on the next sync");
                 }
                 done.insert(request);
             }
         }
+    }
+
+    /// Whether to fetch a transaction now. A deposit's transaction is fetched a
+    /// random 1–5 minutes after the wallet first sees it, so the server's fetches
+    /// (even over Tor) don't follow each broadcast closely enough for a sync
+    /// server to pick out which transactions are RSVPs by timing.
+    async fn due(&self, request: &TransactionDataRequest) -> bool {
+        let TransactionDataRequest::Enhancement(txid) = request else { return true };
+        let mut deferred = self.deferred.lock().await;
+        let at = *deferred.entry(*txid).or_insert_with(|| {
+            let jitter = (OsRng.next_u32() % (ENHANCE_DELAY_MAX_S - ENHANCE_DELAY_MIN_S + 1)) as u64;
+            std::time::Instant::now() + std::time::Duration::from_secs(ENHANCE_DELAY_MIN_S as u64 + jitter)
+        });
+        if std::time::Instant::now() < at {
+            return false;
+        }
+        deferred.remove(txid);
+        true
     }
 
     async fn serve(&self, client: &mut Client, tip: BlockHeight, request: &TransactionDataRequest) -> anyhow::Result<()> {

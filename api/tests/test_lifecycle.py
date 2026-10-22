@@ -12,6 +12,14 @@ def tickets(client, event_id):
     return client.get(f"/events/{event_id}/tickets").json()
 
 
+def reasons(client, event_id):
+    """Why each payment wasn't accepted, as the server records it (the public list says only returned/kept)."""
+    with client.engine.sessions() as db:
+        return [{"h": d.ticket_hash, "reason": d.reason} for d in db.query(Deposit)
+                .filter(Deposit.event_id == event_id, (Deposit.kind == "rejected") | (Deposit.reason == "bad_refund_address"))
+                .order_by(Deposit.id)]
+
+
 def pay(client, ev, memo, amount=None):
     client.chain.pay(ev["address"], ev["deposit_zat"] if amount is None else amount, memo)
     client.engine.scan_once(full=True)
@@ -233,8 +241,9 @@ def test_rejections_are_returned(client, make_event, attendee):
 
     t = tickets(client, ev["id"])
     assert [x["h"] for x in t["tickets"]] == [first.hash]
-    reasons = sorted(x["reason"] for x in t["rejected"])
-    assert reasons == ["full", "wrong_amount", "wrong_event"]
+    assert sorted(x["reason"] for x in t["rejected"]) == ["returned"] * 3
+    reasons_ = sorted(x["reason"] for x in reasons(client, ev["id"]))
+    assert reasons_ == ["full", "wrong_amount", "wrong_event"]
     assert refunds_to(client, second.refund_address) == [ev["deposit_zat"] - 10_000]
 
 
@@ -245,7 +254,8 @@ def test_refund_address_reuse_refused_across_events(client, make_event, attendee
     again = attendee(ev2["id"])
     again.refund_address = a.refund_address
     pay(client, ev2, again.memo())
-    assert tickets(client, ev2["id"])["rejected"] == [{"h": again.hash, "reason": "address_reused"}]
+    assert tickets(client, ev2["id"])["rejected"] == [{"h": again.hash, "reason": "returned"}]
+    assert reasons(client, ev2["id"]) == [{"h": again.hash, "reason": "address_reused"}]
     with client.engine.sessions() as db:
         # Only a keyed digest is stored, never the address itself.
         digests = [s.digest for s in db.query(SeenAddress)]
@@ -272,7 +282,7 @@ def test_closed_event_rejects_new_rsvps(client, make_event, attendee):
     assert [t["h"] for t in tickets(client, ev["id"])["tickets"]] == [on_time.hash]
     advance(client, RSVP_GRACE_BLOCKS + 1)
     pay(client, ev, attendee(ev["id"]).memo())
-    assert tickets(client, ev["id"])["rejected"][0]["reason"] == "rsvps_closed"
+    assert reasons(client, ev["id"])[0]["reason"] == "rsvps_closed"
 
 
 def test_rsvp_deadline_closes_rsvps(client, make_event, attendee):
@@ -280,7 +290,7 @@ def test_rsvp_deadline_closes_rsvps(client, make_event, attendee):
     ev = make_event(rsvp_closes_at=past)["event"]
     assert ev["status"] == "open" and ev["accepting_rsvps"] is False
     pay(client, ev, attendee(ev["id"]).memo())
-    assert tickets(client, ev["id"])["rejected"][0]["reason"] == "rsvps_closed"
+    assert reasons(client, ev["id"])[0]["reason"] == "rsvps_closed"
     future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
     assert make_event(rsvp_closes_at=future)["event"]["accepting_rsvps"] is True
 
@@ -388,7 +398,8 @@ def test_refund_address_without_orchard_is_reported(client, make_event, attendee
     t = tickets(client, ev["id"])
     assert t["tickets"] == []
     # The attendee can see why nothing happened.
-    assert t["rejected"] == [{"h": a.hash, "reason": "bad_refund_address"}]
+    assert t["rejected"] == [{"h": a.hash, "reason": "kept"}]
+    assert reasons(client, ev["id"]) == [{"h": a.hash, "reason": "bad_refund_address"}]
 
 
 def test_async_shortfall_waits_for_top_up(client, make_event, attendee):
@@ -424,7 +435,7 @@ def test_settled_events_are_scanned_less_often(client, make_event, attendee):
     for _ in range(8):
         client.engine.scan_once()
     # A late payment to a settled event is still returned.
-    assert tickets(client, ev["id"])["rejected"][0]["reason"] == "rsvps_closed"
+    assert reasons(client, ev["id"])[0]["reason"] == "rsvps_closed"
 
 
 def test_meta_reports_wallet_tip(client):
@@ -505,6 +516,7 @@ def test_sqlite_overwrites_deleted_rows(tmp_path):
 
     with make_engine(f"sqlite:///{tmp_path}/s.db").connect() as conn:
         assert conn.execute(text("PRAGMA secure_delete")).scalar() == 1
+        assert conn.execute(text("PRAGMA journal_mode")).scalar() == "wal"
 
 
 def test_rsvps_must_close_before_the_start(client):

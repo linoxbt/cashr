@@ -60,6 +60,7 @@ jobs:
         run: |
           pip install -e 'api[dev]'
           (cd api && CASHR_CHAIN=sim CASHR_SECRET=ci CASHR_SCAN_INTERVAL=1 \
+            CASHR_LIST_DELAY_MIN=0 CASHR_LIST_BATCH=1 CASHR_REFUND_SPREAD_MIN=0 \
             CASHR_DATABASE_URL=sqlite:///$RUNNER_TEMP/e2e.db uvicorn cashr.main:app --port 8000 &)
           (cd web && npm start &)
           npx --prefix web playwright install --with-deps chromium
@@ -112,6 +113,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [web]
     runs-on: ubuntu-latest
+    # Two quick pushes must not finish in the wrong order and leave an older build live.
+    concurrency:
+      group: deploy-web-${{ matrix.site.id }}
+      cancel-in-progress: true
     env:
       NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
     strategy:

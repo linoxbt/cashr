@@ -3,19 +3,34 @@ import type { Metadata } from "next";
 export const metadata: Metadata = { title: "Threat model" };
 
 const STORED = [
-  ["Event details", "Title, time, place, capacity, deposit. All but capacity and deposit are wiped on purge, so an event id left in an attendee's wallet no longer leads anywhere."],
+  ["Event details", "Title, time, place, capacity, deposit. On purge, everything that names, places or dates the event is wiped, including when it was created, so an event id left in an attendee's wallet leads nowhere."],
   ["Ticket hash", "SHA-256 of a random secret. Reveals nothing about the person."],
-  ["Refund address", "A one-time shielded address the attendee chose. Unlinkable to their other addresses."],
-  ["Checked in", "A yes/no per ticket. No time, so arrivals can't be matched against cameras. It's never published while the event runs; every ticket's outcome appears at once when the event is settled."],
+  ["Refund address", "Only its Orchard (shielded) receiver, even if your wallet's address also carries a transparent one. Unlinkable to your other addresses. Deleted on purge."],
+  ["Checked in", "A yes/no per ticket, never a time. Neither the ticket's state nor the check-in count is public while the event runs; every outcome appears at once when it settles."],
   ["Seat", "A random number, so it says nothing about the order people paid in."],
-  ["Deposit notes", "Transaction id, amount, block height. The sender is never visible, even to the wallet."],
-  ["Payouts", "Each refund, return and sweep: its recipients' refund addresses, amounts and memo, and its transaction id. Deleted on purge."],
+  ["Deposit notes", "Transaction id, amount, block height. The sender is never visible, even to the wallet. Deleted on purge."],
+  ["Payouts", "Each refund, return and sweep: its recipient's refund address, amount, memo and transaction id. Deleted on purge."],
   ["Link hashes", "SHA-256 hashes of the manage and door links, so the server can check them without storing them."],
-  ["Reused-address digests", "Keyed hashes of refund addresses, only to refuse reuse. Never the address itself. Forgotten after one to two years."],
-  ["The event's wallet account", "Its own seed (encrypted at rest) and the deposits' memos. Purging deletes the account and the seed, so the memos can't be decrypted again, even from the chain."],
+  ["Reused-address digests", "Keyed hashes of refund addresses, only to refuse reuse. Never the address itself. Forgotten after one to two years; until then, someone holding the server's secret could confirm that a known address once paid for an RSVP here."],
+  ["The event's wallet account", "Its own seed (encrypted at rest) and the deposits' memos. Purging deletes the account and the seed and rewrites the wallet file, so the memos can't be decrypted again, even from the chain."],
 ];
 
 const LEAKS = [
+  {
+    risk: "Timing on the public ticket list",
+    detail: "Anyone with the invite link can read the list of ticket hashes. If each ticket appeared the moment its payment confirmed, polling the list would time every payment.",
+    fix: "New tickets join the list in batches: once three are waiting, or at a random time around two hours after the first, and all at once when RSVPs close. The public RSVP count follows the list, and no check-in count is public until the event settles.",
+  },
+  {
+    risk: "Who came together",
+    detail: "One refund paying many attendees would be fetched by each of their wallets from a sync server, showing its operator a group of people who attended together.",
+    fix: "Every refund is its own transaction, sent at a random time within about three hours of the event ending.",
+  },
+  {
+    risk: "The sync servers (lightwalletd)",
+    detail: "Light wallets, including attendees' own and the server's, fetch transactions from a sync server, which sees the requesting IP address and which transactions it asks about.",
+    fix: "The server's wallet asks over Tor, with a fresh circuit for each transaction and a random delay of one to five minutes, so its requests don't single out RSVPs by timing. Your own wallet is outside cashr's control: for high-risk events, use a wallet that connects over Tor or to a server you trust, and pay from a shielded balance.",
+  },
   {
     risk: "Reusing a refund address",
     detail: "The same address at two events would link one person's attendance across both.",
@@ -24,17 +39,12 @@ const LEAKS = [
   {
     risk: "Network metadata",
     detail: "Loading a page reveals an IP address to the web host and the API host, and their providers may log it.",
-    fix: "The API itself keeps no access logs. Confirmation checks download every ticket hash, so no request points at one ticket, and your ticket list never asks about all your events at once. For high-risk groups, open the pages over Tor.",
-  },
-  {
-    risk: "The wallet's sync server",
-    detail: "To read a deposit's memo, the server's wallet fetches that transaction from a lightwalletd server. Its operator would learn which transactions are RSVPs, and could match them to attendees' own wallets broadcasting through the same server.",
-    fix: "The wallet reaches lightwalletd through Tor, with a fresh circuit for every transaction it fetches. Operators can also run their own lightwalletd.",
+    fix: "The API keeps no access logs. Confirmation downloads every ticket hash, so no request points at one ticket; every visitor polls at the same jittered pace whatever their ticket's state; and your ticket list never asks about all your events at once. For high-risk groups, open the pages over Tor.",
   },
   {
     risk: "What stays in your wallet",
     detail: "Memos stay in a wallet's history for good, and anyone who later sees the wallet can read them.",
-    fix: "Refunds and returns carry a fixed memo that never names the event, and purging wipes the event's name, so the event id in your deposit memo leads nowhere.",
+    fix: "Refunds and returns carry a fixed memo that never names the event, and purging wipes everything that would name or date it, so the event id in your deposit memo leads nowhere.",
   },
   {
     risk: "Odd amounts",
@@ -44,20 +54,21 @@ const LEAKS = [
   {
     risk: "Transparent funds",
     detail: "Paying from a transparent (t-address) balance shows the payer's address and the exact deposit amount on the public chain, which can tie them to the event.",
-    fix: "Event addresses are Orchard-only and refunds are sent with the wallet's FullPrivacy policy. Attendees should pay from a shielded balance.",
+    fix: "Event addresses are Orchard-only, refunds go Orchard-to-Orchard with the wallet's FullPrivacy policy, and only the Orchard part of a refund address is kept. Attendees should pay from a shielded balance.",
   },
   {
-    risk: "The ticket itself",
-    detail: "Whoever holds the QR code can use it once.",
-    fix: "Treat it like a physical ticket. It is stored only on the attendee's device, and the saved image doesn't name the event. Remove tickets for past events from your ticket list.",
+    risk: "Your phone",
+    detail: "Whoever holds the ticket QR can use it once, and your browser keeps your tickets, with each event's name and date, so they can be listed without asking the server.",
+    fix: "The refund address is dropped from your browser once your payment is in, the saved ticket image doesn't name the event, and a ticket is removed automatically when its event is purged. Remove tickets for past events from your ticket list, or all of them at once.",
   },
 ];
 
 const TRUST = [
   "The server's wallet holds deposits until the event is settled. A dishonest operator could keep them, so deposits should stay small (the price of a coffee).",
   "The organiser's links are bearer secrets. Anyone with the manage link can settle or purge the event.",
-  "The door device sees ticket hashes, seats and the event's check-in count, and keeps them to work offline until the event is settled. It never sees refund addresses.",
-  "The organiser's dashboard shows each ticket's hash and whether it was checked in, but only a shortened refund address.",
+  "The door device sees ticket hashes, seats and the live check-in count, and keeps the hashes to work offline until the event is settled. It never sees refund addresses.",
+  "The organiser's dashboard shows each ticket's hash, seat and whether it was checked in. It never shows refund addresses.",
+  "This public instance runs on a shared server. A server is only as private as its operator and its host: high-risk groups should run their own (one command, see the docs).",
   "cashr can't hide that an event exists, or protect against someone photographing the room.",
 ];
 

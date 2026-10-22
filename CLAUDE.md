@@ -17,8 +17,10 @@
 5. Purge deletes RSVP, deposit and payout rows, the event's wallet account and seed, and anything that names or
    dates the event (title, times, place, address). Server-written memos never name the event.
 6. A payout is sent under its idempotency key only. Never build a second transaction for a payout that could still be mined.
-7. Nothing public reveals check-in state or payment order while an event runs, and no client request links one
-   person's events together. The wallet reaches lightwalletd through Tor unless the operator opts out.
+7. Nothing public reveals check-in state, payment timing or order while an event runs (tickets are listed in
+   batches; counts follow the list), refunds are one per transaction at random times, client polling looks the same
+   in every state, and no client request links one person's events together. Only the Orchard receiver of a refund
+   address is kept. The wallet reaches lightwalletd through Tor, with delayed fetches, unless the operator opts out.
 
 ## Checks before committing
 ```

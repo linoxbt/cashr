@@ -17,14 +17,20 @@ export interface PublicEvent {
   rsvp_closes_at: string | null;
   status: EventStatus;
   address: string;
+  /** Tickets on the public list (they join in batches), not every payment so far. */
   rsvp_count: number;
-  checked_in_count: number;
+  /** Hidden (null) until the event settles: a live count would time each arrival. */
+  checked_in_count: number | null;
   seats_left: number;
+  /** Whether the event is full right now, counting tickets not yet on the public list. */
+  full: boolean;
   /** Open and before the RSVP deadline. Payments sent when this is false are returned. */
   accepting_rsvps: boolean;
 }
 
-export interface AdminEvent extends PublicEvent {
+export interface AdminEvent extends Omit<PublicEvent, "checked_in_count"> {
+  /** The organiser sees the true, live count. */
+  checked_in_count: number;
   forfeit_address: string;
   rejected_count: number;
   refunded_zat: number;
@@ -39,7 +45,8 @@ export interface TicketList {
   status: EventStatus;
   /** Statuses appear only once settlement starts; during the event the list shows hashes alone. */
   tickets: { h: string; status?: RsvpStatus }[];
-  rejected: { h: string; reason: string }[];
+  /** Only whether the money comes back ("returned") or not ("kept"); the reason itself stays private. */
+  rejected: { h: string; reason: "returned" | "kept" }[];
 }
 
 export interface AdminView {

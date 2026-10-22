@@ -112,20 +112,24 @@ def public_event(ev: Event) -> dict:
         "rsvp_closes_at": ev.rsvp_closes_at.isoformat() if ev.rsvp_closes_at else None,
         "status": ev.status,
         "address": ev.address,
-        "rsvp_count": ev.rsvp_count,
-        "checked_in_count": ev.checked_in_count,
-        "seats_left": max(0, ev.capacity - ev.rsvp_count),
+        # Public counts follow the public list, which fills in batches; a live count
+        # would time each payment. Check-ins are counted only once the event settles,
+        # or the count would time each arrival.
+        "rsvp_count": ev.listed_count,
+        "checked_in_count": None if ev.status in DOOR_OPEN else ev.checked_in_count,
+        "seats_left": max(0, ev.capacity - ev.listed_count),
+        "full": ev.rsvp_count >= ev.capacity,
         # Open, and before the RSVP deadline. Payments sent when this is false are returned.
         "accepting_rsvps": accepting_rsvps(ev),
     }
 
 
-def shorten(address: str) -> str:
-    return f"{address[:8]}…{address[-6:]}" if len(address) > 20 else address
-
-
 def admin_event(ev: Event) -> dict:
     return public_event(ev) | {
+        # The organiser (and door) see the true, live counts.
+        "rsvp_count": ev.rsvp_count,
+        "checked_in_count": ev.checked_in_count,
+        "seats_left": max(0, ev.capacity - ev.rsvp_count),
         "forfeit_address": ev.forfeit_address,
         "rejected_count": ev.rejected_count,
         "refunded_zat": ev.refunded_zat,
@@ -246,7 +250,8 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         if ev is None:
             raise EngineError("not_found", "No such event.", 404)
         # Sorted by hash, so the order says nothing about who paid first.
-        rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id).order_by(Rsvp.ticket_hash)).all()
+        rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id, Rsvp.listed.is_(True))
+                           .order_by(Rsvp.ticket_hash)).all()
         # Returned payments, and ones that can't be returned privately.
         rejected = db.scalars(select(Deposit).where(
             Deposit.event_id == event_id,
@@ -259,7 +264,10 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         return {
             "status": ev.status,
             "tickets": [{"h": r.ticket_hash} | ({"status": r.status} if settled else {}) for r in rsvps],
-            "rejected": [{"h": d.ticket_hash, "reason": d.reason} for d in rejected],
+            # Only whether the money comes back: a specific reason such as a reused
+            # address would tell everyone something about that ticket's holder.
+            "rejected": [{"h": d.ticket_hash, "reason": "kept" if d.reason == "bad_refund_address" else "returned"}
+                         for d in rejected],
         }
 
     # ---- organiser ----------------------------------------------------------
@@ -285,10 +293,10 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             "balance_zat": balance,
             "pending_zat": pending,
             "wallet_error": wallet_error,
-            # The organiser never needs a refund address; shortened, it still
-            # shows what the server holds without handing it out.
+            # The organiser never needs a refund address, and even a shortened one is a
+            # fingerprint: the dashboard only learns that one is stored.
             "rsvps": [{"seat": r.seat, "ticket_hash": r.ticket_hash,
-                       "refund_address": shorten(r.refund_address), "status": r.status,
+                       "refund_address": "stored until purge", "status": r.status,
                        "checked_in": r.checked_in} for r in rsvps],
             "deposits": [{"txid": d.txid, "pool": d.pool, "index": d.out_index,
                           "amount_zat": d.amount_zat, "kind": d.kind,

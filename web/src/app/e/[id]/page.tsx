@@ -19,6 +19,7 @@ import {
   zip321,
 } from "@/lib/codec";
 import { TICKETS_KEY, forgetTicket, getTicket, saveTicket, type StoredTicket } from "@/lib/storage";
+import { orchardOnly } from "@/lib/ua";
 
 export default function EventPage() {
   const { id } = useParams<{ id: string }>();
@@ -34,6 +35,9 @@ function EventFor({ id }: { id: string }) {
   const [persisted, setPersisted] = useState(true);
   const [error, setError] = useState<ApiError | null>(null);
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
+  const [forgotten, setForgotten] = useState(false);
+  // Bumped to fetch now rather than at the next tick (after a simulated payment).
+  const [refreshes, setRefreshes] = useState(0);
 
   useEffect(() => {
     setTicket(getTicket(id));
@@ -45,18 +49,13 @@ function EventFor({ id }: { id: string }) {
     return () => window.removeEventListener("storage", onStorage);
   }, [id]);
 
-  // Poll quickly only while something can change for this visitor: a payment
-  // waiting to confirm, or a settlement in progress. Stop once it's final.
-  const pollRef = useRef<{ ticket: StoredTicket | null; event: PublicEvent | null; list: TicketList | null }>({ ticket, event, list });
-  pollRef.current = { ticket, event, list };
-  const interval = () => {
-    const { ticket: t, event: ev, list: l } = pollRef.current;
-    if (ev?.status === "purged") return null;
-    const mine = t && l?.tickets.find((x) => x.h === t.hash);
-    if (mine?.status === "refunded" || mine?.status === "forfeited") return null;
-    if (!t) return 30_000;
-    return mine && !mine.status ? 30_000 : 8_000;
-  };
+  // Every visitor polls at the same, jittered pace whatever their ticket's state:
+  // a pace that changed with the state would tell anyone watching the traffic
+  // which state that is. Polling stops only once the event is purged, which is
+  // the same for everyone.
+  const eventRef = useRef<PublicEvent | null>(event);
+  eventRef.current = event;
+  const interval = () => (eventRef.current?.status === "purged" ? null : 15_000 + Math.floor(Math.random() * 10_000));
 
   // Fetch the event's *whole* ticket list and look for ours locally, so the
   // server never sees a request about one particular ticket.
@@ -68,13 +67,25 @@ function EventFor({ id }: { id: string }) {
         setList(l);
         setError(null);
         setLoadedAt(new Date());
+        const held = getTicket(id);
+        if (held && ev.status === "purged") {
+          // Nothing is left on the server; nothing should be left here either.
+          forgetTicket(id);
+          setTicket(null);
+          setForgotten(true);
+        } else if (held?.refundAddress && l.tickets.some((t) => t.h === held.hash)) {
+          // The payment is in: the refund address was only needed for its memo.
+          const kept = { ...held, refundAddress: "" };
+          saveTicket(kept);
+          setTicket(kept);
+        }
       } catch (e) {
         if (e instanceof ApiError) setError(e);
       }
     },
     interval,
-    // A new (or removed) ticket changes what is worth polling for: start over now.
-    [id, ticket?.hash],
+    // A new (or removed) ticket should show its state at once.
+    [id, ticket?.hash, refreshes],
   );
 
   if (error?.status === 404) return <PageState title="Event not found">Check the link you were given.</PageState>;
@@ -93,8 +104,15 @@ function EventFor({ id }: { id: string }) {
             Showing what was loaded at {loadedAt.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}. Retrying…
           </Notice>
         )}
+        {forgotten && (
+          <Notice title="Ticket removed from this device">
+            The organiser purged this event, so nothing about it is left on the server. Your ticket was removed from this
+            browser too.
+          </Notice>
+        )}
         {ticket ? (
-          <TicketCard event={event} ticket={ticket} list={list} persisted={persisted} onForget={() => { forgetTicket(id); setTicket(null); }} />
+          <TicketCard event={event} ticket={ticket} list={list} persisted={persisted} onPaid={() => setRefreshes((n) => n + 1)}
+            onForget={() => { forgetTicket(id); setTicket(null); }} />
         ) : (
           <RsvpCard event={event} onTicket={(t, ok) => { setTicket(t); setPersisted(ok); }} />
         )}
@@ -178,7 +196,7 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
       </div>
     );
   }
-  if (event.seats_left === 0) {
+  if (event.full) {
     return (
       <div className="card p-6">
         <h2 className="text-2xl ">This event is full</h2>
@@ -208,7 +226,9 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
       eventId: event.id,
       secret: b64url(secret),
       hash: await ticketHash(secret),
-      refundAddress: address.trim(),
+      // Only the Orchard receiver goes in the memo: a transparent one in the same
+      // address could link the attendee to their transparent history.
+      refundAddress: orchardOnly(address.trim(), meta.network) ?? address.trim(),
       createdAt: new Date().toISOString(),
       title: event.title,
       startsAt: event.starts_at,
@@ -261,14 +281,16 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
   );
 }
 
-function TicketCard({ event, ticket, list, persisted, onForget }: { event: PublicEvent; ticket: StoredTicket; list: TicketList | null; persisted: boolean; onForget: () => void }) {
+function TicketCard({ event, ticket, list, persisted, onPaid, onForget }: {
+  event: PublicEvent; ticket: StoredTicket; list: TicketList | null; persisted: boolean; onPaid: () => void; onForget: () => void;
+}) {
   if (event.status === "purged") return <Purged onForget={onForget} />;
   const mine = list?.tickets.find((t) => t.h === ticket.hash) ?? null;
   const rejected = list?.rejected.find((r) => r.h === ticket.hash) ?? null;
   // An accepted ticket wins: paying twice with the same memo gets the second
   // payment rejected as a duplicate, but the first one still holds the seat.
   if (!mine && rejected) return <Rejected event={event} reason={rejected.reason} onForget={onForget} />;
-  if (!mine) return <PayCard event={event} ticket={ticket} loaded={list !== null} persisted={persisted} onForget={onForget} />;
+  if (!mine) return <PayCard event={event} ticket={ticket} loaded={list !== null} persisted={persisted} onPaid={onPaid} onForget={onForget} />;
 
   const qr = ticketQr(event.id, ticket.secret);
   // Check-ins aren't published while the event runs (anyone could time them),
@@ -300,7 +322,9 @@ function TicketCard({ event, ticket, list, persisted, onForget }: { event: Publi
   );
 }
 
-function PayCard({ event, ticket, loaded, persisted, onForget }: { event: PublicEvent; ticket: StoredTicket; loaded: boolean; persisted: boolean; onForget: () => void }) {
+function PayCard({ event, ticket, loaded, persisted, onPaid, onForget }: {
+  event: PublicEvent; ticket: StoredTicket; loaded: boolean; persisted: boolean; onPaid: () => void; onForget: () => void;
+}) {
   const meta = useMeta();
   const memo = useMemo(() => {
     try {
@@ -317,11 +341,12 @@ function PayCard({ event, ticket, loaded, persisted, onForget }: { event: Public
       </div>
     );
   }
-  return <PayCardFor event={event} ticket={ticket} loaded={loaded} persisted={persisted} memo={memo} meta={meta} onForget={onForget} />;
+  return <PayCardFor event={event} ticket={ticket} loaded={loaded} persisted={persisted} memo={memo} meta={meta} onPaid={onPaid} onForget={onForget} />;
 }
 
-function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onForget }: {
-  event: PublicEvent; ticket: StoredTicket; loaded: boolean; persisted: boolean; memo: Uint8Array; meta: ReturnType<typeof useMeta>; onForget: () => void;
+function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onPaid, onForget }: {
+  event: PublicEvent; ticket: StoredTicket; loaded: boolean; persisted: boolean; memo: Uint8Array; meta: ReturnType<typeof useMeta>;
+  onPaid: () => void; onForget: () => void;
 }) {
   const sim = meta?.chain === "sim";
   const uri = zip321(event.address, event.deposit_zat, memo);
@@ -334,12 +359,13 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onForget }: 
     setSimError(null);
     try {
       await api.simPay(event.address, event.deposit_zat, b64url(memo));
+      onPaid();
     } catch (e) {
       setSimError(e instanceof Error ? e.message : "Simulation failed");
     } finally {
       setSimBusy(false);
     }
-  }, [event, memo]);
+  }, [event, memo, onPaid]);
 
   // Sanity check: the stored secret must still hash to the stored hash.
   const [intact, setIntact] = useState(true);
@@ -347,12 +373,12 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onForget }: 
     ticketHash(fromB64url(ticket.secret)).then((h) => setIntact(h === ticket.hash));
   }, [ticket]);
 
-  if (!event.accepting_rsvps || event.seats_left === 0) {
+  if (!event.accepting_rsvps || event.full) {
     // Never show payment details a deposit would bounce off.
     return (
       <div className="card p-6">
         <Pill tone="warn">Don&rsquo;t pay now</Pill>
-        <h2 className="mt-3 text-2xl ">{event.seats_left === 0 && event.accepting_rsvps ? "The event filled up" : "RSVPs closed"}</h2>
+        <h2 className="mt-3 text-2xl ">{event.full && event.accepting_rsvps ? "The event filled up" : "RSVPs closed"}</h2>
         <p className="mt-2 text-sm text-ink-2">
           A deposit sent now would be returned to your refund address, minus a small network fee. If you already sent
           one, it will show here once it confirms.
@@ -421,7 +447,9 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onForget }: 
 
       <div className="mt-5 flex items-center gap-2 rounded-lg bg-paper-2/60 px-3 py-2.5 text-sm text-ink-2">
         <Spinner className="text-ink-4" />
-        {loaded ? "Waiting for your payment to confirm (about a minute after you send)…" : "Connecting…"}
+        {loaded
+          ? "After you pay, your ticket shows here within about two hours. Tickets are published in batches, so nobody watching can tell when yours was paid."
+          : "Connecting…"}
       </div>
 
       {meta && !sim && (
@@ -444,15 +472,15 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onForget }: 
 function Rejected({ event, reason, onForget }: { event: PublicEvent; reason: string; onForget: () => void }) {
   return (
     <div className="card p-6">
-      <Pill tone="bad">{reason === "bad_refund_address" ? "Payment not accepted" : "Payment returned"}</Pill>
+      <Pill tone="bad">{reason === "kept" ? "Payment not accepted" : "Payment returned"}</Pill>
       <h2 className="mt-3 text-2xl ">This RSVP didn&rsquo;t go through</h2>
       <p className="mt-2 text-sm text-ink-2">{REJECTION_TEXT[reason] ?? "The payment couldn't be accepted."}</p>
-      {reason !== "bad_refund_address" && (
+      {reason !== "kept" && (
         <p className="mt-2 text-sm text-ink-3">
           Your payment is being returned to your refund address, minus a small network fee.
         </p>
       )}
-      {event.accepting_rsvps && event.seats_left > 0 && (
+      {event.accepting_rsvps && !event.full && (
         <div className="mt-5">
           <ForgetButton onForget={onForget} warn={false} label="Try again with a new ticket" />
         </div>

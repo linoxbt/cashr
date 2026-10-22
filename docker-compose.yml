@@ -83,7 +83,31 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
 
+  # Optional public demo on a simulated chain (`--profile demo`): the same API,
+  # with made-up testnet addresses so no real ZEC can be sent to it, and no
+  # batching or spreading so visitors see every step at once.
+  demo-api:
+    image: ghcr.io/linoxbt/cashr-api:${CASHR_TAG:-main}
+    build: ./api
+    profiles: ["demo"]
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      CASHR_CHAIN: sim
+      CASHR_NETWORK: test
+      CASHR_SCAN_INTERVAL: "5"
+      CASHR_LIST_DELAY_MIN: "0"
+      CASHR_LIST_BATCH: "1"
+      CASHR_REFUND_SPREAD_MIN: "0"
+      CASHR_SECRET: ${CASHR_DEMO_SECRET:?set CASHR_DEMO_SECRET}
+      CASHR_CORS_ORIGINS: ${CASHR_DEMO_CORS_ORIGINS:-https://demo.cashr.site}
+    volumes:
+      - demo-data:/data
+    ports:
+      - "127.0.0.1:${CASHR_DEMO_PORT:-8768}:8000"
+
 volumes:
   wallet-data:
   api-data:
   caddy-data:
+  demo-data:

@@ -16,17 +16,29 @@ type Verdict = {
   detail?: string;
 };
 
-const VERDICT_UI: Record<Verdict["kind"], { bg: string; title: string; sub: string }> = {
-  ok: { bg: "bg-ok", title: "Welcome in", sub: "Ticket checked in." },
-  already: { bg: "bg-warn", title: "Already checked in", sub: "This ticket was used before." },
-  unknown: { bg: "bg-bad", title: "Not a valid ticket", sub: "No confirmed RSVP matches this code." },
+// Verdict colours are fixed, not themed: they must read at a glance in a dark
+// room or in sunlight, whatever theme the phone is in.
+const OK = "bg-[#1F7A4D] text-white";
+const WARN = "bg-[#F4B728] text-[#111111]";
+const BAD = "bg-[#C62F35] text-white";
+const NEUTRAL = "bg-[#2A2A2A] text-white";
+
+const VERDICT_UI: Record<Verdict["kind"], { tone: string; title: string; sub: string }> = {
+  ok: { tone: OK, title: "Welcome in", sub: "Ticket checked in." },
+  already: { tone: WARN, title: "Already checked in", sub: "This ticket was used before." },
+  unknown: { tone: BAD, title: "Not a valid ticket", sub: "No confirmed RSVP matches this code." },
   // Offline, a ticket missing from this phone's saved list may just be newer than it.
-  unverified: { bg: "bg-screen-3", title: "Can't confirm offline", sub: "Not on this phone's saved list. If they paid in the last few minutes, check again once you're back online." },
-  other_event: { bg: "bg-bad", title: "Wrong event", sub: "This ticket is for a different event." },
-  closed: { bg: "bg-screen-3", title: "Door closed", sub: "This event has ended." },
+  unverified: { tone: NEUTRAL, title: "Can't confirm offline", sub: "Not on this phone's saved list. If they paid in the last few minutes, check again once you're back online." },
+  other_event: { tone: BAD, title: "Wrong event", sub: "This ticket is for a different event." },
+  closed: { tone: NEUTRAL, title: "Door closed", sub: "This event has ended." },
   // Never shown as "not valid": a server problem says nothing about the ticket.
-  error: { bg: "bg-warn", title: "Try again", sub: "The server had a problem checking this ticket." },
+  error: { tone: WARN, title: "Try again", sub: "The server had a problem checking this ticket." },
 };
+
+// The back camera faces whoever holds up a ticket, so it is the default. A phone
+// propped on a stand facing the queue needs the front one instead.
+type Facing = "environment" | "user";
+const FACING_KEY = "cashr.door.camera";
 
 // QR decoding is costly on phones; this is plenty for people walking up.
 const SCAN_INTERVAL_MS = 125;
@@ -165,10 +177,16 @@ function DoorFor({ id }: { id: string }) {
     return () => clearTimeout(t);
   }, [verdict]);
 
-  const startCamera = useCallback(async () => {
+  const [facing, setFacing] = useState<Facing>("environment");
+  useEffect(() => setFacing(readJson<Facing>(FACING_KEY, "environment") === "user" ? "user" : "environment"), []);
+
+  const startCamera = useCallback(async (which: Facing = facing) => {
     setCamera("starting");
+    // Release the current camera first: phones won't open a second one.
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: which }, audio: false });
       const video = videoRef.current;
       if (!video) {
         stream.getTracks().forEach((t) => t.stop());
@@ -181,7 +199,14 @@ function DoorFor({ id }: { id: string }) {
     } catch {
       setCamera("denied");
     }
-  }, []);
+  }, [facing]);
+
+  const switchCamera = useCallback(() => {
+    const next: Facing = facing === "environment" ? "user" : "environment";
+    setFacing(next);
+    writeJson(FACING_KEY, next);
+    void startCamera(next);
+  }, [facing, startCamera]);
 
   useEffect(() => {
     if (camera !== "on") return;
@@ -250,32 +275,40 @@ function DoorFor({ id }: { id: string }) {
       )}
 
       <div className="relative mt-6 aspect-square overflow-hidden rounded-md bg-black">
-        <video ref={videoRef} playsInline muted className={`h-full w-full object-cover ${camera === "on" ? "" : "hidden"}`} />
+        {/* The front camera is shown mirrored, like a selfie; scanning reads the unmirrored frame. */}
+        <video ref={videoRef} playsInline muted
+          className={`h-full w-full object-cover ${camera === "on" ? "" : "hidden"} ${facing === "user" ? "-scale-x-100" : ""}`} />
         {camera !== "on" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-ink">
             {camera === "denied" ? (
               <>
                 <p className="text-sm text-ink-2">Camera access was blocked. Allow it in your browser settings, or enter codes by hand below.</p>
-                <button className="btn-secondary" onClick={startCamera}>Try the camera again</button>
+                <button className="btn-secondary" onClick={() => startCamera()}>Try the camera again</button>
               </>
             ) : (
               <>
                 <p className="text-sm text-ink-3">Point the camera at an attendee&rsquo;s ticket.</p>
-                <button className="btn bg-gold text-gold-on hover:bg-gold/90" onClick={startCamera} disabled={camera === "starting"}>
+                <button className="btn bg-gold text-gold-on hover:bg-gold/90" onClick={() => startCamera()} disabled={camera === "starting"}>
                   {camera === "starting" && <Spinner />} Start scanning
                 </button>
               </>
             )}
           </div>
         )}
-        {camera === "on" && !ui && <div className="pointer-events-none absolute inset-10 rounded-2xl border-2 border-ink/50" />}
+        {camera === "on" && !ui && <div className="pointer-events-none absolute inset-10 rounded-2xl border-2 border-white/50" />}
+        {camera === "on" && !ui && (
+          <button type="button" onClick={switchCamera}
+            className="absolute bottom-3 right-3 rounded-[4px] bg-black/60 px-3 py-1.5 font-mono text-[12px] uppercase text-white">
+            Switch camera
+          </button>
+        )}
         {ui && (
-          <div className={`absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-white ${ui.bg}`} role="alert">
+          <div className={`absolute inset-0 flex flex-col items-center justify-center p-6 text-center ${ui.tone}`} role="alert">
             <div className="font-display text-5xl sm:text-6xl">{ui.title}</div>
             {verdict?.seat ? <div className="mt-2 text-lg">Seat {verdict.seat}</div> : null}
-            <div className="mt-2 text-sm text-white/80">{ui.sub}</div>
-            {verdict?.offline && <div className="mt-3 text-xs text-white/70">Checked offline. It will sync when the connection is back.</div>}
-            {verdict?.detail && <div className="mt-3 max-w-xs text-xs text-white/70">{verdict.detail}</div>}
+            <div className="mt-2 text-sm opacity-85">{ui.sub}</div>
+            {verdict?.offline && <div className="mt-3 text-xs opacity-75">Checked offline. It will sync when the connection is back.</div>}
+            {verdict?.detail && <div className="mt-3 max-w-xs text-xs opacity-75">{verdict.detail}</div>}
           </div>
         )}
       </div>

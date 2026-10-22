@@ -55,6 +55,10 @@ class Event(Base):
     # Chain height when RSVPs closed (deadline or organiser), so a payment sent
     # just before is judged by when it was mined, not when it was processed.
     close_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # When the tickets waiting to join the public list are published (see Engine._publish).
+    list_publish_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Tickets on the public list: the public counts come from this, not from rsvp_count.
+    listed_count: Mapped[int] = mapped_column(Integer, default=0)
     account_ref: Mapped[str] = mapped_column(String(64))
     address: Mapped[str] = mapped_column(String(600))
     admin_token_hash: Mapped[str] = mapped_column(String(64))
@@ -103,6 +107,8 @@ class Rsvp(Base):
     status: Mapped[str] = mapped_column(String(12), default="confirmed")
     # A boolean, not a timestamp: arrival times can be matched against cameras.
     checked_in: Mapped[bool] = mapped_column(Boolean, default=False)
+    # On the public ticket list yet (they join in batches).
+    listed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Payout(Base):
@@ -128,6 +134,8 @@ class Payout(Base):
     txid: Mapped[str] = mapped_column(String(64), default="")
     error: Mapped[str] = mapped_column(Text, default="")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # A refund isn't sent before this (random per refund, so refunds spread out).
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class SeenAddress(Base):
@@ -155,7 +163,20 @@ def make_engine(url: str):
         @event.listens_for(engine, "connect")
         def _secure_delete(dbapi_conn, _record):
             dbapi_conn.execute("PRAGMA secure_delete = ON")
+            # WAL, so purged pages never sit in a rollback journal that is unlinked
+            # without being overwritten; purges then truncate the log (compact_sqlite).
+            dbapi_conn.execute("PRAGMA journal_mode = WAL")
     return engine
+
+
+def compact_sqlite(engine) -> None:
+    """Rewrite the file and empty the WAL, so a purge leaves nothing on disk."""
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.exec_driver_sql("VACUUM")
+        conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
 def make_sessionmaker(engine):
