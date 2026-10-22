@@ -62,7 +62,7 @@ services:
       - api-data:/data
     ports:
       # Local only: the public reaches the API through Caddy (profile "https").
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${UNLISTED_API_PORT:-8000}:8000"
 
   caddy:
     image: caddy:2.8.4
