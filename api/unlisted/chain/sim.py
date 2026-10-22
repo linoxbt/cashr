@@ -13,6 +13,7 @@ from __future__ import annotations
 import itertools
 import secrets
 import threading
+import time
 from dataclasses import dataclass, field
 
 from ..codec import _CHARSET, _BECH32M_CONST, _hrp_expand, _polymod
@@ -118,6 +119,10 @@ class SimChain:
         # Like the real wallet, report a send as executing until polled once.
         self.async_ops = async_ops
         self._unpolled: set[str] = set()
+        self._block_times: dict[int, float] = {}
+        # Accounts deleted here, so a repeated delete succeeds while an unknown
+        # account (a reset wallet) is refused, as the real wallet does.
+        self._deleted: set[str] = set()
         self.height = 3_100_000
         self._lock = threading.RLock()
         self._accounts: dict[str, _Account] = {}
@@ -146,6 +151,7 @@ class SimChain:
         with self._lock:
             for _ in range(blocks):
                 self.height += 1
+                self._block_times[self.height] = time.time()
                 for acct in self._accounts.values():
                     for n in acct.notes:
                         if n.height == 0 and not n.change:
@@ -170,7 +176,7 @@ class SimChain:
     def _account(self, ref: str) -> _Account:
         acct = self._accounts.get(ref)
         if acct is None:
-            raise ChainError(f"no account {ref}")
+            raise ChainError(f"account {ref} was deleted" if ref in self._deleted else f"no account {ref}")
         return acct
 
     def _confs(self, height: int) -> int:
@@ -199,6 +205,11 @@ class SimChain:
     # ---- Chain protocol -----------------------------------------------
     def tip_height(self) -> int:
         return self.height
+
+    def height_at(self, unix_time: int) -> int | None:
+        with self._lock:
+            known = [h for h, t in self._block_times.items() if t <= unix_time]
+            return max(known) if known else None
 
     def new_event_account(self) -> tuple[str, str]:
         with self._lock:
@@ -322,10 +333,13 @@ class SimChain:
     def delete_account(self, account_ref: str) -> None:
         with self._lock:
             if account_ref not in self._accounts:
-                return  # like the real wallet: deleting a deleted account succeeds
+                if account_ref in self._deleted:
+                    return  # like the real wallet: deleting a deleted account succeeds
+                raise ChainError(f"no account {account_ref}, and no record of deleting it; refusing to delete its seed")
             bal = self.balance(account_ref)
             if bal.total_zat > DUST_ZAT:
                 raise ChainError("account still holds funds")
             del self._accounts[account_ref]
+            self._deleted.add(account_ref)
             for txid in [t for t, tx in self._txs.items() if tx.account == account_ref]:
                 del self._txs[txid]

@@ -388,7 +388,11 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onForget }: 
         Your ticket is ready now. Save it before paying, so a closed tab or a cleared browser can&rsquo;t lose it.
       </p>
 
-      {sim ? (
+      {!meta ? (
+        // Until the server says which chain it runs, show no way to pay: on the demo
+        // server a real wallet would be paying a made-up address.
+        <p className="mt-5 flex items-center gap-2 text-sm text-ink-3"><Spinner /> Connecting to the server…</p>
+      ) : sim ? (
         // The demo server's event addresses are made up: real ZEC sent to one is lost.
         <div className="mt-5">
           <Notice tone="warn" title="Demo server: simulated chain">
@@ -420,7 +424,7 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onForget }: 
         {loaded ? "Waiting for your payment to confirm (about a minute after you send)…" : "Connecting…"}
       </div>
 
-      {!sim && (
+      {meta && !sim && (
         <details className="mt-5 text-sm">
           <summary className="cursor-pointer font-medium text-ink-2">Enter the payment by hand</summary>
           <div className="mt-4 space-y-4">

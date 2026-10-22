@@ -73,7 +73,11 @@ Refunds, returns and sweeps are payouts: `queued → submitted → broadcast →
   A transaction counts as expired only 10 blocks past its expiry height, so a short reorg can't make a
   transaction that may still be mined look dead.
 * `z_deleteaccount` refuses while the account holds value, a send is being built, or any transaction spending its
-  notes could still be mined. It is idempotent, so a purge that timed out is simply retried.
+  notes could still be mined. It records each deletion first, so a retry after a timeout succeeds, while an
+  account the wallet never deleted (a reset or restored database) is refused and its seed kept. The file rewrite
+  that clears deleted pages is recorded as owed and finished at the next start if interrupted.
+* The close height for a deadline comes from the wallet's scanned block times (`z_heightattime`), falling back to
+  an estimate (75 s per block) only when the wallet has no block that old.
   A pending transaction is rebroadcast periodically; one that expires unmined is rebuilt under the same key.
 * An insufficient-funds failure keeps the payout queued (deposits still confirming, or a fee top-up is needed).
   If the wallet has no record of an operation, the payout stops as `failed` rather than risk paying twice.

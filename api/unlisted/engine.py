@@ -58,9 +58,18 @@ IDLE_RETIRE_AFTER = timedelta(days=1)
 _ID_ALPHABET = string.ascii_lowercase + string.digits
 
 
+def _aware(t: datetime) -> datetime:
+    """SQLite drops time zones: stored times are UTC."""
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
 def _account_gone(e: ChainError) -> bool:
-    """The wallet no longer has the account (its delete already happened)."""
-    return "no account" in str(e).lower()
+    """The wallet deleted this account itself (it keeps a record of that).
+
+    A plain "no account" is not enough: a reset or restored wallet database
+    loses accounts whose seeds may still guard funds on chain.
+    """
+    return "was deleted" in str(e).lower()
 
 
 def _starts_before(starts_at: str, cutoff: datetime) -> bool:
@@ -235,18 +244,27 @@ class Engine:
             account_ref, address = ev.account_ref, ev.address
             since = max(0, ev.scan_height - REORG_MARGIN)
             deadline_passed = ev.status == "open" and ev.close_height is None and not accepting_rsvps(ev)
+            rsvp_closes_at = ev.rsvp_closes_at
         notes = self.chain.received(account_ref, address, since)
-        tip = self.chain.tip_height() if deadline_passed else None
+        tip = close_height = None
+        if deadline_passed:
+            tip = self.chain.tip_height()
+            try:
+                close_height = self.chain.height_at(int(_aware(rsvp_closes_at).timestamp()))
+            except ChainError:
+                close_height = None
         with self.lock, self.sessions() as db:
             ev = self._get_event(db, event_id)
             if ev.status not in ACTIVE:
                 return
             if tip is not None and ev.status == "open" and ev.close_height is None:
-                # The chain height at the deadline, estimated back from now, so
-                # a scanner that was down doesn't stretch the grace.
-                closes = ev.rsvp_closes_at.replace(tzinfo=ev.rsvp_closes_at.tzinfo or timezone.utc)
-                late_s = max(0.0, (datetime.now(timezone.utc) - closes).total_seconds())
-                ev.close_height = max(0, tip - int(late_s // BLOCK_SECONDS))
+                # The chain height at the deadline: from the blocks' own times when
+                # the wallet has them, else estimated back from now, so a scanner
+                # that was down doesn't stretch the grace.
+                if close_height is None:
+                    late_s = max(0.0, (datetime.now(timezone.utc) - _aware(ev.rsvp_closes_at)).total_seconds())
+                    close_height = max(0, tip - int(late_s // BLOCK_SECONDS))
+                ev.close_height = close_height
             known = {
                 (d.txid, d.pool, d.out_index)
                 for d in db.scalars(select(Deposit).where(Deposit.event_id == event_id))
@@ -603,18 +621,21 @@ class Engine:
                 and db.scalar(select(Deposit.id).where(Deposit.event_id == ev.id)) is None
             ]
         for event_id in candidates:
+            with self.sessions() as db:
+                account_ref = self._get_event(db, event_id).account_ref
+            # The wallet call is made without the engine lock (it can be slow), and
+            # the wallet refuses if anything arrived meanwhile. A delete that went
+            # through is idempotent, so an event left unwiped is retried next time.
+            try:
+                self.chain.delete_account(account_ref)
+            except ChainError as e:
+                log.warning("retire %s: %s", event_id, e)
+                continue
             with self.lock, self.sessions() as db:
                 ev = self._get_event(db, event_id)
-                if ev.status not in DOOR_OPEN or ev.rsvp_count or db.scalar(
-                        select(Deposit.id).where(Deposit.event_id == ev.id)) is not None:
-                    continue
-                try:
-                    self.chain.delete_account(ev.account_ref)
-                except ChainError as e:
-                    log.warning("retire %s: %s", event_id, e)
-                    continue
-                self._wipe(db, ev)
-                db.commit()
+                if ev.status in DOOR_OPEN and not ev.rsvp_count:
+                    self._wipe(db, ev)
+                    db.commit()
             self._balances.pop(event_id, None)
 
     def _check_purgeable(self, db: Session, ev: Event) -> None:
