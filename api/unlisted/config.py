@@ -42,7 +42,8 @@ class Settings:
     reject_fee_zat: int = field(default_factory=lambda: _int("UNLISTED_REJECT_FEE_ZAT", 10_000))
     refund_batch_size: int = field(default_factory=lambda: _int("UNLISTED_REFUND_BATCH", 25))
     # Left in an event wallet after the sweep (less than a fee): destroyed on purge.
-    dust_zat: int = field(default_factory=lambda: _int("UNLISTED_DUST_ZAT", 20_000))
+    # Capped at the wallet's own delete limit (DELETE_MAX_ZAT), above which it refuses every purge.
+    dust_zat: int = field(default_factory=lambda: min(_int("UNLISTED_DUST_ZAT", 20_000), 20_000))
 
     # Every event is a wallet account the wallet must scan, so creation is
     # capped. Global limits, because the server never sees who is asking.
