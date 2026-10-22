@@ -6,13 +6,13 @@
 #
 # api-domain  Hostname whose DNS A record points at this server (e.g. api.example.com).
 #             Omit it to use <ip>.sslip.io, which needs no DNS setup.
-# web-origin  Where the web app lives (default https://unlisted-zec.netlify.app).
+# web-origin  Where the web app lives (default https://cashr.site).
 #
 # Re-running it updates to the latest images and restarts the services; secrets are kept.
 set -euo pipefail
 
 DOMAIN="${1:-}"
-WEB_ORIGIN="${2:-https://unlisted-zec.netlify.app}"
+WEB_ORIGIN="${2:-https://cashr.site}"
 REPO="${UNLISTED_REPO:-https://github.com/linoxbt/cashr.git}"
 BRANCH="${UNLISTED_BRANCH:-main}"
 DIR="${UNLISTED_DIR:-/opt/unlisted}"
