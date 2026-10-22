@@ -39,7 +39,7 @@ export default function Brand() {
       <h1 className="mt-3 text-5xl">Two logo concepts</h1>
       <p className="mt-3 max-w-2xl text-ink-2">
         Each is shown at real sizes, from a 16-pixel browser tab up, on dark and on white, and next to the name. The app
-        uses concept 1 until one is chosen.
+        uses concept 2, the shielded coin.
       </p>
 
       <div className="mt-12 space-y-16">
