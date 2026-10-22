@@ -130,3 +130,18 @@ def test_api_docs_are_off_outside_sim(tmp_path):
                               secret="s"), SimChain("main"))
     with TestClient(app) as c:
         assert c.get("/docs").status_code == 404 and c.get("/openapi.json").status_code == 404
+
+
+def test_purge_interrupted_after_the_wallet_delete_can_finish(client, make_event, attendee):
+    from test_lifecycle import settle
+
+    created = make_event(forfeit_address=random_unified_address())
+    ev, admin = created["event"], created["admin_token"]
+    pay(client, ev, attendee(ev["id"]).memo())
+    settle(client, ev, admin)
+    with client.engine.sessions() as db:
+        account = db.get(Event, ev["id"]).account_ref
+    # The wallet deleted the account, but the API never heard back (timeout).
+    client.chain.delete_account(account)
+    r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
+    assert r.json()["status"] == "purged", r.text
