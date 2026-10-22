@@ -121,6 +121,7 @@ Back up, separately and offline:
   1. The wallet volume:  docker run --rm -v unlisted_wallet-data:/d -v \$PWD:/b alpine tar czf /b/wallet-backup.tgz -C /d .
   2. UW_SEED_KEY from $DIR/.env
 Together they control every live event's deposits. Neither alone is enough.
+A backup still holds the keys and records of events purged after it was taken: replace old backups after a purge.
 EOF
 if [ "$NEW" = 1 ]; then
   echo

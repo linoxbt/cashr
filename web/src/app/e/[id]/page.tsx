@@ -199,7 +199,9 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
 function TicketCard({ event, ticket, list, onForget }: { event: PublicEvent; ticket: StoredTicket; list: TicketList | null; onForget: () => void }) {
   const mine = list?.tickets.find((t) => t.h === ticket.hash) ?? null;
   const rejected = list?.rejected.find((r) => r.h === ticket.hash) ?? null;
-  if (rejected) return <Rejected event={event} reason={rejected.reason} onForget={onForget} />;
+  // An accepted ticket wins: paying twice with the same memo gets the second
+  // payment rejected as a duplicate, but the first one still holds the seat.
+  if (!mine && rejected) return <Rejected event={event} reason={rejected.reason} onForget={onForget} />;
   if (!mine) return <PayCard event={event} ticket={ticket} loaded={list !== null} onForget={onForget} />;
 
   const qr = ticketQr(event.id, ticket.secret);
@@ -325,14 +327,18 @@ function PayCard({ event, ticket, loaded, onForget }: { event: PublicEvent; tick
 function Rejected({ event, reason, onForget }: { event: PublicEvent; reason: string; onForget: () => void }) {
   return (
     <div className="card p-6">
-      <Pill tone="bad">Payment returned</Pill>
+      <Pill tone="bad">{reason === "bad_refund_address" ? "Payment not accepted" : "Payment returned"}</Pill>
       <h2 className="mt-3 text-2xl ">This RSVP didn&rsquo;t go through</h2>
       <p className="mt-2 text-sm text-ink-2">{REJECTION_TEXT[reason] ?? "The payment couldn't be accepted."}</p>
-      <p className="mt-2 text-sm text-ink-3">
-        Your payment is being returned to your refund address, minus a small network fee.
-      </p>
+      {reason !== "bad_refund_address" && (
+        <p className="mt-2 text-sm text-ink-3">
+          Your payment is being returned to your refund address, minus a small network fee.
+        </p>
+      )}
       {event.status === "open" && event.seats_left > 0 && (
-        <button className="btn-primary mt-5 w-full" onClick={onForget}>Try again with a new ticket</button>
+        <div className="mt-5">
+          <ForgetButton onForget={onForget} warn={false} label="Try again with a new ticket" />
+        </div>
       )}
     </div>
   );

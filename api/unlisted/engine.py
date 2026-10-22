@@ -488,26 +488,14 @@ class Engine:
         Refuses while money is still in the event wallet: deleting the keys
         would destroy it.
         """
+        # Checked once without the lock for a quick answer, then again under it:
+        # a late payment can land in between, and deleting the keys would destroy it.
         with self.sessions() as db:
-            ev = self._get_event(db, ev_id)
-            if ev.status != "settled":
-                raise EngineError("bad_state", "Settle the event before purging it.")
-            if db.scalar(select(Payout.id).where(Payout.event_id == ev_id, Payout.status.in_(IN_FLIGHT))) is not None:
-                raise EngineError("payouts_pending", "A payout (such as a returned late payment) is still in progress. "
-                                  "Purge once it has confirmed.", 409)
-            account_ref = ev.account_ref
-        bal = self.balance(ev, fresh=True)
-        if bal.total_zat > self.settings.dust_zat:
-            raise EngineError(
-                "funds_left",
-                f"{bal.total_zat / 1e8:.8f} ZEC is still in the event wallet. Set a no-show fund address so it "
-                "can be swept there before purging; purging destroys the wallet keys.",
-                409,
-            )
+            self._check_purgeable(db, self._get_event(db, ev_id))
         with self.lock, self.sessions() as db:
             ev = self._get_event(db, ev_id)
-            if ev.status != "settled":
-                raise EngineError("bad_state", "Settle the event before purging it.")
+            self._check_purgeable(db, ev)
+            account_ref = ev.account_ref
             # Keys first: if the wallet refuses, nothing is deleted here either.
             self.chain.delete_account(account_ref)
             for model in (Rsvp, Deposit, Payout):
@@ -518,6 +506,21 @@ class Engine:
             ev.status = "purged"
             db.commit()
         self._balances.pop(ev_id, None)
+
+    def _check_purgeable(self, db: Session, ev: Event) -> None:
+        if ev.status != "settled":
+            raise EngineError("bad_state", "Settle the event before purging it.")
+        if db.scalar(select(Payout.id).where(Payout.event_id == ev.id, Payout.status.in_(IN_FLIGHT))) is not None:
+            raise EngineError("payouts_pending", "A payout (such as a returned late payment) is still in progress. "
+                              "Purge once it has confirmed.", 409)
+        bal = self.balance(ev, fresh=True)
+        if bal.total_zat > self.settings.dust_zat:
+            raise EngineError(
+                "funds_left",
+                f"{bal.total_zat / 1e8:.8f} ZEC is still in the event wallet. Set a no-show fund address so it "
+                "can be swept there before purging; purging destroys the wallet keys.",
+                409,
+            )
 
     # ---- door -----------------------------------------------------------
     def check_in(self, db: Session, ev: Event, ticket_hash: str) -> tuple[str, int | None]:

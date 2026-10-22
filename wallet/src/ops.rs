@@ -35,6 +35,7 @@ impl OpStore {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
+             PRAGMA secure_delete = ON;
              CREATE TABLE IF NOT EXISTS ops (
                  opid TEXT PRIMARY KEY,
                  key TEXT NOT NULL UNIQUE,
@@ -153,6 +154,8 @@ mod tests {
         assert!(store.insert("op-c", "key-a", "acct").is_err(), "keys are unique");
         store.delete_account("acct").unwrap();
         assert!(store.get("op-b").unwrap().is_none());
+        let secure: i64 = store.conn.lock().unwrap().query_row("PRAGMA secure_delete", [], |r| r.get(0)).unwrap();
+        assert_eq!(secure, 1, "deleted rows are overwritten");
         let _ = std::fs::remove_file(path);
     }
 }

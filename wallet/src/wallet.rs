@@ -166,6 +166,14 @@ impl Wallet {
         Ok(WalletDb::for_path(&self.db_path, self.params, SystemClock, OsRng)?)
     }
 
+    /// Rewrites the database so deleted rows leave no trace in free pages or the WAL.
+    fn compact(&self) -> anyhow::Result<()> {
+        let conn = rusqlite::Connection::open(&self.db_path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
     fn read_conn(&self) -> anyhow::Result<rusqlite::Connection> {
         let conn = rusqlite::Connection::open_with_flags(&self.db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
@@ -428,6 +436,10 @@ impl Wallet {
         {
             let mut db = self.db.lock().await;
             db.delete_account(uuid)?;
+            // Freed pages and the WAL still hold the deleted keys and memos until rewritten.
+            if let Err(e) = self.compact() {
+                warn!(%account, "could not compact the wallet database after delete: {e:#}");
+            }
         }
         self.seeds.delete(account)?;
         self.ops.delete_account(account)?;

@@ -37,7 +37,8 @@ curl -fsSL https://raw.githubusercontent.com/linoxbt/cashr/main/deploy/install.s
 SSH/HTTP/HTTPS in the firewall, builds and starts the wallet, the API and Caddy, and waits until
 `https://<domain>/meta` answers. Caddy gets a Let's Encrypt certificate and writes no access logs. Without a domain
 argument it uses `<server-ip>.sslip.io`, which needs no DNS setup. It prints the API URL to put in the web app's
-`NEXT_PUBLIC_API_URL`, the backup commands, and (on first run) `UW_SEED_KEY`.
+`NEXT_PUBLIC_API_URL`, the backup commands, and (on first run) `UW_SEED_KEY`. A backup keeps the keys and records of
+any event purged after it was taken, so replace old backups once an event is purged.
 
 Re-run the same command to update: it pulls the latest code and restarts, keeping the secrets and data volumes.
 

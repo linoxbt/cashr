@@ -466,3 +466,36 @@ def test_purge_waits_for_in_flight_returns(client, make_event, attendee):
     advance(client, 4)
     r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
     assert r.json()["status"] == "purged", r.text
+
+
+def test_purge_rechecks_funds_under_the_lock(client, make_event, attendee):
+    fund = random_unified_address()
+    created = make_event(forfeit_address=fund)
+    ev, admin = created["event"], created["admin_token"]
+    settle(client, ev, admin)
+
+    # A late payment lands right after purge first reads the balance.
+    real_balance = client.engine.balance
+    calls = []
+
+    def balance_then_late_payment(*a, **kw):
+        bal = real_balance(*a, **kw)
+        if not calls:
+            client.chain.pay(ev["address"], ev["deposit_zat"], attendee(ev["id"]).memo())
+        calls.append(bal)
+        return bal
+
+    client.engine.balance = balance_then_late_payment
+    r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
+    assert r.status_code == 409 and r.json()["error"] == "funds_left", r.text
+    with client.engine.sessions() as db:
+        assert db.get(Event, ev["id"]).status == "settled"
+
+
+def test_sqlite_overwrites_deleted_rows(tmp_path):
+    from sqlalchemy import text
+
+    from unlisted.db import make_engine
+
+    with make_engine(f"sqlite:///{tmp_path}/s.db").connect() as conn:
+        assert conn.execute(text("PRAGMA secure_delete")).scalar() == 1

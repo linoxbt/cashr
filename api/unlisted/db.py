@@ -20,6 +20,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    event,
     inspect,
     text,
 )
@@ -142,7 +143,14 @@ def make_engine(url: str):
     kwargs = {}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
-    return create_engine(url, **kwargs)
+    engine = create_engine(url, **kwargs)
+    if url.startswith("sqlite"):
+        # Overwrite deleted rows with zeros, so purged refund addresses and memos
+        # don't linger in free pages of the database file.
+        @event.listens_for(engine, "connect")
+        def _secure_delete(dbapi_conn, _record):
+            dbapi_conn.execute("PRAGMA secure_delete = ON")
+    return engine
 
 
 def make_sessionmaker(engine):
