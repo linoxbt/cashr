@@ -6,6 +6,8 @@
 # The web app (web/) deploys separately (Netlify) with NEXT_PUBLIC_API_URL.
 services:
   wallet:
+    # Prebuilt by CI; `docker compose build` builds it from source instead.
+    image: ghcr.io/linoxbt/cashr-wallet:${UNLISTED_TAG:-main}
     build: ./wallet
     restart: unless-stopped
     environment:
@@ -19,6 +21,7 @@ services:
     # Not published: only the API talks to the wallet.
 
   api:
+    image: ghcr.io/linoxbt/cashr-api:${UNLISTED_TAG:-main}
     build: ./api
     restart: unless-stopped
     depends_on: [wallet]
