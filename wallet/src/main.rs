@@ -27,6 +27,7 @@ struct Config {
     data_dir: PathBuf,
     lightwalletd: String,
     extra_ca: Option<PathBuf>,
+    socks_proxy: Option<String>,
     listen: SocketAddr,
     rpc_user: String,
     rpc_password: String,
@@ -51,6 +52,9 @@ impl Config {
             data_dir: env("UW_DATA_DIR").unwrap_or_else(|| "./wallet-data".into()).into(),
             lightwalletd: env("UW_LIGHTWALLETD").unwrap_or_else(|| default_lwd.into()),
             extra_ca: env("UW_EXTRA_CA_FILE").map(PathBuf::from),
+            // Normally Tor (host:port). Without it, lightwalletd's operator sees this
+            // server's address fetch exactly the transactions that are RSVP deposits.
+            socks_proxy: env("UW_SOCKS_PROXY"),
             listen: env("UW_LISTEN").unwrap_or_else(|| "127.0.0.1:8232".into()).parse().context("UW_LISTEN")?,
             rpc_user: env("UW_RPC_USER").unwrap_or_default(),
             rpc_password: env("UW_RPC_PASSWORD").unwrap_or_default(),
@@ -73,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
     std::fs::create_dir_all(&cfg.data_dir)?;
     let extra_ca_pem = cfg.extra_ca.as_ref().map(std::fs::read).transpose().context("UW_EXTRA_CA_FILE")?;
-    let endpoint = Endpoint { url: cfg.lightwalletd.clone(), extra_ca_pem };
+    let endpoint = Endpoint { url: cfg.lightwalletd.clone(), extra_ca_pem, socks_proxy: cfg.socks_proxy.clone() };
     let wallet = Wallet::open(cfg.network, &cfg.data_dir, &cfg.seed_key, endpoint)?;
 
     let syncer = Arc::clone(&wallet);
@@ -92,7 +96,8 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(RpcState { wallet, auth, lightwalletd: cfg.lightwalletd.clone() });
     let app = Router::new().route("/", post(rpc::handle)).with_state(state);
     let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
-    info!(listen = %cfg.listen, lightwalletd = %cfg.lightwalletd, "unlisted-wallet ready");
+    let via = cfg.socks_proxy.as_deref().unwrap_or("direct");
+    info!(listen = %cfg.listen, lightwalletd = %cfg.lightwalletd, %via, "unlisted-wallet ready");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

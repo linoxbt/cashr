@@ -1,11 +1,13 @@
 # Deploying Unlisted
 
 ```
-[ web: Next.js (Netlify) ] --HTTPS--> [ api: FastAPI ] --JSON-RPC--> [ wallet: unlisted-wallet ] --gRPC/TLS--> [ lightwalletd (zec.rocks) ] --> Zcash mainnet
+[ web: Next.js (Netlify) ] --HTTPS--> [ api: FastAPI ] --JSON-RPC--> [ wallet: unlisted-wallet ] --Tor--gRPC/TLS--> [ lightwalletd (zec.rocks) ] --> Zcash mainnet
 ```
 
 The wallet is a light client, so **no full node is needed**. It syncs compact blocks from a public lightwalletd
-server, then fetches the full transactions it needs to read memos.
+server, then fetches the full transactions it needs to read memos. Those fetches tell lightwalletd's operator which
+transactions are RSVPs, so the wallet makes them through Tor (the bundled `tor` service), each over a fresh
+circuit. For no third party at all, run your own Zebra with lightwalletd or Zaino and point `UW_LIGHTWALLETD` at it.
 
 ## What has been verified on mainnet
 
@@ -49,14 +51,21 @@ cp .env.example .env      # fill in UNLISTED_SECRET, UW_RPC_PASSWORD, UW_SEED_KE
 docker compose up -d --build
 ```
 
-This runs two containers (add `--profile https` and set `API_DOMAIN` for a third, Caddy, serving HTTPS):
+This runs three containers (add `--profile https` and set `API_DOMAIN` for a fourth, Caddy, serving HTTPS):
+* `tor`: a SOCKS proxy built from Alpine's Tor package, used only by the wallet. Set `UW_SOCKS_PROXY=` (empty) to
+  connect directly instead.
 * `wallet`: `unlisted-wallet`. It is not exposed publicly. Its `wallet-data` volume holds `wallet.sqlite`,
   `ops.sqlite` and `seeds/` (one encrypted seed per live event).
 * `api`: the FastAPI service on `127.0.0.1:8000`, with no access logs. The `https` profile puts Caddy in front of
   it; otherwise use your own TLS proxy.
 
-**Back up the `wallet-data` volume and, separately, `UW_SEED_KEY`.** Together they control every live event's
-deposits; neither alone is enough. Purging an event deletes its seed on purpose, after its money has been swept out.
+**Back up the `wallet-data` volume, encrypted, and, separately, `UW_SEED_KEY`.** Spending needs both, but the
+volume alone holds every live event's viewing keys, ticket hashes and refund addresses, so never store it
+unencrypted (the installer prints an `openssl enc` command). Purging an event deletes its seed on purpose, after
+its money has been swept out; a backup taken before keeps it, so replace old backups after a purge.
+
+Container logs use Docker's `local` driver capped at 1 MB per service, since logs sit outside anything a purge
+deletes. Nothing logs visitors, ticket hashes, addresses or txids at the default level.
 
 Then deploy the web app with `NEXT_PUBLIC_API_URL` set to the API's public HTTPS URL (a production build without
 it shows "not connected to a server" instead of calling localhost). On Netlify, `netlify.toml` already sets the base
@@ -89,6 +98,7 @@ not.
 | `UW_RPC_USER` / `UW_RPC_PASSWORD` | empty | HTTP basic auth for the RPC (checked in constant time) |
 | `UW_SYNC_INTERVAL` | `10` | Seconds between syncs |
 | `UW_EXTRA_CA_FILE` | none | Extra PEM CA to trust, for networks that re-sign TLS |
+| `UW_SOCKS_PROXY` | none (compose: `tor:9050`) | SOCKS5 proxy, normally Tor, for lightwalletd. Each connection gets its own circuit |
 
 RPC methods: `getblockcount`, `getwalletinfo`, `z_getnewaccount`, `z_getaddressforaccount`,
 `z_listreceivedbyaddress` (address, minconf, since-height), `z_getbalanceforaccount` (spendable and pending),
@@ -113,6 +123,7 @@ and Orchard needs none.
 | `UNLISTED_CHAIN` | yes | `rpc`. (`sim` is for tests and local dev only.) There is no default |
 | `UNLISTED_NETWORK` | yes | `main` or `test`. Must match the wallet |
 | `UNLISTED_SECRET` | yes | Long random string. Keys the refund-address reuse check. Never change it once set |
+| `UNLISTED_ADDRESS_MEMORY_DAYS` | no | Used refund addresses are refused for one to two periods of this many days (default 365), then forgotten |
 | `UNLISTED_RPC_URL` / `_USER` / `_PASSWORD` | yes | The wallet's RPC |
 | `UNLISTED_DATABASE_URL` | no | Defaults to SQLite in `/data` in the image. `postgresql+psycopg://…` also works |
 | `UNLISTED_CORS_ORIGINS` | yes | Your web origin |

@@ -19,8 +19,8 @@ Unlisted replaces the list with:
 3. **A QR check-in at the door.** The door hashes the secret and looks it up. It records yes/no, not a time.
 4. **An automatic refund** to everyone who came, at an address only they know. No-show deposits go to the group's fund.
 5. **A purge.** After settling, one click deletes the event's ticket hashes and refund addresses, and destroys its
-   wallet keys so its memos can never be decrypted again. Only totals remain, plus a keyed hash of each refund
-   address used, so no address can be reused for another RSVP.
+   wallet keys so its memos can never be decrypted again. The title, date and place go too. Only totals remain, plus
+   a keyed hash of each refund address used, kept for a year or two so no address can be reused for another RSVP.
 
 The organiser's dashboard has a **"What a seizure reveals"** tab showing every record held for the event, exactly
 as stored. There is nothing in it that names anyone.

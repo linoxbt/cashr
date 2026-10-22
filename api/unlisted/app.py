@@ -27,7 +27,7 @@ from .chain import ChainError, make_chain
 from .codec import is_ticket_hash
 from .config import Settings, get_settings
 from .db import Deposit, Event, Payout, Rsvp, init_db, make_engine, make_sessionmaker
-from .engine import Engine, EngineError, accepting_rsvps
+from .engine import DOOR_OPEN, Engine, EngineError, accepting_rsvps
 from .locks import acquire_writer_lock
 
 log = logging.getLogger("unlisted")
@@ -108,6 +108,10 @@ def public_event(ev: Event) -> dict:
         # Open, and before the RSVP deadline. Payments sent when this is false are returned.
         "accepting_rsvps": accepting_rsvps(ev),
     }
+
+
+def shorten(address: str) -> str:
+    return f"{address[:8]}…{address[-6:]}" if len(address) > 20 else address
 
 
 def admin_event(ev: Event) -> dict:
@@ -229,15 +233,20 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         ev = db.get(Event, event_id)
         if ev is None:
             raise EngineError("not_found", "No such event.", 404)
-        rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id)).all()
+        # Sorted by hash, so the order says nothing about who paid first.
+        rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id).order_by(Rsvp.ticket_hash)).all()
         # Returned payments, and ones that can't be returned privately.
         rejected = db.scalars(select(Deposit).where(
             Deposit.event_id == event_id,
-            (Deposit.kind == "rejected") | (Deposit.reason == "bad_refund_address"))).all()
+            (Deposit.kind == "rejected") | (Deposit.reason == "bad_refund_address"))
+            .order_by(Deposit.ticket_hash)).all()
+        # Anyone can read this list. Showing check-ins as they happen would let
+        # someone polling it note when each ticket came through the door, so a
+        # ticket's status appears only once settlement has set them all at once.
+        settled = ev.status not in DOOR_OPEN
         return {
             "status": ev.status,
-            "tickets": [{"h": r.ticket_hash, "seat": r.seat, "status": r.status,
-                         "checked_in": r.checked_in} for r in rsvps],
+            "tickets": [{"h": r.ticket_hash} | ({"status": r.status} if settled else {}) for r in rsvps],
             "rejected": [{"h": d.ticket_hash, "reason": d.reason} for d in rejected],
         }
 
@@ -256,7 +265,7 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
                 balance, pending, wallet_error = None, None, str(e)
         rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id).order_by(Rsvp.seat)).all()
         deposits = db.scalars(select(Deposit).where(Deposit.event_id == event_id)
-                              .order_by(Deposit.height, Deposit.id)).all()
+                              .order_by(Deposit.txid, Deposit.out_index)).all()
         payouts = db.scalars(select(Payout).where(Payout.event_id == event_id)
                              .order_by(Payout.id)).all()
         return {
@@ -264,11 +273,13 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             "balance_zat": balance,
             "pending_zat": pending,
             "wallet_error": wallet_error,
+            # The organiser never needs a refund address; shortened, it still
+            # shows what the server holds without handing it out.
             "rsvps": [{"seat": r.seat, "ticket_hash": r.ticket_hash,
-                       "refund_address": r.refund_address, "status": r.status,
+                       "refund_address": shorten(r.refund_address), "status": r.status,
                        "checked_in": r.checked_in} for r in rsvps],
             "deposits": [{"txid": d.txid, "pool": d.pool, "index": d.out_index,
-                          "amount_zat": d.amount_zat, "height": d.height, "kind": d.kind,
+                          "amount_zat": d.amount_zat, "kind": d.kind,
                           "reason": d.reason} for d in deposits],
             "payouts": [{"id": p.id, "kind": p.kind, "status": p.status,
                          "recipients": len(p.recipients),
@@ -309,8 +320,8 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     @app.get("/events/{event_id}/door/manifest")
     def door_manifest(event_id: str, token: str = Depends(bearer), db=Depends(db_session)):
         ev = engine.authorize(db, event_id, token, "door")
-        rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id,
-                                              Rsvp.status == "confirmed")).all()
+        rsvps = db.scalars(select(Rsvp).where(Rsvp.event_id == event_id, Rsvp.status == "confirmed")
+                           .order_by(Rsvp.ticket_hash)).all()
         return {
             "event": public_event(ev),
             "tickets": [{"h": r.ticket_hash, "seat": r.seat, "checked_in": r.checked_in}

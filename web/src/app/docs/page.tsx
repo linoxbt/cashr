@@ -162,7 +162,7 @@ export default function Docs() {
                 ["One wallet account per event", "Each event gets its own account from its own random seed (encrypted at rest), with an Orchard-only (shielded) address and a birthday at the current block. Purging the event deletes the seed."],
                 ["A secret on the attendee's phone", "The browser makes 32 random bytes and keeps them. Only SHA-256 of that secret leaves the device."],
                 ["The memo", <>The payment carries one encrypted line: <C>UNL1 &lt;event&gt; &lt;ticket hash&gt; &lt;refund address&gt;</C>. Only the event&rsquo;s wallet can read it.</>],
-                ["The wallet reads it", "A light-client wallet syncs from lightwalletd, fetches the full transaction to decrypt the memo, and the API records the hash and refund address."],
+                ["The wallet reads it", "A light-client wallet syncs from lightwalletd, fetches the full transaction over Tor to decrypt the memo, and the API records the hash and refund address."],
                 ["The door checks a hash", "The ticket QR holds the secret; the door hashes it and looks the hash up."],
                 ["Refunds stay in Orchard", "Refunds are batched Orchard-to-Orchard sends with the FullPrivacy policy, so no amount or recipient is revealed on chain."],
               ]}
@@ -205,7 +205,7 @@ export default function Docs() {
           <Section id="self-hosting" title="Self-hosting">
             <p>
               Unlisted is three pieces: this web app, a FastAPI service, and <C>unlisted-wallet</C>, a light-client Zcash
-              wallet built on librustzcash that syncs from a public lightwalletd server, so no full node is needed.
+              wallet built on librustzcash that syncs from a public lightwalletd server over Tor, so no full node is needed.
             </p>
             <pre className="panel overflow-x-auto p-4 font-mono text-[12.5px] leading-relaxed text-ink">{`# On a fresh Ubuntu server, as root: wallet + API + HTTPS, secrets generated for you
 curl -fsSL https://raw.githubusercontent.com/linoxbt/cashr/main/deploy/install.sh | bash -s -- api.example.com

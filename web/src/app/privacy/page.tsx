@@ -3,12 +3,13 @@ import type { Metadata } from "next";
 export const metadata: Metadata = { title: "Threat model" };
 
 const STORED = [
-  ["Event details", "Title, time, place, capacity, deposit. Place and description are wiped on purge."],
+  ["Event details", "Title, time, place, capacity, deposit. All but capacity and deposit are wiped on purge, so an event id left in an attendee's wallet no longer leads anywhere."],
   ["Ticket hash", "SHA-256 of a random secret. Reveals nothing about the person."],
   ["Refund address", "A one-time shielded address the attendee chose. Unlinkable to their other addresses."],
-  ["Checked in", "A yes/no per ticket. No time, so arrivals can't be matched against cameras."],
+  ["Checked in", "A yes/no per ticket. No time, so arrivals can't be matched against cameras. It's never published while the event runs; every ticket's outcome appears at once when the event is settled."],
+  ["Seat", "A random number, so it says nothing about the order people paid in."],
   ["Deposit notes", "Transaction id, amount, block height. The sender is never visible, even to the wallet."],
-  ["Reused-address digests", "Keyed hashes of refund addresses, only to refuse reuse. Never the address itself."],
+  ["Reused-address digests", "Keyed hashes of refund addresses, only to refuse reuse. Never the address itself. Forgotten after one to two years."],
   ["The event's wallet account", "Its own seed (encrypted at rest) and the deposits' memos. Purging deletes the account and the seed, so the memos can't be decrypted again, even from the chain."],
 ];
 
@@ -21,7 +22,17 @@ const LEAKS = [
   {
     risk: "Network metadata",
     detail: "Loading a page reveals an IP address to the web host and the API host, and their providers may log it.",
-    fix: "The API itself keeps no access logs. Confirmation checks download every ticket hash, so no request points at one ticket. For high-risk groups, open the pages over Tor.",
+    fix: "The API itself keeps no access logs. Confirmation checks download every ticket hash, so no request points at one ticket, and your ticket list never asks about all your events at once. For high-risk groups, open the pages over Tor.",
+  },
+  {
+    risk: "The wallet's sync server",
+    detail: "To read a deposit's memo, the server's wallet fetches that transaction from a lightwalletd server. Its operator would learn which transactions are RSVPs, and could match them to attendees' own wallets broadcasting through the same server.",
+    fix: "The wallet reaches lightwalletd through Tor, with a fresh circuit for every transaction it fetches. Operators can also run their own lightwalletd.",
+  },
+  {
+    risk: "What stays in your wallet",
+    detail: "Memos stay in a wallet's history for good, and anyone who later sees the wallet can read them.",
+    fix: "Refunds and returns carry a fixed memo that never names the event, and purging wipes the event's name, so the event id in your deposit memo leads nowhere.",
   },
   {
     risk: "Odd amounts",
@@ -36,14 +47,15 @@ const LEAKS = [
   {
     risk: "The ticket itself",
     detail: "Whoever holds the QR code can use it once.",
-    fix: "Treat it like a physical ticket. It is stored only on the attendee's device.",
+    fix: "Treat it like a physical ticket. It is stored only on the attendee's device, and the saved image doesn't name the event. Remove tickets for past events from your ticket list.",
   },
 ];
 
 const TRUST = [
   "The server's wallet holds deposits until the event is settled. A dishonest operator could keep them, so deposits should stay small (the price of a coffee).",
   "The organiser's links are bearer secrets. Anyone with the manage link can settle or purge the event.",
-  "The door device sees ticket hashes and the event's check-in count. It never sees refund addresses.",
+  "The door device sees ticket hashes, seats and the event's check-in count. It never sees refund addresses.",
+  "The organiser's dashboard shows each ticket's hash and whether it was checked in, but only a shortened refund address.",
   "Unlisted can't hide that an event exists, or protect against someone photographing the room.",
 ];
 

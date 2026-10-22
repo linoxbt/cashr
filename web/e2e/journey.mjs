@@ -86,10 +86,18 @@ try {
   }
   step("two attendees RSVP'd and paid");
 
-  // 5. /tickets shows the ticket.
+  // 5. /tickets lists the ticket from this device alone, and asks the server only when told to.
+  const listFetches = [];
+  const onRequest = (r) => /\/events\/[a-z0-9]{10}\/tickets$/.test(r.url()) && listFetches.push(r.url());
+  p.on("request", onRequest);
   await p.goto(BASE + "/tickets");
+  await p.getByText("Friday tenants").first().waitFor();
+  await p.waitForTimeout(1500);
+  if (listFetches.length) throw new Error(`/tickets fetched ticket lists unprompted: ${listFetches.join(", ")}`);
+  await p.getByRole("button", { name: "Check status" }).first().click();
   await p.getByText("Going", { exact: true }).waitFor({ timeout: 15000 });
-  step("/tickets shows GOING");
+  p.off("request", onRequest);
+  step("/tickets shows GOING, fetched only on request");
 
   // 6. The door checks the first attendee in; a junk code is not "invalid ticket" but unknown.
   await p.goto(BASE + "/door");
@@ -119,8 +127,11 @@ try {
   // 8. The attendee's ticket list reflects it.
   await p.evaluate((t) => localStorage.setItem("unlisted.tickets.v1", JSON.stringify({ [t.eventId]: t })), tickets[0]);
   await p.goto(BASE + "/tickets");
+  await p.getByRole("button", { name: "Check status" }).first().click();
   await p.getByText("Event over", { exact: true }).waitFor({ timeout: 15000 });
-  step("/tickets shows the event is over");
+  await p.getByRole("button", { name: /Remove 1 ticket for past events/ }).click();
+  await p.getByText("No tickets on this device yet").waitFor();
+  step("/tickets shows the event is over, and clears its ticket");
 
   if (errors.length) throw new Error("page errors: " + errors.join("; "));
   console.log("JOURNEY OK");

@@ -137,6 +137,8 @@ class SeenAddress(Base):
     __tablename__ = "seen_addresses"
 
     digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Which address-memory period it was used in (see Engine.forget_old_addresses).
+    period: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 def make_engine(url: str):

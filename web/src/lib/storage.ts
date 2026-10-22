@@ -8,6 +8,10 @@ export interface StoredTicket {
   hash: string;
   refundAddress: string;
   createdAt: string;
+  // Kept so the ticket list can show what each ticket is for without asking the
+  // server (asking about every event at once would link them together).
+  title?: string;
+  startsAt?: string;
 }
 
 const TICKETS = "unlisted.tickets.v1";

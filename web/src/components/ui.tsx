@@ -145,6 +145,7 @@ export function usePoll(fn: () => void | Promise<void>, ms: number, deps: unknow
 }
 
 export function formatWhen(s: string): string {
+  if (!s) return "—"; // purged events keep no date
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return s;
   return d.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });

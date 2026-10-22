@@ -42,6 +42,11 @@ REBROADCAST_EVERY = 20
 # Settled events are scanned (for late payments to return) every Nth cycle.
 SLOW_SCAN_EVERY = 8
 BALANCE_TTL_S = 10.0
+# Memos stay in the recipient's wallet for good, so they never name the event:
+# a refund memo with a title would prove attendance long after the purge.
+REFUND_MEMO = "Unlisted: deposit refunded."
+NO_SHOW_MEMO = "Unlisted: no-show deposits."
+PURGED_TITLE = "Purged event"
 
 _ID_ALPHABET = string.ascii_lowercase + string.digits
 
@@ -108,6 +113,21 @@ class Engine:
         self._cycle = 0
 
     # ---- helpers --------------------------------------------------------
+    def _period(self) -> int:
+        return int(time.time() // (max(1, self.settings.address_memory_days) * 86400))
+
+    def forget_old_addresses(self) -> None:
+        """Drop reuse digests older than the previous period.
+
+        They outlive purges, so with the server's secret they could confirm that a
+        known address once paid for an RSVP here. Keeping them for one to two
+        periods still refuses reuse across events held close together.
+        """
+        with self.lock, self.sessions() as db:
+            db.query(SeenAddress).filter(SeenAddress.period.is_(None)).update({"period": self._period()})
+            db.query(SeenAddress).filter(SeenAddress.period < self._period() - 1).delete()
+            db.commit()
+
     def _address_digest(self, address: str) -> str:
         return hmac.new(self.settings.secret.encode(), address.encode(), hashlib.sha256).hexdigest()
 
@@ -172,6 +192,8 @@ class Engine:
     def scan_once(self, full: bool = False) -> None:
         self._cycle += 1
         slow_turn = full or self._cycle % SLOW_SCAN_EVERY == 0
+        if slow_turn:
+            self.forget_old_addresses()
         with self.sessions() as db:
             busy = set(db.scalars(select(Payout.event_id).where(Payout.status.in_(IN_FLIGHT))))
             rows = db.execute(select(Event.id, Event.status).where(Event.status.in_(ACTIVE))).all()
@@ -240,7 +262,7 @@ class Engine:
             if refund > 0:
                 db.add(Payout(event_id=ev.id, kind="reject", recipients=[{
                     "address": memo.refund_address, "amount_zat": refund,
-                    "memo": f"Unlisted: your payment for '{ev.title}' was returned ({reason}).",
+                    "memo": f"Unlisted: payment returned ({reason}).",
                     "rsvp_id": None,
                 }]))
             else:
@@ -250,9 +272,15 @@ class Engine:
         dep.kind = "rsvp"
         ev.rsvp_count += 1
         db.add(Rsvp(event_id=ev.id, ticket_hash=memo.ticket_hash,
-                    refund_address=memo.refund_address, seat=ev.rsvp_count))
-        db.add(SeenAddress(digest=self._address_digest(memo.refund_address)))
+                    refund_address=memo.refund_address, seat=self._free_seat(db, ev)))
+        db.add(SeenAddress(digest=self._address_digest(memo.refund_address), period=self._period()))
         db.flush()
+
+    @staticmethod
+    def _free_seat(db: Session, ev: Event) -> int:
+        """A random free seat. Counting up would reveal the order people paid in."""
+        taken = set(db.scalars(select(Rsvp.seat).where(Rsvp.event_id == ev.id)))
+        return secrets.choice([n for n in range(1, ev.capacity + 1) if n not in taken])
 
     def _rejection(self, db: Session, ev: Event, memo, amount_zat: int) -> str:
         if memo.event_id != ev.id:
@@ -420,7 +448,7 @@ class Engine:
                 if bal.spendable_zat > self.settings.dust_zat:
                     db.add(Payout(event_id=ev.id, kind="forfeit", recipients=[{
                         "address": fund, "amount_zat": bal.spendable_zat,
-                        "memo": f"Unlisted: no-show deposits from '{ev.title}'.", "rsvp_id": None,
+                        "memo": NO_SHOW_MEMO, "rsvp_id": None,
                     }]))
                     db.commit()
                     return True
@@ -449,7 +477,7 @@ class Engine:
             if r.checked_in:
                 r.status = "refunding"
                 refunds.append({"address": r.refund_address, "amount_zat": ev.deposit_zat,
-                                "memo": f"Unlisted: thanks for coming to '{ev.title}'. Deposit refunded.",
+                                "memo": REFUND_MEMO,
                                 "rsvp_id": r.id})
             else:
                 r.status = "forfeited"
@@ -500,8 +528,14 @@ class Engine:
             self.chain.delete_account(account_ref)
             for model in (Rsvp, Deposit, Payout):
                 db.query(model).filter(model.event_id == ev.id).delete()
+            # Attendees' wallets keep the event id from their deposit memo, so
+            # nothing left here may name, date or locate the event.
+            ev.title = PURGED_TITLE
+            ev.starts_at = ""
+            ev.rsvp_closes_at = None
             ev.location = ""
             ev.details = ""
+            ev.address = ""
             ev.forfeit_address = ""
             ev.status = "purged"
             db.commit()

@@ -5,7 +5,9 @@
 //! including whoever holds this server, can derive the keys that decrypt that
 //! event's memos from the chain again. Seeds are encrypted with
 //! ChaCha20-Poly1305 under `UW_SEED_KEY`, so a copy of the data volume alone
-//! reveals nothing.
+//! cannot spend anything. It is still private data: `wallet.sqlite` keeps each
+//! live event's viewing key and its decrypted memos (ticket hashes and refund
+//! addresses) until the event is purged.
 
 use std::{
     fs,

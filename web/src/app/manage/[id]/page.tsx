@@ -305,7 +305,7 @@ function MoneyTab({ view, token, onChange }: { view: AdminView; token: string; o
               <tbody className="divide-y divide-ink/5">
                 {view.deposits.map((d) => (
                   <tr key={`${d.txid}-${d.index}`}>
-                    <td className="px-5 py-3 tabular-nums text-ink-3">Block {d.height}</td>
+                    <td className="px-5 py-3 font-mono text-xs text-ink-3">{d.txid.slice(0, 10)}…</td>
                     <td className="px-5 py-3 tabular-nums">{zatToZec(d.amount_zat)} ZEC</td>
                     <td className="px-5 py-3">
                       {d.kind === "rsvp" ? (
@@ -365,24 +365,24 @@ function SeizedTab({ view }: { view: AdminView }) {
       },
     },
     rsvps: view.rsvps.map((r) => ({ ticket_hash: r.ticket_hash, refund_address: r.refund_address, checked_in: r.checked_in, status: r.status })),
-    deposits: view.deposits.map((d) => ({ txid: d.txid, amount_zat: d.amount_zat, height: d.height, kind: d.kind })),
+    deposits: view.deposits.map((d) => ({ txid: d.txid, amount_zat: d.amount_zat, kind: d.kind })),
   };
   return (
     <div className="grid gap-6 lg:grid-cols-[22rem_1fr]">
       <div className="space-y-4 text-sm leading-relaxed text-ink-2">
         <h2 className="text-3xl text-ink">Imagine this server was seized tonight.</h2>
         <p>
-          On the right is every record Unlisted holds for this event, exactly as stored. Look for a name, an email, a
-          phone number or the address someone paid from. None of them exist.
+          On the right is every record Unlisted holds for this event. Look for a name, an email, a phone number or the
+          address someone paid from. None of them exist.
         </p>
         <ul className="list-disc space-y-1.5 pl-5">
           <li><strong>Ticket hashes</strong> are SHA-256 of secrets that live only on attendees&rsquo; phones.</li>
-          <li><strong>Refund addresses</strong> are one-time shielded addresses. The chain can&rsquo;t link them to their owners.</li>
+          <li><strong>Refund addresses</strong> are one-time shielded addresses. The chain can&rsquo;t link them to their owners. They&rsquo;re shortened here because you never need them; the server keeps them in full until the purge.</li>
           <li><strong>Deposit transactions</strong> are shielded. Their sender is hidden from everyone, us included.</li>
         </ul>
         <p>
-          Purging deletes these records <em>and</em> the event&rsquo;s wallet keys and seed, so not even the server can
-          decrypt the event&rsquo;s memos from the chain again. Only the totals remain.
+          Purging deletes these records, the event&rsquo;s title, date and place, <em>and</em> its wallet keys and seed,
+          so not even the server can decrypt the event&rsquo;s memos from the chain again. Only the totals remain.
         </p>
       </div>
       <pre className="max-h-[36rem] overflow-auto whitespace-pre-wrap break-all panel bg-black/60 p-5 font-mono text-xs leading-relaxed text-ink-2">

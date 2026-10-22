@@ -14,8 +14,11 @@
 2. Attendees never send a request that identifies their ticket. Confirmation reads the whole ticket list.
 3. Tokens travel only in URL fragments and `Authorization` headers.
 4. Every RSVP pays exactly the deposit. Refund addresses are never reused. Event addresses are Orchard-only.
-5. Purge deletes RSVP, deposit and payout rows, and the event's wallet account and seed.
+5. Purge deletes RSVP, deposit and payout rows, the event's wallet account and seed, and anything that names or
+   dates the event (title, times, place, address). Server-written memos never name the event.
 6. A payout is sent under its idempotency key only. Never build a second transaction for a payout that could still be mined.
+7. Nothing public reveals check-in state or payment order while an event runs, and no client request links one
+   person's events together. The wallet reaches lightwalletd through Tor unless the operator opts out.
 
 ## Checks before committing
 ```
