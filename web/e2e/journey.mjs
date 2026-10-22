@@ -171,7 +171,8 @@ try {
   await p.getByText("Returned", { exact: true }).first().waitFor({ timeout: 15000 });
   step("dashboard closed and reopened RSVPs, and shows the returned payment");
   await p.click("text=End event & refund");
-  await p.getByText("settled", { exact: true }).waitFor({ timeout: 60000 });
+  // Long enough for a live demo (5 s blocks, real confirmation rules), not just CI.
+  await p.getByText("settled", { exact: true }).waitFor({ timeout: 180000 });
   step("settled: refunds confirmed and leftover fees swept");
   await p.click("text=Purge all data");
   await p.getByText("Purged", { exact: true }).waitFor({ timeout: 15000 });
