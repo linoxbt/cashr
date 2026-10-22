@@ -59,6 +59,10 @@ class ChainError(RuntimeError):
 class Chain(Protocol):
     def tip_height(self) -> int: ...
 
+    def height_at(self, unix_time: int) -> int | None:
+        """The highest known block mined at or before `unix_time`, or None if unknown."""
+        ...
+
     def new_event_account(self) -> tuple[str, str]:
         """Create a fresh wallet account (own keys) for one event; return (account_ref, address)."""
         ...

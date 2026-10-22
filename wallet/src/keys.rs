@@ -67,8 +67,10 @@ impl SeedStore {
 
     pub fn commit(&self, staged: &str, account: &str) -> anyhow::Result<()> {
         fs::rename(self.path(staged), self.path(account))?;
-        // The rename only survives a power cut once the directory is synced.
-        fs::File::open(&self.dir)?.sync_all()?;
+        // The rename only survives a power cut once the directory is synced. The
+        // account already exists, so failing here would orphan it: best effort,
+        // and a lost rename is repaired at startup (Wallet::open).
+        let _ = fs::File::open(&self.dir).and_then(|d| d.sync_all());
         Ok(())
     }
 
@@ -85,6 +87,13 @@ impl SeedStore {
             }
         }
         Ok(out)
+    }
+
+    /// Keep a damaged staged seed out of the way, without destroying it.
+    pub fn quarantine(&self, staged: &str) -> anyhow::Result<()> {
+        let to = self.dir.join(format!("{staged}.unreadable"));
+        fs::rename(self.path(staged), to)?;
+        Ok(())
     }
 
     pub fn discard(&self, staged: &str) {

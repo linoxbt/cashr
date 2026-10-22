@@ -68,7 +68,8 @@ class CreateEvent(BaseModel):
     def _aware_close(cls, v: datetime | None) -> datetime | None:
         if v is not None and v.tzinfo is None:
             raise ValueError("rsvp_closes_at needs a UTC offset")
-        return v
+        # Stored as UTC: SQLite would otherwise drop the offset and shift the deadline.
+        return v.astimezone(timezone.utc) if v is not None else None
 
 
     @model_validator(mode="after")

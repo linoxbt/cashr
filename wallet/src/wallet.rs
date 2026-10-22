@@ -64,6 +64,8 @@ const ENHANCE_MAX_MISSES: u32 = 360;
 /// expired, so a short reorg can't make a transaction that may still be mined
 /// look dead (and be rebuilt).
 const EXPIRY_DEPTH: u32 = 10;
+/// Set while a delete's file rewrite is owed.
+const COMPACT_FLAG: &str = "compact_after_delete";
 
 pub type Db = WalletDb<rusqlite::Connection, Network, SystemClock, OsRng>;
 
@@ -156,7 +158,8 @@ impl Wallet {
         recover_staged_seeds(&params, &db, &seeds)?;
         let ops = OpStore::open(&data_dir.join("ops.sqlite"))?;
         ops.prune(30)?;
-        Ok(Arc::new(Self {
+        let owes_compaction = ops.flag(COMPACT_FLAG)?;
+        let wallet = Arc::new(Self {
             params,
             db: Mutex::new(db),
             db_path,
@@ -170,7 +173,12 @@ impl Wallet {
             scanned: AtomicU32::new(scanned),
             prover: LocalTxProver::bundled(),
             misses: Default::default(),
-        }))
+        });
+        if owes_compaction {
+            // A delete's rewrite was interrupted by a restart: finish it before serving.
+            wallet.compact_now();
+        }
+        Ok(wallet)
     }
 
     /// A separate connection for reads, so RPC calls never wait for a sync
@@ -294,6 +302,12 @@ impl Wallet {
                 Some((tx, mined)) => {
                     self.misses.lock().await.remove(txid);
                     let mut db = self.db.lock().await;
+                    // Fetched without the lock: if the account it belonged to was
+                    // deleted meanwhile, the request is gone, and storing the
+                    // transaction would leave a trace of a purged event.
+                    if !db.transaction_data_requests()?.contains(request) {
+                        return Ok(());
+                    }
                     decrypt_and_store_transaction(&self.params, &mut *db, &tx, mined)?;
                 }
                 None => {
@@ -404,6 +418,9 @@ impl Wallet {
         let uuid = Self::parse_account(account)?;
         let db = self.reader()?;
         if !db.get_account_ids()?.contains(&uuid) {
+            if self.ops.was_deleted(account)? {
+                bail!("account {account} was deleted");
+            }
             bail!("no account {account}");
         }
         let Some(summary) = db.get_wallet_summary(ConfirmationsPolicy::default())? else {
@@ -474,6 +491,12 @@ impl Wallet {
         Ok(uuid::Uuid::from_slice(&uuid)?.to_string())
     }
 
+    /// The highest scanned block whose time is at or before `unix_time`, if any.
+    pub fn height_at(&self, unix_time: i64) -> anyhow::Result<Option<u32>> {
+        let conn = self.read_conn()?;
+        Ok(conn.query_row("SELECT MAX(height) FROM blocks WHERE time <= ?1", [unix_time], |r| r.get(0))?)
+    }
+
     /// Where a transaction this wallet built stands on chain.
     pub fn tx_state(&self, txid: &str) -> anyhow::Result<Option<TxState>> {
         let id = TxId::from_hex(txid).ok_or_else(|| anyhow!("bad txid"))?;
@@ -500,27 +523,46 @@ impl Wallet {
     /// that timed out can simply ask again.
     pub async fn delete_account(self: &Arc<Self>, account: &str) -> anyhow::Result<()> {
         let uuid = Self::parse_account(account)?;
+        let mut deleted = false;
         if self.reader()?.get_account_ids()?.contains(&uuid) {
             self.ensure_deletable(account, uuid)?;
             let mut db = self.db.lock().await;
             // Again under the writer lock: no send can start building from here on.
             self.ensure_deletable(account, uuid)?;
+            // Recorded first, so a retry after a crash or timeout knows the account
+            // was deleted here, and the file rewrite is owed even across a restart.
+            self.ops.mark_deleted(account)?;
+            self.ops.set_flag(COMPACT_FLAG, true)?;
             db.delete_account(uuid)?;
+            deleted = true;
+        } else if !self.ops.was_deleted(account)? {
+            // Not a retry: the wallet database may have been reset or restored from
+            // an older backup. The seed could be the only way to funds on chain.
+            bail!("no account {account}, and no record of deleting it; refusing to delete its seed");
         }
         self.seeds.delete(account)?;
         self.ops.delete_account(account)?;
         debug!(%account, "deleted account and its seed");
         info!("deleted an event account and its seed");
-        // Freed pages and the WAL still hold the deleted keys and memos until the
-        // file is rewritten. That can take a while, so it runs after replying.
-        let wallet = Arc::clone(self);
-        tokio::spawn(async move {
-            let _writer = wallet.db.lock().await;
-            if let Err(e) = tokio::task::block_in_place(|| wallet.compact()) {
-                error!(error = %format!("{e:#}"), "could not rewrite the wallet database after a delete; deleted data may remain on disk");
-            }
-        });
+        if deleted {
+            // Freed pages and the WAL still hold the deleted keys and memos until the
+            // file is rewritten. That can take a while, so it runs after replying.
+            let wallet = Arc::clone(self);
+            tokio::spawn(async move {
+                let _writer = wallet.db.lock().await;
+                tokio::task::block_in_place(|| wallet.compact_now());
+            });
+        }
         Ok(())
+    }
+
+    /// Rewrite the database if a delete still owes it (also run at startup).
+    fn compact_now(&self) {
+        match self.compact().and_then(|_| self.ops.set_flag(COMPACT_FLAG, false)) {
+            Ok(()) => {}
+            Err(e) => error!(error = %format!("{e:#}"),
+                "could not rewrite the wallet database after a delete; retrying at the next start"),
+        }
     }
 
     /// Refuses while anything could still move this account's money: deleting
@@ -657,8 +699,14 @@ impl Wallet {
                     ("failed", "the send crashed; check the wallet log".to_string())
                 }
             };
-            if let Err(e) = wallet.ops.finish(&id, attempt, state, &error) {
-                error!(error = %e, "could not record how a send ended");
+            // An operation left "executing" would block its key and its account's
+            // delete until a restart, so recording the outcome is retried.
+            for delay in [0u64, 1, 5, 30] {
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                match wallet.ops.finish(&id, attempt, state, &error) {
+                    Ok(()) => return,
+                    Err(e) => error!(error = %e, "could not record how a send ended; retrying"),
+                }
             }
         });
         Ok(opid)
@@ -838,10 +886,20 @@ impl Wallet {
 /// account was never used and is discarded.
 fn recover_staged_seeds(params: &Network, db: &Db, seeds: &SeedStore) -> anyhow::Result<()> {
     for staged in seeds.staged()? {
-        let seed = seeds.load(&staged)?;
-        let ufvk = UnifiedSpendingKey::from_seed(params, seed.expose_secret(), zip32::AccountId::ZERO)
-            .map_err(|e| anyhow!("key derivation failed: {e:?}"))?
-            .to_unified_full_viewing_key();
+        // A seed cut short by a crash while it was being written can't belong to an
+        // account (accounts are created only after staging finishes). Set it aside
+        // rather than refuse to start.
+        let ufvk = match seeds.load(&staged).and_then(|seed| {
+            UnifiedSpendingKey::from_seed(params, seed.expose_secret(), zip32::AccountId::ZERO)
+                .map_err(|e| anyhow!("key derivation failed: {e:?}"))
+        }) {
+            Ok(usk) => usk.to_unified_full_viewing_key(),
+            Err(e) => {
+                error!(error = %format!("{e:#}"), "set aside an unreadable staged seed");
+                seeds.quarantine(&staged)?;
+                continue;
+            }
+        };
         match db.get_account_for_ufvk(&ufvk)? {
             Some(account) => {
                 seeds.commit(&staged, &account.id().expose_uuid().to_string())?;
@@ -859,5 +917,61 @@ impl Wallet {
             Some(h) if self.tip() >= h => self.tip() - h + 1,
             _ => 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_temp(dir: &std::path::Path) -> anyhow::Result<Arc<Wallet>> {
+        // Nothing here talks to lightwalletd: opening the wallet never connects.
+        let endpoint = Endpoint { url: "https://127.0.0.1:1".into(), extra_ca_pem: None, socks_proxy: None };
+        Wallet::open(Network::TestNetwork, dir, &"07".repeat(32), endpoint)
+    }
+
+    fn temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("uw-wallet-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_staged_seed_is_set_aside_not_fatal() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(dir.join("seeds")).unwrap();
+        // A staged seed cut short by a crash mid-write.
+        std::fs::write(dir.join("seeds/staged-cut.seed"), b"short").unwrap();
+        let _wallet = open_temp(&dir).expect("the wallet still starts");
+        assert!(!dir.join("seeds/staged-cut.seed").exists());
+        assert!(dir.join("seeds/staged-cut.unreadable").exists(), "kept, out of the way");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_missing_account_counts_as_deleted_only_if_this_wallet_deleted_it() {
+        let dir = temp_dir();
+        let wallet = open_temp(&dir).unwrap();
+        let account = uuid::Uuid::new_v4().to_string();
+        // Unknown and never deleted here (say, a reset wallet database): refused.
+        let err = wallet.delete_account(&account).await.unwrap_err().to_string();
+        assert!(err.contains("no record of deleting it"), "{err}");
+        assert!(wallet.balance(&account).unwrap_err().to_string().contains("no account"));
+        // Deleted here before (a retry after a timeout): succeeds, and says so.
+        wallet.ops.mark_deleted(&account).unwrap();
+        wallet.delete_account(&account).await.unwrap();
+        assert!(wallet.balance(&account).unwrap_err().to_string().contains("was deleted"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_owed_rewrite_is_finished_at_startup() {
+        let dir = temp_dir();
+        drop(open_temp(&dir).unwrap());
+        OpStore::open(&dir.join("ops.sqlite")).unwrap().set_flag(COMPACT_FLAG, true).unwrap();
+        let wallet = open_temp(&dir).unwrap();
+        assert!(!wallet.ops.flag(COMPACT_FLAG).unwrap(), "the restart finished the rewrite");
+        assert_eq!(wallet.height_at(i64::MAX).unwrap(), None, "no blocks scanned yet");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

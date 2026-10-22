@@ -145,3 +145,42 @@ def test_purge_interrupted_after_the_wallet_delete_can_finish(client, make_event
     client.chain.delete_account(account)
     r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
     assert r.json()["status"] == "purged", r.text
+
+
+def test_purge_refuses_when_the_wallet_forgot_an_account_it_never_deleted(client, make_event, attendee):
+    from test_lifecycle import settle
+
+    created = make_event(forfeit_address=random_unified_address())
+    ev, admin = created["event"], created["admin_token"]
+    pay(client, ev, attendee(ev["id"]).memo())
+    settle(client, ev, admin)
+    with client.engine.sessions() as db:
+        account = db.get(Event, ev["id"]).account_ref
+    # A wallet database reset or restored from an old backup: the account is gone
+    # but was never deleted, and its seed may still guard funds on chain.
+    del client.chain._accounts[account]
+    r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
+    assert r.status_code == 502 and "no account" in r.json()["message"]
+    assert client.get(f"/events/{ev['id']}").json()["status"] == "settled"
+
+
+def test_deadline_uses_block_times_when_known(client, make_event, attendee):
+    from datetime import datetime, timezone
+
+    ev = make_event()["event"]
+    for _ in range(5):
+        client.chain.mine()
+    # Real blocks come about 75 s apart; give the sim's the same spacing.
+    for i, h in enumerate(sorted(client.chain._block_times)):
+        client.chain._block_times[h] = 1_700_000_000 + 75 * i
+    deadline_block = client.chain.height - 4
+    closes = datetime.fromtimestamp(client.chain._block_times[deadline_block], timezone.utc)
+    with client.engine.sessions() as db:
+        db.get(Event, ev["id"]).rsvp_closes_at = closes
+        db.commit()
+    # Seconds ago by the clock, but five blocks ago on chain: well past the grace.
+    late = attendee(ev["id"])
+    pay(client, ev, late.memo())
+    assert tickets(client, ev["id"])["rejected"] == [{"h": late.hash, "reason": "rsvps_closed"}]
+    with client.engine.sessions() as db:
+        assert db.get(Event, ev["id"]).close_height == deadline_block

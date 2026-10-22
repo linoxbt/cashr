@@ -96,6 +96,13 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
     match method {
         "getblockcount" => Ok(json!(w.tip())),
 
+        // Unlisted extension: the chain height at a moment (the last scanned block
+        // mined at or before it), so a deadline can be judged in blocks.
+        "z_heightattime" => {
+            let t = params.first().and_then(Value::as_i64).ok_or_else(|| param_err("unix time required"))?;
+            Ok(json!(w.height_at(t)?))
+        }
+
         "getwalletinfo" => Ok(json!({
             "network": w.network_name(),
             "chain_tip": w.tip(),

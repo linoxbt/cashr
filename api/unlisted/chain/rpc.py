@@ -56,6 +56,10 @@ class RpcChain:
     def tip_height(self) -> int:
         return int(self._call("getblockcount"))
 
+    def height_at(self, unix_time: int) -> int | None:
+        h = self._call("z_heightattime", int(unix_time))
+        return None if h is None else int(h)
+
     def new_event_account(self) -> tuple[str, str]:
         account = str(self._call("z_getnewaccount", timeout=SLOW_TIMEOUT_S)["account"])
         # Orchard-only: payers and refunds stay inside one pool, so no

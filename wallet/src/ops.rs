@@ -48,6 +48,13 @@ impl OpStore {
                  attempt INTEGER NOT NULL DEFAULT 0
              );",
         )?;
+        // Accounts this wallet deleted, so "no such account" can be told apart from a
+        // wallet database that was reset or restored (whose seeds must be kept).
+        // And whether a delete still owes the file rewrite that clears its traces.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS deleted_accounts (account TEXT PRIMARY KEY, at INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS flags (name TEXT PRIMARY KEY);",
+        )?;
         let has_attempt = conn
             .prepare("SELECT 1 FROM pragma_table_info('ops') WHERE name = 'attempt'")?
             .exists([])?;
@@ -152,6 +159,36 @@ impl OpStore {
         Ok(())
     }
 
+    /// Record that an account is being deleted. Written before the delete, so it
+    /// is there for any retry.
+    pub fn mark_deleted(&self, account: &str) -> anyhow::Result<()> {
+        let c = self.conn.lock().unwrap();
+        c.execute("INSERT OR IGNORE INTO deleted_accounts (account, at) VALUES (?1, ?2)", params![account, now()])?;
+        Ok(())
+    }
+
+    pub fn was_deleted(&self, account: &str) -> anyhow::Result<bool> {
+        let c = self.conn.lock().unwrap();
+        let found = c.prepare("SELECT 1 FROM deleted_accounts WHERE account = ?1")?.exists([account])?;
+        Ok(found)
+    }
+
+    pub fn set_flag(&self, name: &str, on: bool) -> anyhow::Result<()> {
+        let c = self.conn.lock().unwrap();
+        if on {
+            c.execute("INSERT OR IGNORE INTO flags (name) VALUES (?1)", [name])?;
+        } else {
+            c.execute("DELETE FROM flags WHERE name = ?1", [name])?;
+        }
+        Ok(())
+    }
+
+    pub fn flag(&self, name: &str) -> anyhow::Result<bool> {
+        let c = self.conn.lock().unwrap();
+        let found = c.prepare("SELECT 1 FROM flags WHERE name = ?1")?.exists([name])?;
+        Ok(found)
+    }
+
     /// Forget settled operations after `days`; the API stops asking long before.
     pub fn prune(&self, days: i64) -> anyhow::Result<usize> {
         let c = self.conn.lock().unwrap();
@@ -202,6 +239,16 @@ mod tests {
         let op = store.get("op").unwrap().unwrap();
         assert_eq!((op.state.as_str(), op.txid.as_deref()), ("success", Some("tx-1")));
         assert_eq!(store.for_account("acct").unwrap().len(), 1);
+        // Tombstones and flags survive the account's operations being deleted, and a reopen.
+        store.mark_deleted("acct").unwrap();
+        store.delete_account("acct").unwrap();
+        store.set_flag("compact", true).unwrap();
+        drop(store);
+        let store = OpStore::open(&path).unwrap();
+        assert!(store.was_deleted("acct").unwrap() && !store.was_deleted("other").unwrap());
+        assert!(store.flag("compact").unwrap());
+        store.set_flag("compact", false).unwrap();
+        assert!(!store.flag("compact").unwrap());
         let _ = std::fs::remove_file(path);
     }
 }
