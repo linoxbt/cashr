@@ -104,3 +104,34 @@ jobs:
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api
+
+  # The live sites build from main, so they never drift behind it. Runs only when
+  # the repository has a NETLIFY_AUTH_TOKEN secret; each site's API comes from a
+  # repository variable (Settings → Secrets and variables → Actions).
+  deploy-web:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [web]
+    runs-on: ubuntu-latest
+    env:
+      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+    strategy:
+      matrix:
+        site:
+          - { id: "5f3959f2-910d-4de2-8081-4aadbde86be7", api: MAINNET_API_URL }  # unlisted-zec (mainnet)
+          - { id: "586dc4d7-fa6a-4eb5-b380-4a421ffed9f3", api: SIM_API_URL }      # unlisted-zec-sim (demo)
+    steps:
+      - if: env.NETLIFY_AUTH_TOKEN == ''
+        run: echo "No NETLIFY_AUTH_TOKEN secret; skipping the web deploy."
+      - if: env.NETLIFY_AUTH_TOKEN != ''
+        uses: actions/checkout@v4
+      - if: env.NETLIFY_AUTH_TOKEN != ''
+        uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: web/package-lock.json }
+      - if: env.NETLIFY_AUTH_TOKEN != ''
+        working-directory: web
+        env:
+          NEXT_PUBLIC_API_URL: ${{ vars[matrix.site.api] }}
+        run: |
+          test -n "$NEXT_PUBLIC_API_URL" || { echo "Set the ${{ matrix.site.api }} repository variable"; exit 1; }
+          npm ci
+          npx --yes netlify-cli@26.1.0 deploy --build --prod --site "${{ matrix.site.id }}" --message "main ${GITHUB_SHA::7}"

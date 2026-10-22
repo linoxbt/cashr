@@ -18,7 +18,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -47,8 +47,23 @@ BALANCE_TTL_S = 10.0
 REFUND_MEMO = "Unlisted: deposit refunded."
 NO_SHOW_MEMO = "Unlisted: no-show deposits."
 PURGED_TITLE = "Purged event"
+# A payment sent just before RSVPs closed can be mined a block or two later;
+# it still counts. Measured from the chain height when RSVPs closed.
+RSVP_GRACE_BLOCKS = 2
+BLOCK_SECONDS = 75
+# An event that never received anything is retired this long after it started,
+# so abandoned events don't keep wallet accounts (and capacity) forever.
+IDLE_RETIRE_AFTER = timedelta(days=1)
 
 _ID_ALPHABET = string.ascii_lowercase + string.digits
+
+
+def _starts_before(starts_at: str, cutoff: datetime) -> bool:
+    try:
+        start = datetime.fromisoformat(starts_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (start if start.tzinfo else start.replace(tzinfo=timezone.utc)) < cutoff
 
 
 def new_event_id() -> str:
@@ -194,6 +209,7 @@ class Engine:
         slow_turn = full or self._cycle % SLOW_SCAN_EVERY == 0
         if slow_turn:
             self.forget_old_addresses()
+            self.retire_idle_events()
         with self.sessions() as db:
             busy = set(db.scalars(select(Payout.event_id).where(Payout.status.in_(IN_FLIGHT))))
             rows = db.execute(select(Event.id, Event.status).where(Event.status.in_(ACTIVE))).all()
@@ -213,11 +229,19 @@ class Engine:
             ev = self._get_event(db, event_id)
             account_ref, address = ev.account_ref, ev.address
             since = max(0, ev.scan_height - REORG_MARGIN)
+            deadline_passed = ev.status == "open" and ev.close_height is None and not accepting_rsvps(ev)
         notes = self.chain.received(account_ref, address, since)
+        tip = self.chain.tip_height() if deadline_passed else None
         with self.lock, self.sessions() as db:
             ev = self._get_event(db, event_id)
             if ev.status not in ACTIVE:
                 return
+            if tip is not None and ev.status == "open" and ev.close_height is None:
+                # The chain height at the deadline, estimated back from now, so
+                # a scanner that was down doesn't stretch the grace.
+                closes = ev.rsvp_closes_at.replace(tzinfo=ev.rsvp_closes_at.tzinfo or timezone.utc)
+                late_s = max(0.0, (datetime.now(timezone.utc) - closes).total_seconds())
+                ev.close_height = max(0, tip - int(late_s // BLOCK_SECONDS))
             known = {
                 (d.txid, d.pool, d.out_index)
                 for d in db.scalars(select(Deposit).where(Deposit.event_id == event_id))
@@ -254,7 +278,7 @@ class Engine:
             ev.float_zat += note.amount_zat
             return
 
-        reason = self._rejection(db, ev, memo, note.amount_zat)
+        reason = self._rejection(db, ev, memo, note.amount_zat, note.height)
         if reason:
             dep.kind, dep.reason = "rejected", reason
             ev.rejected_count += 1
@@ -277,15 +301,21 @@ class Engine:
         db.flush()
 
     @staticmethod
+    def _within_grace(ev: Event, height: int) -> bool:
+        """Mined so soon after RSVPs closed that it was sent while they were open."""
+        return (ev.status in DOOR_OPEN and ev.close_height is not None and height > 0
+                and height <= ev.close_height + RSVP_GRACE_BLOCKS)
+
+    @staticmethod
     def _free_seat(db: Session, ev: Event) -> int:
         """A random free seat. Counting up would reveal the order people paid in."""
         taken = set(db.scalars(select(Rsvp.seat).where(Rsvp.event_id == ev.id)))
         return secrets.choice([n for n in range(1, ev.capacity + 1) if n not in taken])
 
-    def _rejection(self, db: Session, ev: Event, memo, amount_zat: int) -> str:
+    def _rejection(self, db: Session, ev: Event, memo, amount_zat: int, height: int = 0) -> str:
         if memo.event_id != ev.id:
             return "wrong_event"
-        if not accepting_rsvps(ev):
+        if not accepting_rsvps(ev) and not self._within_grace(ev, height):
             return "rsvps_closed"
         if amount_zat != ev.deposit_zat:
             return "wrong_amount"
@@ -461,11 +491,17 @@ class Engine:
         if ev.status != "open":
             raise EngineError("bad_state", "RSVPs are already closed.")
         ev.status = "closed"
+        if ev.close_height is None:
+            try:
+                ev.close_height = self.chain.tip_height()
+            except ChainError:
+                pass  # payments are then judged without the grace
 
     def reopen(self, db: Session, ev: Event) -> None:
         if ev.status != "closed":
             raise EngineError("bad_state", "Only a closed event can be reopened.")
         ev.status = "open"
+        ev.close_height = None
 
     def settle(self, db: Session, ev: Event) -> None:
         if ev.status not in DOOR_OPEN:
@@ -526,20 +562,55 @@ class Engine:
             account_ref = ev.account_ref
             # Keys first: if the wallet refuses, nothing is deleted here either.
             self.chain.delete_account(account_ref)
-            for model in (Rsvp, Deposit, Payout):
-                db.query(model).filter(model.event_id == ev.id).delete()
-            # Attendees' wallets keep the event id from their deposit memo, so
-            # nothing left here may name, date or locate the event.
-            ev.title = PURGED_TITLE
-            ev.starts_at = ""
-            ev.rsvp_closes_at = None
-            ev.location = ""
-            ev.details = ""
-            ev.address = ""
-            ev.forfeit_address = ""
-            ev.status = "purged"
+            self._wipe(db, ev)
             db.commit()
         self._balances.pop(ev_id, None)
+
+    @staticmethod
+    def _wipe(db: Session, ev: Event) -> None:
+        for model in (Rsvp, Deposit, Payout):
+            db.query(model).filter(model.event_id == ev.id).delete()
+        # Attendees' wallets keep the event id from their deposit memo, so
+        # nothing left here may name, date or locate the event.
+        ev.title = PURGED_TITLE
+        ev.starts_at = ""
+        ev.rsvp_closes_at = None
+        ev.location = ""
+        ev.details = ""
+        ev.address = ""
+        ev.account_ref = ""
+        ev.forfeit_address = ""
+        ev.status = "purged"
+
+    def retire_idle_events(self) -> None:
+        """Purge events that started over a day ago and never received anything.
+
+        Nobody can lose money (nothing was paid in) and nobody RSVP'd, but each
+        keeps a wallet account the wallet scans and a slot against the server's
+        limit of live events. The wallet refuses the delete if anything arrived
+        after all.
+        """
+        cutoff = datetime.now(timezone.utc) - IDLE_RETIRE_AFTER
+        with self.sessions() as db:
+            candidates = [
+                ev.id for ev in db.scalars(select(Event).where(Event.status.in_(DOOR_OPEN), Event.rsvp_count == 0))
+                if _starts_before(ev.starts_at, cutoff)
+                and db.scalar(select(Deposit.id).where(Deposit.event_id == ev.id)) is None
+            ]
+        for event_id in candidates:
+            with self.lock, self.sessions() as db:
+                ev = self._get_event(db, event_id)
+                if ev.status not in DOOR_OPEN or ev.rsvp_count or db.scalar(
+                        select(Deposit.id).where(Deposit.event_id == ev.id)) is not None:
+                    continue
+                try:
+                    self.chain.delete_account(ev.account_ref)
+                except ChainError as e:
+                    log.warning("retire %s: %s", event_id, e)
+                    continue
+                self._wipe(db, ev)
+                db.commit()
+            self._balances.pop(event_id, None)
 
     def _check_purgeable(self, db: Session, ev: Event) -> None:
         if ev.status != "settled":

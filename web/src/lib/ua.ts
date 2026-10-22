@@ -77,12 +77,24 @@ export function f4jumbleInv(m: Uint8Array): Uint8Array {
   return out;
 }
 
+/** A Bitcoin-style CompactSize, as in api/unlisted/ua.py: [value, next position], or null if truncated. */
+function compactSize(buf: Uint8Array, pos: number): [number, number] | null {
+  if (pos >= buf.length) return null;
+  const first = buf[pos];
+  if (first < 0xfd) return [first, pos + 1];
+  const width = first === 0xfd ? 2 : first === 0xfe ? 4 : 8;
+  if (pos + 1 + width > buf.length) return null;
+  let value = 0;
+  for (let i = width - 1; i >= 0; i--) value = value * 256 + buf[pos + 1 + i];
+  return [value, pos + 1 + width];
+}
+
 export function decodeUnified(address: string, network: string): Receivers | null {
   const a = address.trim();
   const expectedHrp = network === "main" ? "u" : "utest";
   if (a !== a.toLowerCase()) return null;
   const sep = a.lastIndexOf("1");
-  if (a.slice(0, sep) !== expectedHrp) return null;
+  if (sep < 1 || a.slice(0, sep) !== expectedHrp) return null;
   const values: number[] = [];
   for (const ch of a.slice(sep + 1)) {
     const v = CHARSET.indexOf(ch);
@@ -101,12 +113,13 @@ export function decodeUnified(address: string, network: string): Receivers | nul
   let pos = 0;
   let last = -1;
   while (pos < body.length) {
-    const type = body[pos++];
-    const len = body[pos++];
-    // Receivers Unlisted cares about have single-byte typecodes and lengths.
-    if (type === undefined || len === undefined || type >= 0xfd || len >= 0xfd || type <= last || pos + len > body.length) {
-      return null;
-    }
+    const t = compactSize(body, pos);
+    if (!t) return null;
+    const l = compactSize(body, t[1]);
+    if (!l) return null;
+    const [type, len] = [t[0], l[0]];
+    pos = l[1];
+    if (type <= last || pos + len > body.length) return null;
     last = type;
     const name = NAMES[type];
     if (name) receivers[name] = body.slice(pos, pos + len);

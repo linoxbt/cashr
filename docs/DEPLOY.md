@@ -64,6 +64,8 @@ volume alone holds every live event's viewing keys, ticket hashes and refund add
 unencrypted (the installer prints an `openssl enc` command). Purging an event deletes its seed on purpose, after
 its money has been swept out; a backup taken before keeps it, so replace old backups after a purge.
 
+Images are pinned to exact base-image digests, and the API and wallet images carry healthchecks.
+
 Container logs use Docker's `local` driver capped at 1 MB per service, since logs sit outside anything a purge
 deletes. Nothing logs visitors, ticket hashes, addresses or txids at the default level.
 

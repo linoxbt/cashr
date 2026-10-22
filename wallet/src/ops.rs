@@ -44,9 +44,16 @@ impl OpStore {
                  txid TEXT,
                  error TEXT NOT NULL DEFAULT '',
                  amount INTEGER,
-                 updated INTEGER NOT NULL
+                 updated INTEGER NOT NULL,
+                 attempt INTEGER NOT NULL DEFAULT 0
              );",
         )?;
+        let has_attempt = conn
+            .prepare("SELECT 1 FROM pragma_table_info('ops') WHERE name = 'attempt'")?
+            .exists([])?;
+        if !has_attempt {
+            conn.execute_batch("ALTER TABLE ops ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0;")?;
+        }
         // A build interrupted by a restart either never produced a transaction
         // (safe to retry) or recorded its txid first (track that transaction).
         conn.execute(
@@ -92,32 +99,51 @@ impl OpStore {
     }
 
     /// Start a fresh build for an existing operation (its previous attempt
-    /// failed before broadcast, or its transaction expired unmined).
-    pub fn restart(&self, opid: &str) -> anyhow::Result<()> {
+    /// failed before broadcast, or its transaction expired unmined). Returns
+    /// the new attempt number: only that attempt may record a txid or an
+    /// outcome, so a build or rebroadcast left over from an earlier attempt
+    /// can never overwrite this one.
+    pub fn restart(&self, opid: &str) -> anyhow::Result<i64> {
         let c = self.conn.lock().unwrap();
         c.execute(
-            "UPDATE ops SET state = 'executing', txid = NULL, error = '', amount = NULL, updated = ?2 WHERE opid = ?1",
+            "UPDATE ops SET state = 'executing', txid = NULL, error = '', amount = NULL, updated = ?2,
+                 attempt = attempt + 1 WHERE opid = ?1",
             params![opid, now()],
         )?;
-        Ok(())
+        Ok(c.query_row("SELECT attempt FROM ops WHERE opid = ?1", [opid], |r| r.get(0))?)
     }
 
-    pub fn set_built(&self, opid: &str, txid: &str, amount: u64) -> anyhow::Result<()> {
+    /// Record the txid a build produced. Refused unless `attempt` is still the
+    /// operation's current, executing attempt: the caller must then not broadcast.
+    pub fn set_built(&self, opid: &str, attempt: i64, txid: &str, amount: u64) -> anyhow::Result<()> {
         let c = self.conn.lock().unwrap();
         let n = c.execute(
-            "UPDATE ops SET txid = ?2, amount = ?3, updated = ?4 WHERE opid = ?1",
-            params![opid, txid, amount as i64, now()],
+            "UPDATE ops SET txid = ?3, amount = ?4, updated = ?5
+             WHERE opid = ?1 AND attempt = ?2 AND state = 'executing' AND txid IS NULL",
+            params![opid, attempt, txid, amount as i64, now()],
         )?;
         if n != 1 {
-            bail!("operation {opid} vanished");
+            bail!("operation {opid} attempt {attempt} is no longer current; not broadcasting");
         }
         Ok(())
     }
 
-    pub fn finish(&self, opid: &str, state: &str, error: &str) -> anyhow::Result<()> {
+    /// Record how an attempt ended. A finished or superseded attempt is left alone.
+    pub fn finish(&self, opid: &str, attempt: i64, state: &str, error: &str) -> anyhow::Result<()> {
         let c = self.conn.lock().unwrap();
-        c.execute("UPDATE ops SET state = ?2, error = ?3, updated = ?4 WHERE opid = ?1", params![opid, state, error, now()])?;
+        c.execute(
+            "UPDATE ops SET state = ?3, error = ?4, updated = ?5 WHERE opid = ?1 AND attempt = ?2 AND state = 'executing'",
+            params![opid, attempt, state, error, now()],
+        )?;
         Ok(())
+    }
+
+    /// Every operation of an account, for checks before deleting it.
+    pub fn for_account(&self, account: &str) -> anyhow::Result<Vec<Op>> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt = c.prepare(&format!("SELECT {} FROM ops WHERE account = ?1", Self::COLS))?;
+        let rows = stmt.query_map([account], Self::row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     pub fn delete_account(&self, account: &str) -> anyhow::Result<()> {
@@ -143,7 +169,7 @@ mod tests {
         let store = OpStore::open(&path).unwrap();
         store.insert("op-a", "key-a", "acct").unwrap();
         store.insert("op-b", "key-b", "acct").unwrap();
-        store.set_built("op-b", "txid-b", 5).unwrap();
+        store.set_built("op-b", 0, "txid-b", 5).unwrap();
         drop(store);
         // Both were mid-flight when the process died.
         let store = OpStore::open(&path).unwrap();
@@ -156,6 +182,26 @@ mod tests {
         assert!(store.get("op-b").unwrap().is_none());
         let secure: i64 = store.conn.lock().unwrap().query_row("PRAGMA secure_delete", [], |r| r.get(0)).unwrap();
         assert_eq!(secure, 1, "deleted rows are overwritten");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_superseded_attempt_records_nothing() {
+        let path = std::env::temp_dir().join(format!("uw-ops-{}.sqlite", uuid::Uuid::new_v4()));
+        let store = OpStore::open(&path).unwrap();
+        store.insert("op", "key", "acct").unwrap();
+        store.finish("op", 0, "failed", "build failed").unwrap();
+        // The API asks again: attempt 1 starts while attempt 0's leftovers still run.
+        assert_eq!(store.restart("op").unwrap(), 1);
+        assert!(store.set_built("op", 0, "stale-tx", 5).is_err(), "attempt 0 may not record a txid");
+        store.finish("op", 0, "success", "").unwrap();
+        assert_eq!(store.get("op").unwrap().unwrap().state, "executing", "attempt 0 may not finish attempt 1");
+        store.set_built("op", 1, "tx-1", 5).unwrap();
+        assert!(store.set_built("op", 1, "tx-again", 5).is_err(), "one txid per attempt");
+        store.finish("op", 1, "success", "").unwrap();
+        let op = store.get("op").unwrap().unwrap();
+        assert_eq!((op.state.as_str(), op.txid.as_deref()), ("success", Some("tx-1")));
+        assert_eq!(store.for_account("acct").unwrap().len(), 1);
         let _ = std::fs::remove_file(path);
     }
 }

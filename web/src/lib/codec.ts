@@ -4,6 +4,8 @@ import { hasOrchardReceiver } from "./ua.ts";
 export const MEMO_TAG = "UNL1";
 export const ZAT_PER_ZEC = 100_000_000;
 export const TICKET_QR_PREFIX = "unlisted";
+/** 512-byte memo minus "UNL1 ", a 10-character event id, a 43-character hash and two spaces. */
+export const MAX_REFUND_ADDRESS = 512 - (MEMO_TAG.length + 1 + 10 + 1 + 43 + 1);
 
 const enc = new TextEncoder();
 
@@ -122,6 +124,8 @@ export function addressProblem(address: string, network: string): string | null 
     return "That is an older Sapling address. Use your wallet's Unified Address (it starts with “u1”).";
   }
   if (!addressKind(a, network)) return "That does not look like a valid Zcash address.";
+  // The memo carries "UNL1 <event id> <ticket hash> <address>" in 512 bytes.
+  if (a.length > MAX_REFUND_ADDRESS) return "That address is too long to fit in the payment memo. Use your wallet's shielded address.";
   if (!hasOrchardReceiver(a, network)) {
     return "This address can't receive a private (Orchard) refund. Copy the shielded address from ZODL's Receive screen.";
   }

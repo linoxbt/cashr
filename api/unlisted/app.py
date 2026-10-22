@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 
 from .chain import ChainError, make_chain
@@ -69,6 +69,15 @@ class CreateEvent(BaseModel):
         if v is not None and v.tzinfo is None:
             raise ValueError("rsvp_closes_at needs a UTC offset")
         return v
+
+
+    @model_validator(mode="after")
+    def _closes_before_start(self) -> "CreateEvent":
+        if self.rsvp_closes_at is not None:
+            starts = datetime.fromisoformat(self.starts_at.replace("Z", "+00:00"))
+            if self.rsvp_closes_at > starts:
+                raise ValueError("RSVPs must close before the event starts")
+        return self
 
 
 class FundAddress(BaseModel):
@@ -162,7 +171,9 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         writer_lock.release()
 
     app = FastAPI(title="Unlisted API", version="0.1.0", lifespan=lifespan,
-                  docs_url="/docs", redoc_url=None)
+                  # The interactive API docs are for development only.
+                  docs_url="/docs" if settings.is_sim else None, openapi_url="/openapi.json" if settings.is_sim else None,
+                  redoc_url=None)
     app.state.engine = engine
     app.state.chain = chain
     app.state.writer_lock = writer_lock

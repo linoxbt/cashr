@@ -1,11 +1,11 @@
 "use client";
 
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { downloadQrPng, Qr } from "@/components/Qr";
 import { CopyField, Notice, PageState, Pill, Spinner, formatWhen, useMeta, usePoll } from "@/components/ui";
-import { api, ApiError, type PublicEvent, type TicketList } from "@/lib/api";
+import { api, ApiError, isEventId, type PublicEvent, type TicketList } from "@/lib/api";
 import {
   REJECTION_TEXT,
   addressProblem,
@@ -18,16 +18,45 @@ import {
   zatToZec,
   zip321,
 } from "@/lib/codec";
-import { forgetTicket, getTicket, saveTicket, type StoredTicket } from "@/lib/storage";
+import { TICKETS_KEY, forgetTicket, getTicket, saveTicket, type StoredTicket } from "@/lib/storage";
 
 export default function EventPage() {
   const { id } = useParams<{ id: string }>();
+  if (!isEventId(id)) return <PageState title="Event not found">Check the link you were given.</PageState>;
+  return <EventFor id={id} />;
+}
+
+function EventFor({ id }: { id: string }) {
   const [event, setEvent] = useState<PublicEvent | null>(null);
   const [list, setList] = useState<TicketList | null>(null);
   const [ticket, setTicket] = useState<StoredTicket | null>(null);
+  // Whether the ticket is actually in this browser's storage (it may be blocked or full).
+  const [persisted, setPersisted] = useState(true);
   const [error, setError] = useState<ApiError | null>(null);
+  const [loadedAt, setLoadedAt] = useState<Date | null>(null);
 
-  useEffect(() => setTicket(getTicket(id)), [id]);
+  useEffect(() => {
+    setTicket(getTicket(id));
+    // Another tab may RSVP or remove the ticket: follow it, never overwrite it.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === TICKETS_KEY) setTicket(getTicket(id));
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [id]);
+
+  // Poll quickly only while something can change for this visitor: a payment
+  // waiting to confirm, or a settlement in progress. Stop once it's final.
+  const pollRef = useRef<{ ticket: StoredTicket | null; event: PublicEvent | null; list: TicketList | null }>({ ticket, event, list });
+  pollRef.current = { ticket, event, list };
+  const interval = () => {
+    const { ticket: t, event: ev, list: l } = pollRef.current;
+    if (ev?.status === "purged") return null;
+    const mine = t && l?.tickets.find((x) => x.h === t.hash);
+    if (mine?.status === "refunded" || mine?.status === "forfeited") return null;
+    if (!t) return 30_000;
+    return mine && !mine.status ? 30_000 : 8_000;
+  };
 
   // Fetch the event's *whole* ticket list and look for ours locally, so the
   // server never sees a request about one particular ticket.
@@ -38,12 +67,14 @@ export default function EventPage() {
         setEvent(ev);
         setList(l);
         setError(null);
+        setLoadedAt(new Date());
       } catch (e) {
         if (e instanceof ApiError) setError(e);
       }
     },
-    8000,
-    [id],
+    interval,
+    // A new (or removed) ticket changes what is worth polling for: start over now.
+    [id, ticket?.hash],
   );
 
   if (error?.status === 404) return <PageState title="Event not found">Check the link you were given.</PageState>;
@@ -56,11 +87,16 @@ export default function EventPage() {
   return (
     <div className="mx-auto grid max-w-page gap-10 px-4 py-12 sm:px-6 lg:grid-cols-[1fr_26rem]">
       <EventDetails event={event} />
-      <div>
+      <div className="space-y-4">
+        {error && loadedAt && (
+          <Notice tone="warn" title="Connection lost">
+            Showing what was loaded at {loadedAt.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}. Retrying…
+          </Notice>
+        )}
         {ticket ? (
-          <TicketCard event={event} ticket={ticket} list={list} onForget={() => { forgetTicket(id); setTicket(null); }} />
+          <TicketCard event={event} ticket={ticket} list={list} persisted={persisted} onForget={() => { forgetTicket(id); setTicket(null); }} />
         ) : (
-          <RsvpCard event={event} onTicket={setTicket} />
+          <RsvpCard event={event} onTicket={(t, ok) => { setTicket(t); setPersisted(ok); }} />
         )}
       </div>
     </div>
@@ -95,6 +131,12 @@ function EventDetails({ event }: { event: PublicEvent }) {
           <dt className="eyebrow">Refundable deposit</dt>
           <dd className="mt-1 font-medium tabular-nums">{zatToZec(event.deposit_zat)} ZEC</dd>
         </div>
+        {event.rsvp_closes_at && (
+          <div className="card p-4">
+            <dt className="eyebrow">RSVPs close</dt>
+            <dd className="mt-1 font-medium">{formatWhen(event.rsvp_closes_at)}</dd>
+          </div>
+        )}
         <div className="card p-4">
           <dt className="eyebrow">Seats</dt>
           <dd className="mt-1 font-medium tabular-nums">
@@ -116,11 +158,12 @@ function EventDetails({ event }: { event: PublicEvent }) {
   );
 }
 
-function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: StoredTicket) => void }) {
+function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: StoredTicket, persisted: boolean) => void }) {
   const meta = useMeta();
   const [address, setAddress] = useState("");
   const [fresh, setFresh] = useState(false);
   const [touched, setTouched] = useState(false);
+  const [demoError, setDemoError] = useState<string | null>(null);
   // Addresses are checked against the server's network, so wait until it is known.
   const problem = meta ? addressProblem(address, meta.network) : null;
 
@@ -144,9 +187,22 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
     );
   }
 
+  async function fillDemoAddress() {
+    setDemoError(null);
+    try {
+      setAddress((await api.simAddress()).address);
+      setFresh(true);
+    } catch (e) {
+      setDemoError(e instanceof Error ? e.message : "Couldn't get a demo address");
+    }
+  }
+
   async function create() {
     setTouched(true);
     if (!meta || problem || !fresh) return;
+    // Another tab may have RSVP'd already: its ticket (perhaps paid) must not be replaced.
+    const existing = getTicket(event.id);
+    if (existing) return onTicket(existing, true);
     const secret = newSecret();
     const t: StoredTicket = {
       eventId: event.id,
@@ -157,9 +213,10 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
       title: event.title,
       startsAt: event.starts_at,
     };
-    // Saved before payment so the ticket survives a reload mid-way.
-    saveTicket(t);
-    onTicket(t);
+    // Saved before payment so the ticket survives a reload mid-way. Ask the
+    // browser not to evict it (Safari clears script storage after 7 idle days).
+    void navigator.storage?.persist?.().catch(() => false);
+    onTicket(t, saveTicket(t) && getTicket(event.id)?.secret === t.secret);
   }
 
   return (
@@ -181,6 +238,12 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
         onChange={(e) => setAddress(e.target.value)}
         onBlur={() => setTouched(true)}
       />
+      {meta?.chain === "sim" && (
+        <button type="button" className="btn-secondary mt-2 w-full" onClick={fillDemoAddress}>
+          Use a demo address (simulated chain)
+        </button>
+      )}
+      {demoError && <p className="mt-2 text-sm text-bad">{demoError}</p>}
       {touched && problem && <p className="mt-2 text-sm text-bad">{problem}</p>}
       <label className="mt-4 flex items-start gap-3 text-sm text-ink-2">
         <input type="checkbox" className="mt-0.5 h-4 w-4 accent-ink" checked={fresh} onChange={(e) => setFresh(e.target.checked)} />
@@ -198,14 +261,14 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
   );
 }
 
-function TicketCard({ event, ticket, list, onForget }: { event: PublicEvent; ticket: StoredTicket; list: TicketList | null; onForget: () => void }) {
+function TicketCard({ event, ticket, list, persisted, onForget }: { event: PublicEvent; ticket: StoredTicket; list: TicketList | null; persisted: boolean; onForget: () => void }) {
   if (event.status === "purged") return <Purged onForget={onForget} />;
   const mine = list?.tickets.find((t) => t.h === ticket.hash) ?? null;
   const rejected = list?.rejected.find((r) => r.h === ticket.hash) ?? null;
   // An accepted ticket wins: paying twice with the same memo gets the second
   // payment rejected as a duplicate, but the first one still holds the seat.
   if (!mine && rejected) return <Rejected event={event} reason={rejected.reason} onForget={onForget} />;
-  if (!mine) return <PayCard event={event} ticket={ticket} loaded={list !== null} onForget={onForget} />;
+  if (!mine) return <PayCard event={event} ticket={ticket} loaded={list !== null} persisted={persisted} onForget={onForget} />;
 
   const qr = ticketQr(event.id, ticket.secret);
   // Check-ins aren't published while the event runs (anyone could time them),
@@ -237,9 +300,30 @@ function TicketCard({ event, ticket, list, onForget }: { event: PublicEvent; tic
   );
 }
 
-function PayCard({ event, ticket, loaded, onForget }: { event: PublicEvent; ticket: StoredTicket; loaded: boolean; onForget: () => void }) {
+function PayCard({ event, ticket, loaded, persisted, onForget }: { event: PublicEvent; ticket: StoredTicket; loaded: boolean; persisted: boolean; onForget: () => void }) {
   const meta = useMeta();
-  const memo = useMemo(() => encodeMemo(event.id, ticket.hash, ticket.refundAddress), [event.id, ticket]);
+  const memo = useMemo(() => {
+    try {
+      return encodeMemo(event.id, ticket.hash, ticket.refundAddress);
+    } catch {
+      return null; // a stored refund address too long for a memo (checked before saving now)
+    }
+  }, [event.id, ticket]);
+  if (!memo) {
+    return (
+      <div className="card p-6">
+        <Notice tone="bad">This ticket&rsquo;s refund address is too long to fit in a payment memo. Start over with your wallet&rsquo;s shielded address.</Notice>
+        <div className="mt-5"><ForgetButton onForget={onForget} warn={false} label="Start over" /></div>
+      </div>
+    );
+  }
+  return <PayCardFor event={event} ticket={ticket} loaded={loaded} persisted={persisted} memo={memo} meta={meta} onForget={onForget} />;
+}
+
+function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onForget }: {
+  event: PublicEvent; ticket: StoredTicket; loaded: boolean; persisted: boolean; memo: Uint8Array; meta: ReturnType<typeof useMeta>; onForget: () => void;
+}) {
+  const sim = meta?.chain === "sim";
   const uri = zip321(event.address, event.deposit_zat, memo);
   const memoText = new TextDecoder().decode(memo);
   const [simBusy, setSimBusy] = useState(false);
@@ -280,44 +364,71 @@ function PayCard({ event, ticket, loaded, onForget }: { event: PublicEvent; tick
     );
   }
 
+  const qr = ticketQr(event.id, ticket.secret);
+  const saveImage = (
+    <button className="btn-secondary w-full" onClick={() => downloadQrPng(qr, `unlisted-${event.id}.png`)}>
+      Save ticket image
+    </button>
+  );
   return (
     <div className="card p-6">
       <div className="eyebrow">Step 2 of 2</div>
       <h2 className="mt-2 text-2xl ">Pay the {zatToZec(event.deposit_zat)} ZEC deposit</h2>
-      <p className="mt-1.5 text-sm text-ink-3">
-        Scan with ZODL or any Zcash wallet. The amount and memo are filled in for you. Don&rsquo;t change them.
-      </p>
       {!intact && <div className="mt-4"><Notice tone="bad">This ticket on your device looks damaged. Start over below.</Notice></div>}
-      <div className="mt-5 flex justify-center">
-        <Qr value={uri} size={248} label="Payment QR code" />
-      </div>
-      <a href={uri} className="btn-primary mt-5 w-full">Open in wallet app</a>
-      <p className="mt-3 text-xs leading-relaxed text-ink-3">
-        Pay from your <strong className="text-ink-2">shielded</strong> balance. A payment from a transparent (t-address)
-        balance shows your address and this exact amount on the public chain.
+      {!persisted && (
+        <div className="mt-4">
+          <Notice tone="bad" title="This browser isn't keeping your ticket">
+            Its storage is blocked or full, so the ticket disappears if this page closes. Save the ticket image below
+            before you pay: it is the only way in, and the only way to get your deposit back.
+          </Notice>
+        </div>
+      )}
+      <div className="mt-4">{saveImage}</div>
+      <p className="mt-2 text-xs text-ink-3">
+        Your ticket is ready now. Save it before paying, so a closed tab or a cleared browser can&rsquo;t lose it.
       </p>
+
+      {sim ? (
+        // The demo server's event addresses are made up: real ZEC sent to one is lost.
+        <div className="mt-5">
+          <Notice tone="warn" title="Demo server: simulated chain">
+            Nothing here moves real ZEC. Don&rsquo;t pay from a wallet; use the button below.
+          </Notice>
+          <button className="btn-primary mt-4 w-full" onClick={simulate} disabled={simBusy}>
+            {simBusy && <Spinner />} Simulate this payment
+          </button>
+          {simError && <p className="mt-2 text-sm text-bad">{simError}</p>}
+        </div>
+      ) : (
+        <>
+          <p className="mt-5 text-sm text-ink-3">
+            Scan with ZODL or any Zcash wallet. The amount and memo are filled in for you. Don&rsquo;t change them.
+          </p>
+          <div className="mt-5 flex justify-center">
+            <Qr value={uri} size={248} label="Payment QR code" />
+          </div>
+          <a href={uri} className="btn-primary mt-5 w-full">Open in wallet app</a>
+          <p className="mt-3 text-xs leading-relaxed text-ink-3">
+            Pay from your <strong className="text-ink-2">shielded</strong> balance. A payment from a transparent (t-address)
+            balance shows your address and this exact amount on the public chain.
+          </p>
+        </>
+      )}
 
       <div className="mt-5 flex items-center gap-2 rounded-lg bg-paper-2/60 px-3 py-2.5 text-sm text-ink-2">
         <Spinner className="text-ink-4" />
         {loaded ? "Waiting for your payment to confirm (about a minute after you send)…" : "Connecting…"}
       </div>
 
-      <details className="mt-5 text-sm">
-        <summary className="cursor-pointer font-medium text-ink-2">Enter the payment by hand</summary>
-        <div className="mt-4 space-y-4">
-          <CopyField label="Send to" value={event.address} />
-          <CopyField label="Amount (ZEC)" value={zatToZec(event.deposit_zat)} />
-          <CopyField label="Memo" value={memoText} hint="Paste it exactly. Without it, we can't refund you." />
-        </div>
-      </details>
-
-      {meta?.chain === "sim" && (
-        <div className="mt-5 border-t border-dashed border-ink/15 pt-5">
-          <button className="btn-secondary w-full" onClick={simulate} disabled={simBusy}>
-            {simBusy && <Spinner />} Simulate this payment (dev only)
-          </button>
-          {simError && <p className="mt-2 text-sm text-bad">{simError}</p>}
-        </div>
+      {!sim && (
+        <details className="mt-5 text-sm">
+          <summary className="cursor-pointer font-medium text-ink-2">Enter the payment by hand</summary>
+          <div className="mt-4 space-y-4">
+            <CopyField label="Send to" value={event.address} />
+            <CopyField label="Amount (ZEC)" value={zatToZec(event.deposit_zat)} />
+            <CopyField label="Memo" value={memoText} hint="Paste it exactly. Without it, we can't refund you." />
+          </div>
+        </details>
       )}
       <div className="mt-5">
         <ForgetButton onForget={onForget} warn label="Start over" />
@@ -337,7 +448,7 @@ function Rejected({ event, reason, onForget }: { event: PublicEvent; reason: str
           Your payment is being returned to your refund address, minus a small network fee.
         </p>
       )}
-      {event.status === "open" && event.seats_left > 0 && (
+      {event.accepting_rsvps && event.seats_left > 0 && (
         <div className="mt-5">
           <ForgetButton onForget={onForget} warn={false} label="Try again with a new ticket" />
         </div>

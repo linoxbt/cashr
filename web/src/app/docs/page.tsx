@@ -226,7 +226,7 @@ curl -fsSL https://raw.githubusercontent.com/linoxbt/cashr/main/deploy/install.s
                 [<C key="a">GET /meta</C>, "—", "Chain mode, network, current block, reject fee."],
                 [<C key="a">POST /events</C>, "—", "Create an event. Returns the event, the admin token and the door token (once)."],
                 [<C key="a">GET /events/:id</C>, "—", "Public event details and counts."],
-                [<C key="a">GET /events/:id/tickets</C>, "—", "Every ticket hash with its status, plus returned payments."],
+                [<C key="a">GET /events/:id/tickets</C>, "—", "Every ticket hash, plus returned payments. Statuses appear only once the event settles."],
                 [<C key="a">GET /events/:id/admin</C>, "Admin", "Everything stored for the event, the wallet balance and payouts."],
                 [<C key="a">POST /events/:id/admin/:action</C>, "Admin", <>Actions: <C>close</C>, <C>reopen</C>, <C>settle</C>, <C>retry</C>, <C>purge</C>, <C>scan</C>. Purge refuses while money is left in the event wallet.</>],
                 [<C key="a">POST /events/:id/admin/fund</C>, "Admin", <>Body <C>{`{"address"}`}</C>. Set the no-show fund address; a settled event&rsquo;s leftovers are swept to it.</>],

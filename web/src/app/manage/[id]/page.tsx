@@ -6,7 +6,7 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import { Qr } from "@/components/Qr";
 import { CopyField, Notice, PageState, Pill, Spinner, Stat, formatWhen, useMeta, usePoll } from "@/components/ui";
-import { api, ApiError, type AdminView, type PayoutStatus } from "@/lib/api";
+import { api, ApiError, isEventId, type AdminView, type PayoutStatus } from "@/lib/api";
 import { REJECTION_TEXT, addressProblem, zatToZec, zip321 } from "@/lib/codec";
 import { takeLinkToken } from "@/lib/storage";
 
@@ -32,6 +32,12 @@ const ACTIONS: Record<string, { label: string; confirm: string; tone: "primary" 
 
 export default function Manage() {
   const { id } = useParams<{ id: string }>();
+  if (!isEventId(id)) return <PageState title="This manage link isn't valid">Open the full manage link you saved.</PageState>;
+  return <ManageFor id={id} />;
+}
+
+function ManageFor({ id }: { id: string }) {
+  const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [token, setToken] = useState<string | null | undefined>(undefined);
   const [view, setView] = useState<AdminView | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
@@ -48,6 +54,7 @@ export default function Manage() {
       try {
         setView(await api.admin(id, token));
         setError(null);
+        setLoadedAt(new Date());
       } catch (e) {
         if (e instanceof ApiError) setError(e);
       }
@@ -121,6 +128,11 @@ export default function Manage() {
       </div>
 
       <div className="mt-6 space-y-3">
+        {error && loadedAt && (
+          <Notice tone="warn" title="Connection lost">
+            Showing the dashboard as of {loadedAt.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}. Retrying…
+          </Notice>
+        )}
         {actionError && <Notice tone="bad">{actionError}</Notice>}
         {view.wallet_error && <Notice tone="bad" title="Wallet unreachable">{view.wallet_error}</Notice>}
         {shortfall && confirming && (
@@ -261,6 +273,7 @@ function FundForm({ id, token, current, onChange }: { id: string; token: string;
 
 function MoneyTab({ view, token, onChange }: { view: AdminView; token: string; onChange: () => void }) {
   const ev = view.event;
+  const meta = useMeta();
   return (
     <div className="grid gap-6 lg:grid-cols-[1fr_20rem]">
       <div className="space-y-6">
@@ -329,13 +342,21 @@ function MoneyTab({ view, token, onChange }: { view: AdminView; token: string; o
       </div>
       <div className="card h-fit space-y-4 p-5">
         <div className="text-sm font-semibold">Event wallet</div>
-        <div className="flex justify-center">
-          <Qr value={zip321(ev.address, 100_000)} size={200} label="Fee top-up QR code" />
-        </div>
-        <p className="text-xs text-ink-3">
-          Scan to send a 0.001 ZEC fee top-up. Payments without an RSVP memo are treated as top-ups.
-        </p>
-        <CopyField label="Address" value={ev.address} />
+        {ev.status === "purged" ? (
+          <p className="text-xs text-ink-3">Deleted with the event, along with its keys. Don&rsquo;t send anything to its old address.</p>
+        ) : meta?.chain === "sim" ? (
+          <p className="text-xs text-ink-3">Simulated chain: this wallet holds no real ZEC, and its address can&rsquo;t receive any.</p>
+        ) : (
+          <>
+            <div className="flex justify-center">
+              <Qr value={zip321(ev.address, 100_000)} size={200} label="Fee top-up QR code" />
+            </div>
+            <p className="text-xs text-ink-3">
+              Scan to send a 0.001 ZEC fee top-up. Payments without an RSVP memo are treated as top-ups.
+            </p>
+            <CopyField label="Address" value={ev.address} />
+          </>
+        )}
         {ev.status !== "purged" && (
           <div className="border-t border-ink/10 pt-4">
             {ev.forfeit_address && <CopyField label="No-show fund" value={ev.forfeit_address} />}
@@ -364,20 +385,23 @@ function SeizedTab({ view }: { view: AdminView }) {
         returned: view.event.rejected_count,
       },
     },
-    rsvps: view.rsvps.map((r) => ({ ticket_hash: r.ticket_hash, refund_address: r.refund_address, checked_in: r.checked_in, status: r.status })),
-    deposits: view.deposits.map((d) => ({ txid: d.txid, amount_zat: d.amount_zat, kind: d.kind })),
+    fund_address: view.event.forfeit_address || null,
+    rsvps: view.rsvps.map((r) => ({ seat: r.seat, ticket_hash: r.ticket_hash, refund_address: r.refund_address, checked_in: r.checked_in, status: r.status })),
+    deposits: view.deposits.map((d) => ({ txid: d.txid, amount_zat: d.amount_zat, kind: d.kind, reason: d.reason || undefined })),
+    payouts: view.payouts.map((p) => ({ kind: p.kind, status: p.status, recipients: p.recipients, amount_zat: p.amount_zat, txid: p.txid || undefined })),
   };
   return (
     <div className="grid gap-6 lg:grid-cols-[22rem_1fr]">
       <div className="space-y-4 text-sm leading-relaxed text-ink-2">
         <h2 className="text-3xl text-ink">Imagine this server was seized tonight.</h2>
         <p>
-          On the right is every record Unlisted holds for this event. Look for a name, an email, a phone number or the
-          address someone paid from. None of them exist.
+          On the right is every record Unlisted holds for this event, except two it can&rsquo;t show you: the SHA-256
+          hashes of your manage and door links, and the event wallet&rsquo;s encrypted seed. Look for a name, an email, a
+          phone number or the address someone paid from. None of them exist.
         </p>
         <ul className="list-disc space-y-1.5 pl-5">
           <li><strong>Ticket hashes</strong> are SHA-256 of secrets that live only on attendees&rsquo; phones.</li>
-          <li><strong>Refund addresses</strong> are one-time shielded addresses. The chain can&rsquo;t link them to their owners. They&rsquo;re shortened here because you never need them; the server keeps them in full until the purge.</li>
+          <li><strong>Refund addresses</strong> are one-time shielded addresses. The chain can&rsquo;t link them to their owners. They&rsquo;re shortened here because you never need them; the server keeps them in full until the purge, inside the RSVPs and the refund payouts.</li>
           <li><strong>Deposit transactions</strong> are shielded. Their sender is hidden from everyone, us included.</li>
         </ul>
         <p>

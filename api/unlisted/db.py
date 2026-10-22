@@ -52,6 +52,9 @@ class Event(Base):
     status: Mapped[str] = mapped_column(String(12), default="open")
     # Highest block whose deposits are ingested; scans start a little below it.
     scan_height: Mapped[int] = mapped_column(Integer, default=0)
+    # Chain height when RSVPs closed (deadline or organiser), so a payment sent
+    # just before is judged by when it was mined, not when it was processed.
+    close_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     account_ref: Mapped[str] = mapped_column(String(64))
     address: Mapped[str] = mapped_column(String(600))
     admin_token_hash: Mapped[str] = mapped_column(String(64))

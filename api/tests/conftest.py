@@ -12,7 +12,9 @@ from unlisted.config import Settings
 
 @pytest.fixture
 def chain():
-    return SimChain("main")
+    # Fast confirmations keep the logic tests short. test_realistic.py runs the
+    # money paths under the real wallet's timing (10/3 confirmations, async sends).
+    return SimChain("main", received_conf=1, change_conf=1)
 
 
 @pytest.fixture

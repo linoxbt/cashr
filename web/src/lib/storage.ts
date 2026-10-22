@@ -14,7 +14,8 @@ export interface StoredTicket {
   startsAt?: string;
 }
 
-const TICKETS = "unlisted.tickets.v1";
+export const TICKETS_KEY = "unlisted.tickets.v1";
+const TICKETS = TICKETS_KEY;
 
 function read<T>(store: Storage | undefined, key: string, fallback: T): T {
   try {
@@ -59,6 +60,16 @@ export function readJson<T>(key: string, fallback: T): T {
 
 export function writeJson(key: string, value: unknown): boolean {
   return write(local(), key, value);
+}
+
+export function forgetKeys(keys: string[]): void {
+  for (const k of keys) {
+    try {
+      local()?.removeItem(k);
+    } catch {
+      /* storage unavailable: nothing was kept */
+    }
+  }
 }
 
 /**

@@ -182,7 +182,8 @@ export function Crt({ children }: { children: ReactNode }) {
         </footer>
 
         <div className="crt-fx crt-scanlines" />
-        <div className="crt-fx crt-grain" />
+        {/* A door phone runs this page for hours: keep its grain still to save battery. */}
+        <div className={`crt-fx crt-grain${pathname?.startsWith("/door/") ? " crt-still" : ""}`} />
         <div className="crt-fx crt-glare" />
         <div className="crt-fx crt-vignette" />
       </div>
