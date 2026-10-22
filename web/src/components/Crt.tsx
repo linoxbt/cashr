@@ -1,12 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { useMeta } from "@/components/ui";
 import { API_CONFIGURED } from "@/lib/api";
-import { BrandMark, Wordmark } from "@/components/Logo";
+import { Wordmark } from "@/components/Logo";
 import { DEMO_URL, SITE_URL } from "@/lib/site";
 import { THEME_KEY, readJson, writeJson, type Theme } from "@/lib/storage";
 
@@ -18,18 +18,38 @@ const NAV = [
   { href: "/docs", label: "Docs" },
 ];
 
-/** The logo in the header: the brand mark and the name. */
+/** The logo in the header: the brand mark and the name, on every screen size. */
 export function Logo({ compact = false }: { compact?: boolean }) {
   return (
     <Link href="/" className="group flex flex-col items-center text-ink" aria-label="cashr home">
-      {compact ? <BrandMark size={20} /> : <Wordmark size={24} />}
+      <Wordmark size={compact ? 28 : 36} />
       {!compact && (
-        <span className="osd mt-1 flex w-full justify-between gap-6 border-t border-ink/25 pt-0.5 text-[10px] text-ink-3">
+        <span className="osd mt-1.5 flex w-full justify-between gap-6 border-t border-ink/25 pt-0.5 text-[10px] text-ink-3">
           <span>Shielded</span>
           <span>2026</span>
         </span>
       )}
     </Link>
+  );
+}
+
+/**
+ * Back: the previous page when you got here inside the app; the home page when
+ * you arrived from a link (going "back" would leave the site). Hidden at home.
+ */
+function BackButton({ inApp, className = "" }: { inApp: boolean; className?: string }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  if (pathname === "/") return null;
+  return (
+    <button
+      type="button"
+      onClick={() => (inApp ? router.back() : router.push("/"))}
+      className={`glitch flex items-center gap-1.5 text-ink-2 hover:text-ink sm:uppercase ${className}`}
+      aria-label="Go back"
+    >
+      <span aria-hidden>←</span> Back
+    </button>
   );
 }
 
@@ -133,6 +153,13 @@ export function Crt({ children }: { children: ReactNode }) {
   const [bw, setBw] = useState(false);
   const [menu, setMenu] = useState(false);
   const [theme, toggleTheme] = useTheme();
+  // Pages seen in this tab, so Back knows whether there's an in-app page to return to.
+  const pagesSeen = useRef(0);
+  const [inApp, setInApp] = useState(false);
+  useEffect(() => {
+    pagesSeen.current += 1;
+    setInApp(pagesSeen.current > 1);
+  }, [pathname]);
 
   useEffect(() => setBw(readJson<boolean>("cashr.bw", false)), []);
   useEffect(() => {
@@ -152,13 +179,14 @@ export function Crt({ children }: { children: ReactNode }) {
       <div className={`crt-screen crt-boot ${bw ? "bw" : ""}`}>
         <div ref={scroller} className="crt-scroll">
           <DemoBanner />
-          <div className="min-h-full px-1 pb-24 pt-24 sm:pb-24 sm:pt-32">{children}</div>
+          <div className="min-h-full px-1 pb-24 pt-24 sm:pb-24 sm:pt-36">{children}</div>
         </div>
 
         {/* On-screen display: top */}
         <header className="osd absolute inset-x-0 top-0 z-20 bg-gradient-to-b from-screen-2 via-screen-2/90 to-transparent px-5 pb-6 pt-5 sm:px-12 sm:pt-9">
           <div className="hidden grid-cols-[1fr_auto_1fr] items-start sm:grid">
-            <div className="flex items-center gap-8 pt-1.5 lg:gap-28">
+            <div className="flex items-center gap-8 pt-1.5 lg:gap-16">
+              <BackButton inApp={inApp} />
               <Link href="/" className="glitch flex items-center gap-1.5 text-ink-2 hover:text-ink">
                 <span aria-hidden className="inline-block h-2.5 w-2.5 bg-current" />
                 Home
@@ -171,15 +199,14 @@ export function Crt({ children }: { children: ReactNode }) {
               <DemoLink />
             </nav>
           </div>
-          <div className="flex items-center justify-between sm:hidden">
+          <div className="flex items-center justify-between gap-3 sm:hidden">
             <Logo compact />
-            <Link href="/" className="flex items-center gap-1.5 text-ink-2">
-              <span aria-hidden className="inline-block h-2.5 w-2.5 bg-current" />
-              Home
-            </Link>
-            <button className="text-ink-2" onClick={() => setMenu((m) => !m)} aria-expanded={menu} aria-controls="osd-menu">
-              Menu [{menu ? "–" : "+"}]
-            </button>
+            <div className="flex items-center gap-5">
+              <BackButton inApp={inApp} />
+              <button className="text-ink-2" onClick={() => setMenu((m) => !m)} aria-expanded={menu} aria-controls="osd-menu">
+                Menu [{menu ? "–" : "+"}]
+              </button>
+            </div>
           </div>
         </header>
 
