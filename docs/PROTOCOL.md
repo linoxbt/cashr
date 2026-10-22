@@ -53,7 +53,9 @@ A note is processed once it has `UNLISTED_MIN_CONF` confirmations, in `(height, 
    (status not `open`, or past `rsvp_closes_at`), amount ≠ deposit, duplicate ticket hash, refund address used
    before (checked against an HMAC-SHA256 digest under `UNLISTED_SECRET`), or event full. A return that would be
    ≤ 0 is kept as float.
-4. **Otherwise accepted:** seat = next number, digest of the refund address recorded.
+4. **Otherwise accepted:** a random free seat (counting up would reveal payment order), and a digest of the refund
+   address recorded with its period. Digests are forgotten after one to two periods of
+   `UNLISTED_ADDRESS_MEMORY_DAYS` (default 365), since they outlive purges.
 
 Events expose `accepting_rsvps` (open and before the deadline); the RSVP page shows payment details only while it
 is true.
@@ -72,20 +74,31 @@ Refunds, returns and sweeps are payouts: `queued → submitted → broadcast →
 ## Settlement
 
 * Checked-in RSVPs are refunded the full deposit in batched sends (`UNLISTED_REFUND_BATCH` recipients each) with
-  the `FullPrivacy` policy. Fees come from forfeits and float. RSVPs that were not checked in are forfeited.
+  the `FullPrivacy` policy. Server-written memos never name the event, because they stay in the recipient's wallet
+  for good: refunds say `Unlisted: deposit refunded.`, returns `Unlisted: payment returned (<reason>).`, sweeps
+  `Unlisted: no-show deposits.` Fees come from forfeits and float. RSVPs that were not checked in are forfeited.
 * When every payout is `done` and nothing in the event wallet is still confirming, the whole spendable balance minus
   the ZIP 317 fee is swept to the no-show fund address (`z_sweep`), repeating until less than `UNLISTED_DUST_ZAT`
   remains. Then the event is `settled`.
 * Without a fund address the money stays in the event wallet. The organiser can add one at any time
   (`POST /events/{id}/admin/fund`); a settled event then goes back to `settling` and sweeps.
 * **Purge** (only when `settled` and the wallet holds at most `UNLISTED_DUST_ZAT`) deletes the event's wallet
-  account, its transactions and memos, and its seed, then all RSVP, deposit and payout rows, plus location, details
-  and fund address. Aggregate counts stay. Payments sent to a purged event can't be returned.
+  account, its transactions and memos, and its seed, then all RSVP, deposit and payout rows. It also wipes the title
+  (to `Purged event`), start and close times, location, details, event address and fund address: attendees' wallets
+  keep the event id from their deposit memo, so nothing left may name or date the event. Aggregate counts stay.
+  Payments sent to a purged event can't be returned.
 
 ## Privacy-relevant request patterns
 
 * Attendees never POST anything. Confirmation polling fetches `GET /events/{id}/tickets` (every hash) and matches
-  locally.
+  locally. The list is sorted by hash. While the event is open or closed it holds hashes only (`{"h": …}`), never
+  check-ins: anyone can read it, and watching flags flip would time each ticket at the door. Once settlement starts,
+  every ticket's `status` (`refunding`, `refunded`, `forfeited`) appears at once.
+* The ticket list page (`/tickets`) never fetches all held events together, which would link them; each is checked
+  only when its holder asks.
+* The wallet reaches lightwalletd through Tor by default (`UW_SOCKS_PROXY`), with a fresh circuit for every
+  transaction it fetches. Otherwise lightwalletd's operator sees the server fetch exactly the RSVP transactions, and
+  can match them to attendees' wallets broadcasting them through the same server. Txids are logged at debug only.
 * Admin/door tokens live in the URL fragment, which browsers never send. The client moves them to `sessionStorage`,
   strips them from the address bar, and sends them as `Authorization: Bearer`.
 * The API runs with `--no-access-log` and keeps no IP addresses. Hosting providers in front of it may still log them.

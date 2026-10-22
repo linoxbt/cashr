@@ -154,6 +154,8 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
       hash: await ticketHash(secret),
       refundAddress: address.trim(),
       createdAt: new Date().toISOString(),
+      title: event.title,
+      startsAt: event.starts_at,
     };
     // Saved before payment so the ticket survives a reload mid-way.
     saveTicket(t);
@@ -197,6 +199,7 @@ function RsvpCard({ event, onTicket }: { event: PublicEvent; onTicket: (t: Store
 }
 
 function TicketCard({ event, ticket, list, onForget }: { event: PublicEvent; ticket: StoredTicket; list: TicketList | null; onForget: () => void }) {
+  if (event.status === "purged") return <Purged onForget={onForget} />;
   const mine = list?.tickets.find((t) => t.h === ticket.hash) ?? null;
   const rejected = list?.rejected.find((r) => r.h === ticket.hash) ?? null;
   // An accepted ticket wins: paying twice with the same memo gets the second
@@ -205,31 +208,30 @@ function TicketCard({ event, ticket, list, onForget }: { event: PublicEvent; tic
   if (!mine) return <PayCard event={event} ticket={ticket} loaded={list !== null} onForget={onForget} />;
 
   const qr = ticketQr(event.id, ticket.secret);
+  // Check-ins aren't published while the event runs (anyone could time them),
+  // so the ticket says "going" until settlement reveals every outcome at once.
   const state = mine.status === "refunded"
     ? { tone: "ok" as const, label: "Deposit refunded", text: "Thanks for coming. Your deposit is back in your wallet." }
     : mine.status === "refunding"
       ? { tone: "ok" as const, label: "Refund on its way", text: "Your refund is being sent to the address you gave." }
       : mine.status === "forfeited"
         ? { tone: "warn" as const, label: "Deposit forfeited", text: "This ticket wasn't checked in, so the deposit went to the group's fund." }
-        : mine.checked_in
-          ? { tone: "ok" as const, label: "Checked in", text: "Enjoy the event. Your deposit comes back after it ends." }
-          : { tone: "gold" as const, label: "You're going", text: "Show this code at the door. Screenshot it or save the image in case you're offline." };
+        : { tone: "gold" as const, label: "You're going", text: "Show this code at the door; the door confirms when you're in. Screenshot it or save the image in case you're offline. Your deposit comes back after the event." };
 
   return (
     <div className="card p-6">
       <div className="flex items-center justify-between">
         <Pill tone={state.tone === "gold" ? "gold" : state.tone}>{state.label}</Pill>
-        <span className="text-sm text-ink-3">Seat {mine.seat}</span>
       </div>
       <div className="mt-5 flex justify-center">
         <Qr value={qr} size={260} label="Your ticket QR code" />
       </div>
       <p className="mt-5 text-center text-sm text-ink-2">{state.text}</p>
       <div className="mt-5 grid gap-2">
-        <button className="btn-secondary" onClick={() => downloadQrPng(qr, `unlisted-${event.id}.png`, event.title)}>
+        <button className="btn-secondary" onClick={() => downloadQrPng(qr, `unlisted-${event.id}.png`)}>
           Save ticket image
         </button>
-        <ForgetButton onForget={onForget} warn={!mine.checked_in && mine.status === "confirmed"} />
+        <ForgetButton onForget={onForget} warn={mine.status === undefined || mine.status === "confirmed"} />
       </div>
     </div>
   );
@@ -340,6 +342,20 @@ function Rejected({ event, reason, onForget }: { event: PublicEvent; reason: str
           <ForgetButton onForget={onForget} warn={false} label="Try again with a new ticket" />
         </div>
       )}
+    </div>
+  );
+}
+
+function Purged({ onForget }: { onForget: () => void }) {
+  return (
+    <div className="card p-6">
+      <Pill>Event over · data deleted</Pill>
+      <h2 className="mt-3 text-2xl ">Nothing is left to show</h2>
+      <p className="mt-2 text-sm text-ink-2">
+        The organiser purged this event: its tickets, payments and wallet keys are gone from the server. Your ticket is
+        now the only record that you RSVP&rsquo;d, so you may want to remove it from this device.
+      </p>
+      <button className="btn-primary mt-5 w-full" onClick={onForget}>Remove ticket from this device</button>
     </div>
   );
 }

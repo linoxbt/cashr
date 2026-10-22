@@ -37,7 +37,8 @@ export type RsvpStatus = "confirmed" | "refunding" | "refunded" | "forfeited";
 
 export interface TicketList {
   status: EventStatus;
-  tickets: { h: string; seat: number; status: RsvpStatus; checked_in: boolean }[];
+  /** Statuses appear only once settlement starts; during the event the list shows hashes alone. */
+  tickets: { h: string; status?: RsvpStatus }[];
   rejected: { h: string; reason: string }[];
 }
 
@@ -48,7 +49,7 @@ export interface AdminView {
   pending_zat: number | null;
   wallet_error: string;
   rsvps: { seat: number; ticket_hash: string; refund_address: string; status: RsvpStatus; checked_in: boolean }[];
-  deposits: { txid: string; pool: string; index: number; amount_zat: number; height: number; kind: string; reason: string }[];
+  deposits: { txid: string; pool: string; index: number; amount_zat: number; kind: string; reason: string }[];
   payouts: { id: number; kind: string; status: PayoutStatus; recipients: number; amount_zat: number; txid: string; error: string }[];
 }
 

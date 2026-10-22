@@ -80,6 +80,8 @@ ufw --force enable >/dev/null
 
 say "Downloading and starting"
 if docker compose --profile https pull --quiet wallet api caddy; then
+  # Tor is a small local build from Alpine's package.
+  docker compose build --quiet tor
   docker compose --profile https up -d --no-build
 else
   # No prebuilt image (fork, or registry unreachable): build from source.
@@ -118,10 +120,14 @@ Unlisted backend is running.
   Next step: set NEXT_PUBLIC_API_URL=https://$DOMAIN on the web app and redeploy it.
 
 Back up, separately and offline:
-  1. The wallet volume:  docker run --rm -v unlisted_wallet-data:/d -v \$PWD:/b alpine tar czf /b/wallet-backup.tgz -C /d .
+  1. The wallet volume, encrypted (you choose a passphrase):
+       docker run --rm -v unlisted_wallet-data:/d alpine tar cz -C /d . | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -out wallet-backup.tgz.enc
+     Restore:
+       openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in wallet-backup.tgz.enc | docker run --rm -i -v unlisted_wallet-data:/d alpine tar xz -C /d
   2. UW_SEED_KEY from $DIR/.env
-Together they control every live event's deposits. Neither alone is enough.
-A backup still holds the keys and records of events purged after it was taken: replace old backups after a purge.
+Spending needs both. Privacy doesn't: the volume alone holds every live event's ticket hashes and refund
+addresses, so never keep it unencrypted. A backup also keeps events purged after it was taken: replace old
+backups after a purge.
 EOF
 if [ "$NEW" = 1 ]; then
   echo

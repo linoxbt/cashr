@@ -23,6 +23,9 @@ class Settings:
     )
     # Keys the refund-address reuse check. Must be stable and secret in production.
     secret: str = field(default_factory=lambda: os.environ.get("UNLISTED_SECRET", "dev-only-secret"))
+    # Reused refund addresses are remembered (as keyed digests) for one to two
+    # periods of this many days, then forgotten.
+    address_memory_days: int = field(default_factory=lambda: _int("UNLISTED_ADDRESS_MEMORY_DAYS", 365))
 
     rpc_url: str = field(default_factory=lambda: os.environ.get("UNLISTED_RPC_URL", "http://127.0.0.1:8232"))
     rpc_user: str = field(default_factory=lambda: os.environ.get("UNLISTED_RPC_USER", ""))

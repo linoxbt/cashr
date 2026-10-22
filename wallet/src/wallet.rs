@@ -14,7 +14,7 @@ use rand::rngs::OsRng;
 use secrecy::ExposeSecret;
 use tokio::sync::Mutex;
 use tonic::Code;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use zcash_address::ZcashAddress;
 use zcash_client_backend::{
     data_api::{
@@ -251,14 +251,14 @@ impl Wallet {
             for request in requests {
                 match &request {
                     TransactionDataRequest::GetStatus(txid) => {
-                        let status = match self.fetch_tx(client, tip, *txid).await? {
+                        let status = match self.fetch_tx_isolated(client, tip, *txid).await? {
                             None => TransactionStatus::TxidNotRecognized,
                             Some((_, Some(h))) => TransactionStatus::Mined(h),
                             Some((_, None)) => TransactionStatus::NotInMainChain,
                         };
                         db.set_transaction_status(*txid, status)?;
                     }
-                    TransactionDataRequest::Enhancement(txid) => match self.fetch_tx(client, tip, *txid).await? {
+                    TransactionDataRequest::Enhancement(txid) => match self.fetch_tx_isolated(client, tip, *txid).await? {
                         None => db.set_transaction_status(*txid, TransactionStatus::TxidNotRecognized)?,
                         Some((tx, mined)) => decrypt_and_store_transaction(&self.params, db, &tx, mined)?,
                     },
@@ -268,6 +268,22 @@ impl Wallet {
                 done.insert(request);
             }
         }
+    }
+
+    /// Fetches one of this wallet's transactions. Through Tor, each fetch gets a
+    /// fresh connection and circuit, so lightwalletd can't group the transactions
+    /// one server asks about (an event's deposits) by connection.
+    async fn fetch_tx_isolated(
+        &self,
+        client: &mut Client,
+        tip: BlockHeight,
+        txid: TxId,
+    ) -> anyhow::Result<Option<(Transaction, Option<BlockHeight>)>> {
+        if !self.endpoint.isolated() {
+            return self.fetch_tx(client, tip, txid).await;
+        }
+        let mut fresh = self.endpoint.connect().await?;
+        self.fetch_tx(&mut fresh, tip, txid).await
     }
 
     async fn fetch_tx(
@@ -499,7 +515,9 @@ impl Wallet {
                     return Ok(opid);
                 }
                 Some(TxState::Expired) => {
-                    info!(%txid, "transaction expired unmined; building a replacement");
+                    // Txids stay out of the logs: they outlive a purge and match attendees' wallets.
+                    debug!(%txid, "transaction expired unmined; building a replacement");
+                    info!("transaction expired unmined; building a replacement");
                     self.ops.restart(&opid)?;
                     opid
                 }
@@ -515,7 +533,7 @@ impl Wallet {
         tokio::spawn(async move {
             match wallet.build_and_broadcast(&id, &account, kind).await {
                 Ok(txid) => {
-                    info!(%txid, "broadcast");
+                    debug!(%txid, "broadcast");
                     let _ = wallet.ops.finish(&id, "success", "");
                 }
                 Err(e) => {
@@ -540,7 +558,10 @@ impl Wallet {
             Ok(()) => {
                 let _ = self.ops.finish(opid, "success", "");
             }
-            Err(e) => warn!(%txid, error = %e, "rebroadcast failed"),
+            Err(e) => {
+                debug!(%txid, "rebroadcast failed");
+                warn!(error = %e, "rebroadcast failed")
+            }
         }
     }
 

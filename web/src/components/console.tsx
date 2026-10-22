@@ -8,9 +8,8 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 
 import { Pill, Spinner, formatWhen, usePoll } from "@/components/ui";
 import { API_CONFIGURED, api, type Meta, type PublicEvent, type RsvpStatus } from "@/lib/api";
-import { zatToZec } from "@/lib/codec";
 import { linkTarget } from "@/lib/links";
-import { forgetEvent, listSavedEvents, listTickets, type SavedEvent, type StoredTicket } from "@/lib/storage";
+import { forgetEvent, forgetTicket, listSavedEvents, listTickets, type SavedEvent, type StoredTicket } from "@/lib/storage";
 
 export function Channel({ n, title, children }: { n: string; title: string; children: ReactNode }) {
   return (
@@ -122,93 +121,122 @@ export function OpenLink({
   );
 }
 
-type TicketRow = {
-  ticket: StoredTicket;
-  event?: PublicEvent;
-  status?: RsvpStatus | "pending" | "returned";
-  checkedIn?: boolean;
-  gone?: boolean;
-};
+type TicketStatus = RsvpStatus | "going" | "pending" | "returned" | "gone";
 
-function ticketPill(row: TicketRow) {
-  if (row.gone) return <Pill>Event over</Pill>;
-  switch (row.status) {
-    case undefined: return <Pill>…</Pill>;
+function ticketPill(status: TicketStatus | undefined) {
+  switch (status) {
+    case undefined: return null;
+    case "gone": return <Pill>Event over</Pill>;
     case "pending": return <Pill tone="warn">Awaiting payment</Pill>;
     case "returned": return <Pill tone="bad">Payment returned</Pill>;
     case "refunded": return <Pill tone="ok">Refunded</Pill>;
     case "refunding": return <Pill tone="ok">Refund sending</Pill>;
     case "forfeited": return <Pill tone="warn">Forfeited</Pill>;
-    default: return row.checkedIn ? <Pill tone="ok">Checked in</Pill> : <Pill tone="gold">Going</Pill>;
+    default: return <Pill tone="gold">Going</Pill>;
   }
 }
 
-export function MyTickets() {
-  const [rows, setRows] = useState<TicketRow[] | null>(null);
-  useEffect(() => {
-    const tickets = listTickets();
-    setRows(tickets.map((ticket) => ({ ticket })));
-    tickets.forEach(async (ticket, i) => {
-      try {
-        // Fetch the event's whole ticket list, never one ticket, so the server can't tell which is ours.
-        const [event, list] = await Promise.all([api.event(ticket.eventId), api.tickets(ticket.eventId)]);
-        const mine = list.tickets.find((t) => t.h === ticket.hash);
-        const returned = list.rejected.some((r) => r.h === ticket.hash);
-        const next: TicketRow = {
-          ticket,
-          event,
-          status: mine ? mine.status : returned ? "returned" : "pending",
-          checkedIn: mine?.checked_in,
-          gone: event.status === "purged",
-        };
-        setRows((prev) => prev && prev.map((r, j) => (j === i ? next : r)));
-      } catch {
-        /* offline: keep the row without live status */
-      }
-    });
-  }, []);
+/** One event's status for a held ticket, from that event's whole ticket list. */
+async function checkTicket(ticket: StoredTicket): Promise<TicketStatus> {
+  const [event, list] = await Promise.all([api.event(ticket.eventId), api.tickets(ticket.eventId)]);
+  if (event.status === "purged") return "gone";
+  const mine = list.tickets.find((t) => t.h === ticket.hash);
+  if (mine) return mine.status ?? "going";
+  return list.rejected.some((r) => r.h === ticket.hash) ? "returned" : "pending";
+}
 
-  if (rows === null) return <Spinner />;
-  if (rows.length === 0) {
+// Tickets are listed from this device alone. Fetching every event's list at
+// once would tell the server (and anyone watching the connection) that one
+// browser holds tickets to all of them, so each is checked only when asked.
+export function MyTickets() {
+  const [tickets, setTickets] = useState<StoredTicket[] | null>(null);
+  const [status, setStatus] = useState<Record<string, TicketStatus | "checking" | "offline">>({});
+  useEffect(() => setTickets(listTickets()), []);
+
+  async function check(ticket: StoredTicket) {
+    setStatus((s) => ({ ...s, [ticket.eventId]: "checking" }));
+    try {
+      const st = await checkTicket(ticket);
+      setStatus((s) => ({ ...s, [ticket.eventId]: st }));
+    } catch {
+      setStatus((s) => ({ ...s, [ticket.eventId]: "offline" }));
+    }
+  }
+
+  function remove(ids: string[]) {
+    ids.forEach(forgetTicket);
+    setTickets(listTickets());
+  }
+
+  if (tickets === null) return <Spinner />;
+  if (tickets.length === 0) {
     return (
       <p className="text-sm leading-relaxed text-ink-3">
         No tickets on this device yet. When you RSVP, your ticket is kept here, and only here.
       </p>
     );
   }
+  const over = tickets.filter((t) => status[t.eventId] === "gone").map((t) => t.eventId);
   return (
-    <ul className="-mx-2 divide-y divide-ink/[0.08]">
-      {rows.map((row) => (
-        <li key={row.ticket.eventId}>
-          <Link href={`/e/${row.ticket.eventId}`} className="flex items-center justify-between gap-4 rounded px-2 py-3 hover:bg-white/[0.03]">
-            <div className="min-w-0">
-              <div className="truncate font-medium">{row.event?.title ?? row.ticket.eventId}</div>
-              <div className="osd mt-0.5 text-[11px] text-ink-4">
-                {row.event ? `${formatWhen(row.event.starts_at)} · ${zatToZec(row.event.deposit_zat)} ZEC` : "Loading…"}
+    <div>
+      <ul className="-mx-2 divide-y divide-ink/[0.08]">
+        {tickets.map((t) => {
+          const st = status[t.eventId];
+          return (
+            <li key={t.eventId} className="flex items-center justify-between gap-3 px-2 py-3">
+              <Link href={`/e/${t.eventId}`} className="min-w-0 hover:underline">
+                <div className="truncate font-medium">{t.title ?? t.eventId}</div>
+                <div className="osd mt-0.5 text-[11px] text-ink-4">{t.startsAt ? formatWhen(t.startsAt) : "Open to see details"}</div>
+              </Link>
+              <div className="shrink-0">
+                {st === "checking" ? (
+                  <Spinner />
+                ) : st === undefined || st === "offline" ? (
+                  <button className="btn-ghost px-2 py-1.5 text-[11px]" onClick={() => check(t)}>
+                    {st === "offline" ? "Offline · retry" : "Check status"}
+                  </button>
+                ) : (
+                  ticketPill(st)
+                )}
               </div>
-            </div>
-            <div className="shrink-0">{ticketPill(row)}</div>
-          </Link>
-        </li>
-      ))}
-    </ul>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="mt-4 flex flex-wrap gap-2">
+        {over.length > 0 && (
+          <button className="btn-secondary px-3 py-1.5 text-xs" onClick={() => remove(over)}>
+            Remove {over.length} ticket{over.length === 1 ? "" : "s"} for past events
+          </button>
+        )}
+        <button
+          className="btn-ghost px-3 py-1.5 text-xs"
+          onClick={() => {
+            if (!window.confirm("Remove every ticket from this device? A ticket for an upcoming event is the only way in, and the only way to get its deposit back.")) return;
+            remove(tickets.map((t) => t.eventId));
+          }}
+        >
+          Remove all tickets from this device
+        </button>
+      </div>
+    </div>
   );
 }
 
 export function MyEvents({ mode = "both" }: { mode?: "both" | "door" } = {}) {
-  const [events, setEvents] = useState<(SavedEvent & { live?: PublicEvent })[] | null>(null);
-  useEffect(() => {
-    const saved = listSavedEvents();
-    setEvents(saved);
-    saved.forEach(async (s, i) => {
-      try {
-        const live = await api.event(s.id);
-        setEvents((prev) => prev && prev.map((e, j) => (j === i ? { ...e, live } : e)));
-      } catch {
-        /* keep the saved row */
-      }
-    });
-  }, []);
+  const [events, setEvents] = useState<(SavedEvent & { live?: PublicEvent | null })[] | null>(null);
+  useEffect(() => setEvents(listSavedEvents()), []);
+
+  // One event at a time, when asked: fetching them all together would link them.
+  async function check(id: string) {
+    let live: PublicEvent | null = null;
+    try {
+      live = await api.event(id);
+    } catch {
+      /* keep the saved row */
+    }
+    setEvents((prev) => prev && prev.map((e) => (e.id === id ? { ...e, live } : e)));
+  }
 
   if (events === null) return <Spinner />;
   if (events.length === 0) {
@@ -227,9 +255,15 @@ export function MyEvents({ mode = "both" }: { mode?: "both" | "door" } = {}) {
       {events.map((e) => (
         <li key={e.id} className="flex items-center justify-between gap-3 px-2 py-3">
           <div className="min-w-0">
-            <div className="truncate font-medium">{e.live?.title ?? e.title}</div>
+            <div className="truncate font-medium">{e.title}</div>
             <div className="osd mt-0.5 text-[11px] text-ink-4">
-              {e.live ? `${e.live.status} · ${e.live.rsvp_count}/${e.live.capacity} RSVPs · ${e.live.checked_in_count} in` : "…"}
+              {e.live ? (
+                `${e.live.status} · ${e.live.rsvp_count}/${e.live.capacity} RSVPs · ${e.live.checked_in_count} in`
+              ) : (
+                <button className="underline decoration-ink-4 underline-offset-2 hover:text-ink-2" onClick={() => check(e.id)}>
+                  {e.live === null ? "Offline · retry" : "Check status"}
+                </button>
+              )}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
@@ -256,7 +290,6 @@ export function MyEvents({ mode = "both" }: { mode?: "both" | "door" } = {}) {
     </ul>
   );
 }
-
 
 /** Top of every action page: what this screen does, and whether the server is on air. */
 export function ActionHeader({ eyebrow, title, children }: { eyebrow: string; title: string; children?: ReactNode }) {

@@ -21,7 +21,9 @@ export function Qr({ value, size = 240, label }: { value: string; size?: number;
   );
 }
 
-export async function downloadQrPng(value: string, filename: string, caption: string) {
+// The image carries no event title: photo libraries sync to the cloud, and the
+// QR alone is enough at the door.
+export async function downloadQrPng(value: string, filename: string, caption = "Unlisted ticket") {
   const qr = document.createElement("canvas");
   await QRCode.toCanvas(qr, value, { width: 720, margin: 2, errorCorrectionLevel: "M" });
   const out = document.createElement("canvas");
@@ -38,7 +40,7 @@ export async function downloadQrPng(value: string, filename: string, caption: st
   ctx.fillText(caption, out.width / 2, qr.height + 60, out.width - 40);
   ctx.font = "24px system-ui, sans-serif";
   ctx.fillStyle = "#5B626D";
-  ctx.fillText("Unlisted ticket · show this at the door", out.width / 2, qr.height + 98);
+  ctx.fillText("Show this at the door", out.width / 2, qr.height + 98);
   const a = document.createElement("a");
   a.href = out.toDataURL("image/png");
   a.download = filename;
