@@ -45,3 +45,13 @@ def test_f4jumble_round_trip():
 def test_sim_addresses_are_real_uas():
     assert is_orchard_address(random_unified_address(), "main")
     assert not is_orchard_address(random_unified_address(orchard=False, sapling=True), "main")
+
+
+# The same vector web/src/lib/codec.test.ts checks: an Orchard receiver (bytes
+# 0..42) and an unknown receiver whose typecode and length need multi-byte
+# CompactSizes.
+MULTIBYTE_UA = "u1rexdud0f8y83nem3s7shlu2edrrwhjz79r5t8mmxgf582lhlg8ss89qera4wxq6pv7s60254sleueepr9eh6ggyjlrswy4tkufw3ewp3ahsmw907u3qapjtntp522ga06jddxkc9t6gs777z2s649dwn2yq5vz8phqxdgmjs5ad36snsdurw0zeumypemrnny99td58vj29ujr4p078mgjwypczx39kt430h9d6x7hvwjjkqssh7tlu2g2ura2xu4jls0lehhhmr3x4p2t9xthvvfsjrxj8dnyhhtr63eu7qafgptwzx726tggmvmd7sa23q20yhamj36zclch8nnnjacrqm34jkwvkfsgclundfn5cgu3y260hezpvrpk522cd8489crwfcs8sa52m89rnn586stng5dm46sfg4fjevjp267quptsukg2dvdhnlw2vw8m33qq567pwu5d7q0wr3aajcnhadur7gq9vjkxymt8wvlkthrap0yxvlqy33mnmx9cg3vrekku6hzd3lm2vyggp5lg7pljh4jpwk6wksx6f3rxl6cv5xjxpzs6lntm7qfrggujmk2ccp65g3f"
+
+
+def test_multibyte_compact_sizes():
+    assert decode_unified(MULTIBYTE_UA, "u")["orchard"] == bytes(range(43))

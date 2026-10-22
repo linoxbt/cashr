@@ -14,6 +14,9 @@ interface Created {
   door_token: string;
 }
 
+// Matches the API's limit (api/unlisted/app.py MAX_DEPOSIT_ZAT).
+const MAX_DEPOSIT_ZAT = 100 * 100_000_000;
+
 export default function NewEvent() {
   const meta = useMeta();
   const [busy, setBusy] = useState(false);
@@ -38,9 +41,16 @@ export default function NewEvent() {
     e.preventDefault();
     setError(null);
     if (depositZat === null || depositZat < 50_000) return setError("Deposit must be at least 0.0005 ZEC.");
+    if (depositZat > MAX_DEPOSIT_ZAT) return setError("Deposit can be at most 100 ZEC.");
+    const capacity = Number(form.capacity);
+    if (!Number.isInteger(capacity) || capacity < 1 || capacity > 5000) return setError("Capacity must be a whole number from 1 to 5000.");
     if (forfeitProblem) return setError(forfeitProblem);
     const starts = new Date(form.starts_at);
     if (Number.isNaN(starts.getTime())) return setError("Pick a start date and time.");
+    if (starts.getTime() < Date.now()) return setError("The start time is in the past.");
+    const closes = form.rsvp_closes_at ? new Date(form.rsvp_closes_at) : null;
+    if (closes && Number.isNaN(closes.getTime())) return setError("Pick a valid RSVP close time, or leave it empty.");
+    if (closes && closes.getTime() > starts.getTime()) return setError("RSVPs must close before the event starts.");
     setBusy(true);
     try {
       const res = await api.createEvent({
@@ -49,9 +59,9 @@ export default function NewEvent() {
         starts_at: starts.toISOString(),
         location: form.location,
         details: form.details,
-        capacity: Number(form.capacity),
+        capacity,
         deposit_zat: depositZat,
-        rsvp_closes_at: form.rsvp_closes_at ? new Date(form.rsvp_closes_at).toISOString() : null,
+        rsvp_closes_at: closes ? closes.toISOString() : null,
         forfeit_address: form.forfeit_address.trim(),
       });
       setCreated(res);

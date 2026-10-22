@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { api, type Meta } from "@/lib/api";
 
@@ -124,24 +124,46 @@ export function useMeta(): Meta | null {
   return meta;
 }
 
-export function usePoll(fn: () => void | Promise<void>, ms: number, deps: unknown[]) {
+/**
+ * Run `fn` now and then every `interval()` ms (null stops polling). Pauses while
+ * the tab is hidden and catches up as soon as it is visible again, so a
+ * background tab never keeps downloading.
+ */
+export function usePoll(fn: () => void | Promise<void>, interval: number | (() => number | null), deps: unknown[]) {
+  const latest = useRef({ fn, interval });
+  latest.current = { fn, interval };
   useEffect(() => {
     let alive = true;
-    let t: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let running = false;
+    const delay = () => {
+      const i = latest.current.interval;
+      return typeof i === "function" ? i() : i;
+    };
     const tick = async () => {
+      if (running) return;
+      running = true;
       try {
-        await fn();
+        await latest.current.fn();
       } finally {
-        if (alive) t = setTimeout(tick, ms);
+        running = false;
+        const d = delay();
+        if (alive && d !== null && !document.hidden) timer = setTimeout(tick, d);
       }
     };
+    const onVisibility = () => {
+      if (document.hidden || !alive) return;
+      clearTimeout(timer);
+      tick();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     tick();
     return () => {
       alive = false;
-      clearTimeout(t);
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
+  }, deps); // eslint-disable-line react-hooks/exhaustive-deps
 }
 
 export function formatWhen(s: string): string {

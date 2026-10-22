@@ -18,6 +18,9 @@ export const metadata: Metadata = {
   robots: { index: true, follow: true },
 };
 
+// Rendered per request so each page carries its own CSP nonce (src/middleware.ts).
+export const dynamic = "force-dynamic";
+
 export const viewport: Viewport = { themeColor: "#050505", width: "device-width", initialScale: 1, viewportFit: "cover" };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

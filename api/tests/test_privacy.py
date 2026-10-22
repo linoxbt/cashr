@@ -4,7 +4,7 @@ from conftest import auth
 from test_lifecycle import admin_view, checkin, pay, settle, tickets
 
 from unlisted.chain.sim import random_unified_address
-from unlisted.db import SeenAddress
+from unlisted.db import Event, SeenAddress
 
 
 def test_public_list_hides_check_ins_until_settlement(client, make_event, attendee):
@@ -39,7 +39,7 @@ def test_memos_never_name_the_event(client, make_event, attendee):
 
 def test_purge_leaves_nothing_that_names_the_event(client, make_event, attendee):
     created = make_event(title="Tenants' union, flat 4B", forfeit_address=random_unified_address(),
-                         rsvp_closes_at="2026-10-29T18:00:00Z")
+                         rsvp_closes_at="2026-10-26T18:00:00Z")
     ev, admin = created["event"], created["admin_token"]
     pay(client, ev, attendee(ev["id"]).memo())
     settle(client, ev, admin)
@@ -83,3 +83,50 @@ def test_used_address_digests_are_forgotten_after_two_periods(client, make_event
         kept = {s.digest: s.period for s in db.query(SeenAddress)}
     assert "old" not in kept
     assert kept["last"] == now - 1 and kept["legacy"] == now and len(kept) == 3
+
+
+def test_deadline_is_judged_by_when_a_payment_was_mined(client, make_event, attendee):
+    from datetime import datetime, timedelta, timezone
+
+    from test_lifecycle import advance
+
+    from unlisted.engine import RSVP_GRACE_BLOCKS
+
+    just_passed = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+    ev = make_event(rsvp_closes_at=just_passed)["event"]
+    sent_in_time = attendee(ev["id"])
+    pay(client, ev, sent_in_time.memo())  # mined in the next block
+    assert [t["h"] for t in tickets(client, ev["id"])["tickets"]] == [sent_in_time.hash]
+    advance(client, RSVP_GRACE_BLOCKS + 1)
+    late = attendee(ev["id"])
+    pay(client, ev, late.memo())
+    assert tickets(client, ev["id"])["rejected"] == [{"h": late.hash, "reason": "rsvps_closed"}]
+
+
+def test_idle_events_are_retired_a_day_after_they_start(client, make_event, attendee):
+    from datetime import datetime, timedelta, timezone
+
+    long_ago = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    idle = make_event(starts_at=long_ago)["event"]
+    used = make_event(starts_at=long_ago)["event"]
+    upcoming = make_event()["event"]
+    pay(client, used, attendee(used["id"]).memo())
+    client.engine.retire_idle_events()
+    status = {e["id"]: client.get(f"/events/{e['id']}").json() for e in (idle, used, upcoming)}
+    assert status[idle["id"]]["status"] == "purged" and status[idle["id"]]["title"] == "Purged event"
+    assert status[used["id"]]["status"] == "open" and status[upcoming["id"]]["status"] == "open"
+    with client.engine.sessions() as db:
+        assert db.get(Event, idle["id"]).account_ref == ""
+
+
+def test_api_docs_are_off_outside_sim(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from unlisted.app import create_app
+    from unlisted.chain.sim import SimChain
+    from unlisted.config import Settings
+
+    app = create_app(Settings(chain_mode="rpc", database_url=f"sqlite:///{tmp_path}/d.db", run_scanner=False,
+                              secret="s"), SimChain("main"))
+    with TestClient(app) as c:
+        assert c.get("/docs").status_code == 404 and c.get("/openapi.json").status_code == 404

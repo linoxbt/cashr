@@ -122,6 +122,10 @@ h2 {
   animation: grain 0.8s steps(1) infinite;
 }
 
+.crt-still::before {
+  animation: none;
+}
+
 @keyframes grain {
   0% { transform: translate(0, 0); }
   20% { transform: translate(-3%, -5%); }

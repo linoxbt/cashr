@@ -96,3 +96,18 @@ def test_unreachable_wallet_is_a_chain_error():
 
     with pytest.raises(ChainError, match="unreachable"):
         make_chain(boom).tip_height()
+
+
+def test_half_created_account_is_removed():
+    calls = []
+    c = make_chain(responder({
+        "z_getnewaccount": {"account": "0b6f-uuid"},
+        "z_getaddressforaccount": RuntimeError("timed out"),
+        "z_deleteaccount": None,
+    }, calls))
+    try:
+        c.new_event_account()
+        raise AssertionError("expected a ChainError")
+    except Exception as e:
+        assert "timed out" in str(e)
+    assert calls[-1] == ("z_deleteaccount", ["0b6f-uuid"])

@@ -5,16 +5,23 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Notice, PageState, Pill, Spinner } from "@/components/ui";
-import { api, ApiError, type Manifest } from "@/lib/api";
+import { api, ApiError, isEventId, isUnreachable, type Manifest } from "@/lib/api";
 import { fromB64url, parseTicketQr, ticketHash } from "@/lib/codec";
-import { readJson, takeLinkToken, writeJson } from "@/lib/storage";
+import { forgetKeys, readJson, takeLinkToken, writeJson } from "@/lib/storage";
 
-type Verdict = { kind: "ok" | "already" | "unknown" | "other_event" | "closed" | "error"; seat?: number | null; offline?: boolean; detail?: string };
+type Verdict = {
+  kind: "ok" | "already" | "unknown" | "unverified" | "other_event" | "closed" | "error";
+  seat?: number | null;
+  offline?: boolean;
+  detail?: string;
+};
 
 const VERDICT_UI: Record<Verdict["kind"], { bg: string; title: string; sub: string }> = {
   ok: { bg: "bg-ok", title: "Welcome in", sub: "Ticket checked in." },
   already: { bg: "bg-warn", title: "Already checked in", sub: "This ticket was used before." },
   unknown: { bg: "bg-bad", title: "Not a valid ticket", sub: "No confirmed RSVP matches this code." },
+  // Offline, a ticket missing from this phone's saved list may just be newer than it.
+  unverified: { bg: "bg-screen-3", title: "Can't confirm offline", sub: "Not on this phone's saved list. If they paid in the last few minutes, check again once you're back online." },
   other_event: { bg: "bg-bad", title: "Wrong event", sub: "This ticket is for a different event." },
   closed: { bg: "bg-screen-3", title: "Door closed", sub: "This event has ended." },
   // Never shown as "not valid": a server problem says nothing about the ticket.
@@ -26,6 +33,11 @@ const SCAN_INTERVAL_MS = 125;
 
 export default function Door() {
   const { id } = useParams<{ id: string }>();
+  if (!isEventId(id)) return <PageState title="This door link isn't valid">Open the full door link from the organiser.</PageState>;
+  return <DoorFor id={id} />;
+}
+
+function DoorFor({ id }: { id: string }) {
   const cacheKey = `unlisted.door.${id}`;
   const queueKey = `unlisted.door.queue.${id}`;
   const [token, setToken] = useState<string | null | undefined>(undefined);
@@ -38,8 +50,10 @@ export default function Door() {
   const [manual, setManual] = useState("");
   const [camera, setCamera] = useState<"off" | "starting" | "on" | "denied">("off");
   const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const lastScan = useRef<{ text: string; at: number }>({ text: "", at: 0 });
   const busy = useRef(false);
+  const refreshing = useRef(false);
 
   useEffect(() => {
     setToken(takeLinkToken(`door.${id}`));
@@ -48,25 +62,42 @@ export default function Door() {
   }, [id, cacheKey, queueKey]);
 
   const refresh = useCallback(async () => {
-    if (!token) return;
+    // One at a time: overlapping syncs could send, or drop, the same check-ins twice.
+    if (!token || refreshing.current) return;
+    refreshing.current = true;
     try {
-      let pendingQueue = readJson<string[]>(queueKey, []);
-      if (pendingQueue.length) {
-        const res = await api.syncCheckIns(id, pendingQueue, token);
+      const sent = readJson<string[]>(queueKey, []);
+      if (sent.length) {
+        const res = await api.syncCheckIns(id, sent, token);
         // Offline check-ins the server didn't accept (e.g. the event was already settled).
         const bad = res.results.filter((r) => r.result === "event_closed" || r.result === "unknown").length;
         if (bad) setRefused((n) => n + bad);
-        pendingQueue = [];
-        writeJson(queueKey, pendingQueue);
-        setQueue(pendingQueue);
+        // Remove only what was sent: a scan queued while the request was out stays.
+        const remaining = [...readJson<string[]>(queueKey, [])];
+        for (const h of sent) {
+          const i = remaining.indexOf(h);
+          if (i >= 0) remaining.splice(i, 1);
+        }
+        writeJson(queueKey, remaining);
+        setQueue(remaining);
       }
       const m = await api.manifest(id, token);
       setManifest(m);
-      writeJson(cacheKey, m);
+      if (m.event.status === "open" || m.event.status === "closed") {
+        writeJson(cacheKey, m);
+      } else {
+        // The door is done: nothing about who came stays on this phone.
+        forgetKeys([cacheKey, queueKey]);
+      }
       setOnline(true);
     } catch (e) {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) setAuthError(true);
-      else setOnline(false);
+      else if (e instanceof ApiError && e.status === 404) {
+        forgetKeys([cacheKey, queueKey]);
+        setAuthError(true);
+      } else setOnline(false);
+    } finally {
+      refreshing.current = false;
     }
   }, [id, token, cacheKey, queueKey]);
 
@@ -106,12 +137,13 @@ export default function Door() {
           setAuthError(true);
           return;
         }
-        if (e instanceof ApiError && e.status !== 0) {
-          return setVerdict({ kind: "error", detail: e.message });
+        if (!isUnreachable(e)) {
+          return setVerdict({ kind: "error", detail: e instanceof Error ? e.message : undefined });
         }
-        // Offline: decide from the cached manifest and queue the check-in.
+        // Offline, timed out, or the host can't reach the API: decide from the
+        // saved list and queue the check-in.
         setOnline(false);
-        if (!local) return setVerdict({ kind: "unknown", offline: true });
+        if (!local) return setVerdict({ kind: "unverified", offline: true });
         if (local.checked_in) return setVerdict({ kind: "already", seat: local.seat, offline: true });
         markLocal(hash);
         const q = [...readJson<string[]>(queueKey, []), hash];
@@ -138,7 +170,11 @@ export default function Door() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
       const video = videoRef.current;
-      if (!video) return;
+      if (!video) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      streamRef.current = stream;
       video.srcObject = stream;
       await video.play();
       setCamera("on");
@@ -175,10 +211,9 @@ export default function Door() {
     return () => cancelAnimationFrame(raf);
   }, [camera, check]);
 
-  useEffect(() => () => {
-    const stream = videoRef.current?.srcObject as MediaStream | null;
-    stream?.getTracks().forEach((t) => t.stop());
-  }, []);
+  // The stream is kept in its own ref: by the time this runs on leaving the
+  // page, the video element's ref is already detached.
+  useEffect(() => () => streamRef.current?.getTracks().forEach((t) => t.stop()), []);
 
   if (token === undefined) return <PageState title="Loading…"><Spinner /></PageState>;
   if (!token || authError) {
@@ -219,7 +254,10 @@ export default function Door() {
         {camera !== "on" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-ink">
             {camera === "denied" ? (
-              <p className="text-sm text-ink-2">Camera access was blocked. Allow it in your browser settings, or enter codes by hand below.</p>
+              <>
+                <p className="text-sm text-ink-2">Camera access was blocked. Allow it in your browser settings, or enter codes by hand below.</p>
+                <button className="btn-secondary" onClick={startCamera}>Try the camera again</button>
+              </>
             ) : (
               <>
                 <p className="text-sm text-ink-3">Point the camera at an attendee&rsquo;s ticket.</p>
@@ -232,7 +270,7 @@ export default function Door() {
         )}
         {camera === "on" && !ui && <div className="pointer-events-none absolute inset-10 rounded-2xl border-2 border-ink/50" />}
         {ui && (
-          <div className={`absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-white ${ui.bg}`} role="status" aria-live="assertive">
+          <div className={`absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-white ${ui.bg}`} role="alert">
             <div className="font-display text-5xl sm:text-6xl">{ui.title}</div>
             {verdict?.seat ? <div className="mt-2 text-lg">Seat {verdict.seat}</div> : null}
             <div className="mt-2 text-sm text-white/80">{ui.sub}</div>
@@ -250,7 +288,8 @@ export default function Door() {
           setManual("");
         }}
       >
-        <input className="input font-mono text-xs" value={manual} onChange={(e) => setManual(e.target.value)} placeholder="Or paste a ticket code: unlisted:…" spellCheck={false} />
+        <label htmlFor="ticket-code" className="sr-only">Ticket code</label>
+        <input id="ticket-code" className="input font-mono text-xs" value={manual} onChange={(e) => setManual(e.target.value)} placeholder="Or paste a ticket code: unlisted:…" spellCheck={false} />
         <button className="btn-secondary" type="submit">Check</button>
       </form>
 

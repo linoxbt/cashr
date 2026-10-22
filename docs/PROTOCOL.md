@@ -50,7 +50,8 @@ A note is processed once it has `UNLISTED_MIN_CONF` confirmations, in `(height, 
    nowhere private to return it. It is listed with the returned payments so the attendee and organiser can see it.
    The RSVP page prevents this before payment.
 3. **Otherwise rejected, and returned minus `UNLISTED_REJECT_FEE_ZAT`, if any of:** wrong event id, RSVPs closed
-   (status not `open`, or past `rsvp_closes_at`), amount ≠ deposit, duplicate ticket hash, refund address used
+   (status not `open`, or past `rsvp_closes_at`; a payment mined within 2 blocks of the close height, recorded when
+   the organiser closed or estimated back from the deadline, still counts), amount ≠ deposit, duplicate ticket hash, refund address used
    before (checked against an HMAC-SHA256 digest under `UNLISTED_SECRET`), or event full. A return that would be
    ≤ 0 is kept as float.
 4. **Otherwise accepted:** a random free seat (counting up would reveal payment order), and a digest of the refund
@@ -67,6 +68,12 @@ Refunds, returns and sweeps are payouts: `queued → submitted → broadcast →
 * Each payout has a random idempotency key, sent with every wallet call. Retrying after a timeout, a lost response
   or a restart can never produce a second transaction while the first could still be mined.
 * `broadcast` means a txid exists. It becomes `done` only when mined with `UNLISTED_PAYOUT_CONF` confirmations.
+* In the wallet, every rebuild of an operation is a new attempt: only the current attempt may record a txid or an
+  outcome, and a rebroadcast never changes an operation's state, so a stale step can't trigger a second build.
+  A transaction counts as expired only 10 blocks past its expiry height, so a short reorg can't make a
+  transaction that may still be mined look dead.
+* `z_deleteaccount` refuses while the account holds value, a send is being built, or any transaction spending its
+  notes could still be mined. It is idempotent, so a purge that timed out is simply retried.
   A pending transaction is rebroadcast periodically; one that expires unmined is rebuilt under the same key.
 * An insufficient-funds failure keeps the payout queued (deposits still confirming, or a fee top-up is needed).
   If the wallet has no record of an operation, the payout stops as `failed` rather than risk paying twice.
@@ -96,6 +103,10 @@ Refunds, returns and sweeps are payouts: `queued → submitted → broadcast →
   every ticket's `status` (`refunding`, `refunded`, `forfeited`) appears at once.
 * The ticket list page (`/tickets`) never fetches all held events together, which would link them; each is checked
   only when its holder asks.
+* The door phone keeps the event's ticket hashes and check-in flags (to work offline) and its unsynced queue, and
+  deletes both once the event is settled, purged or gone.
+* Events that started over a day ago and never received anything are retired: their wallet account is deleted
+  and their details wiped, as a purge does.
 * The wallet reaches lightwalletd through Tor by default (`UW_SOCKS_PROXY`), with a fresh circuit for every
   transaction it fetches. Otherwise lightwalletd's operator sees the server fetch exactly the RSVP transactions, and
   can match them to attendees' wallets broadcasting them through the same server. Txids are logged at debug only.

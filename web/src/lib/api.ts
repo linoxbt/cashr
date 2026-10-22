@@ -76,24 +76,69 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit & { token?: string } = {}): Promise<T> {
+/** Field names the API reports, as people know them. */
+const FIELD_NAMES: Record<string, string> = {
+  title: "Event name",
+  starts_at: "Start time",
+  rsvp_closes_at: "RSVP close time",
+  location: "Where",
+  details: "Details",
+  capacity: "Capacity",
+  deposit_zat: "Deposit",
+  forfeit_address: "No-show fund address",
+  address: "Address",
+};
+
+/** A readable message from a FastAPI validation error. */
+export function validationMessage(detail: unknown): string {
+  if (!Array.isArray(detail) || detail.length === 0) return "Some fields aren't valid.";
+  return detail
+    .map((d: { loc?: unknown[]; msg?: string }) => {
+      const field = String(d.loc?.[d.loc.length - 1] ?? "");
+      return `${FIELD_NAMES[field] ?? field}: ${(d.msg ?? "invalid").replace(/^Value error, /, "")}`;
+    })
+    .join(" · ");
+}
+
+/** True when the request never got an answer from the API itself (offline, timed out, or the host's 5xx). */
+export function isUnreachable(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 0 || e.status >= 500);
+}
+
+const TIMEOUT_MS = 12_000;
+
+async function request<T>(path: string, init: RequestInit & { token?: string; timeoutMs?: number } = {}): Promise<T> {
   if (!API_CONFIGURED) {
     throw new ApiError(0, "no_backend", "This copy of Unlisted isn't connected to a server yet, so nothing can be created or paid here.");
   }
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // Only requests with a body declare one: a JSON content type on a GET would
+  // make every poll a two-request CORS preflight.
+  const headers: Record<string, string> = init.body ? { "Content-Type": "application/json" } : {};
   if (init.token) headers.Authorization = `Bearer ${init.token}`;
   let res: Response;
   try {
-    res = await fetch(`${API_URL}${path}`, { ...init, headers, cache: "no-store", referrerPolicy: "no-referrer" });
+    res = await fetch(`${API_URL}${path}`, {
+      ...init,
+      headers,
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      // A hung connection must fail, not freeze the page (the door would stop admitting people).
+      signal: AbortSignal.timeout(init.timeoutMs ?? TIMEOUT_MS),
+    });
   } catch {
     throw new ApiError(0, "network", "Can't reach the Unlisted server. Check your connection.");
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const detail = Array.isArray(body.detail) ? "Please check the highlighted fields." : body.detail;
+    const detail = Array.isArray(body.detail) ? validationMessage(body.detail) : body.detail;
     throw new ApiError(res.status, body.error ?? "http", body.message ?? detail ?? `Request failed (${res.status}).`);
   }
   return body as T;
+}
+
+/** Event ids are 10 lowercase letters or digits; anything else is not worth a request. */
+export function isEventId(id: unknown): id is string {
+  return typeof id === "string" && /^[a-z0-9]{10}$/.test(id);
 }
 
 export const api = {
@@ -116,6 +161,8 @@ export const api = {
       method: "POST",
       token,
       body: JSON.stringify({ ticket_hash }),
+      // At the door a slow answer is worse than none: fall back to the saved list.
+      timeoutMs: 5_000,
     }),
   syncCheckIns: (id: string, ticket_hashes: string[], token: string) =>
     request<{ results: { h: string; result: CheckInResult }[]; checked_in_count: number }>(`/events/${id}/door/sync`, {
@@ -123,6 +170,7 @@ export const api = {
       token,
       body: JSON.stringify({ ticket_hashes }),
     }),
+  simAddress: () => request<{ address: string }>("/sim/address"),
   simPay: (address: string, amount_zat: number, memo_b64url: string) =>
     request<{ txid: string }>("/sim/pay", { method: "POST", body: JSON.stringify({ address, amount_zat, memo_b64url }) }),
 };

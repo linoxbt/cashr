@@ -106,12 +106,18 @@ class _Op:
 
 
 class SimChain:
+    # Confirmation needs default to the real wallet's (librustzcash's default
+    # policy: 10 for received notes, 3 for its own change), so tests can't pass
+    # on timing the real wallet would never allow.
     def __init__(self, network: str = "main", auto_mine: bool = True,
-                 received_conf: int = 1, change_conf: int = 1):
+                 received_conf: int = 10, change_conf: int = 3, async_ops: bool = False):
         self.network = network
         self.auto_mine = auto_mine
         self.received_conf = received_conf
         self.change_conf = change_conf
+        # Like the real wallet, report a send as executing until polled once.
+        self.async_ops = async_ops
+        self._unpolled: set[str] = set()
         self.height = 3_100_000
         self._lock = threading.RLock()
         self._accounts: dict[str, _Account] = {}
@@ -182,6 +188,10 @@ class SimChain:
         for n in acct.notes:
             if self._spent(n):
                 continue
+            if not n.change and n.height == 0:
+                continue  # the real wallet only learns of a payment once it is mined
+            if n.change and self._expired(self._txs[n.txid]):
+                continue  # change of a transaction that can never be mined
             need = self.change_conf if n.change else self.received_conf
             (spendable if self._confs(n.height) >= need else pending).append(n)
         return spendable, pending
@@ -206,7 +216,8 @@ class SimChain:
                     memo=n.memo, confirmations=self._confs(n.height), height=n.height,
                 )
                 for n in acct.notes
-                if n.address == address and not n.change and (n.height == 0 or n.height >= since_height)
+                # Mined only: the real wallet scans blocks, not the mempool.
+                if n.address == address and not n.change and n.height and n.height >= since_height
             ]
 
     def balance(self, account_ref: str) -> Balance:
@@ -232,6 +243,9 @@ class SimChain:
                 self._ops[opid] = _Op(key, account_ref)
             op = self._ops[opid]
             tx = self._txs.get(op.txid)
+            if op.txid and tx is None:
+                # Like the real wallet: never build again for a txid it can't account for.
+                raise ChainError("the transaction for this key is unknown to the wallet; refusing to send again")
             if tx is not None and not self._expired(tx):
                 tx.in_mempool = True  # rebroadcast; never a second transaction
                 return self._respond(opid)
@@ -241,6 +255,8 @@ class SimChain:
                 op.state = "success"
             except ChainError as e:
                 op.state, op.error = "failed", str(e)
+            if self.async_ops:
+                self._unpolled.add(opid)
             return self._respond(opid)
 
     def _build(self, account_ref: str, acct: _Account, recipients: list[Recipient], everything: bool):
@@ -289,6 +305,9 @@ class SimChain:
             op = self._ops.get(opid)
             if op is None:
                 return OpStatus("failed", error="operation unknown to wallet")
+            if opid in self._unpolled:
+                self._unpolled.discard(opid)
+                return OpStatus("pending")
             return OpStatus(op.state, txid=op.txid, error=op.error, amount_zat=op.amount_zat)
 
     def tx_status(self, txid: str) -> TxStatus:

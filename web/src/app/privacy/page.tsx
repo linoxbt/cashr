@@ -9,6 +9,8 @@ const STORED = [
   ["Checked in", "A yes/no per ticket. No time, so arrivals can't be matched against cameras. It's never published while the event runs; every ticket's outcome appears at once when the event is settled."],
   ["Seat", "A random number, so it says nothing about the order people paid in."],
   ["Deposit notes", "Transaction id, amount, block height. The sender is never visible, even to the wallet."],
+  ["Payouts", "Each refund, return and sweep: its recipients' refund addresses, amounts and memo, and its transaction id. Deleted on purge."],
+  ["Link hashes", "SHA-256 hashes of the manage and door links, so the server can check them without storing them."],
   ["Reused-address digests", "Keyed hashes of refund addresses, only to refuse reuse. Never the address itself. Forgotten after one to two years."],
   ["The event's wallet account", "Its own seed (encrypted at rest) and the deposits' memos. Purging deletes the account and the seed, so the memos can't be decrypted again, even from the chain."],
 ];
@@ -54,7 +56,7 @@ const LEAKS = [
 const TRUST = [
   "The server's wallet holds deposits until the event is settled. A dishonest operator could keep them, so deposits should stay small (the price of a coffee).",
   "The organiser's links are bearer secrets. Anyone with the manage link can settle or purge the event.",
-  "The door device sees ticket hashes, seats and the event's check-in count. It never sees refund addresses.",
+  "The door device sees ticket hashes, seats and the event's check-in count, and keeps them to work offline until the event is settled. It never sees refund addresses.",
   "The organiser's dashboard shows each ticket's hash and whether it was checked in, but only a shortened refund address.",
   "Unlisted can't hide that an event exists, or protect against someone photographing the room.",
 ];

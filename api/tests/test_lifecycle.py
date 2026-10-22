@@ -4,6 +4,7 @@ import pytest
 from conftest import auth
 
 from unlisted.chain.sim import EXPIRY_DELTA, random_unified_address
+from unlisted.engine import RSVP_GRACE_BLOCKS
 from unlisted.db import Deposit, Event, Payout, Rsvp, SeenAddress
 
 
@@ -265,12 +266,17 @@ def test_closed_event_rejects_new_rsvps(client, make_event, attendee):
     created = make_event()
     ev, admin = created["event"], created["admin_token"]
     client.post(f"/events/{ev['id']}/admin/close", headers=auth(admin))
+    # A payment mined just after closing was sent while RSVPs were open: it counts.
+    on_time = attendee(ev["id"])
+    pay(client, ev, on_time.memo())
+    assert [t["h"] for t in tickets(client, ev["id"])["tickets"]] == [on_time.hash]
+    advance(client, RSVP_GRACE_BLOCKS + 1)
     pay(client, ev, attendee(ev["id"]).memo())
     assert tickets(client, ev["id"])["rejected"][0]["reason"] == "rsvps_closed"
 
 
 def test_rsvp_deadline_closes_rsvps(client, make_event, attendee):
-    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     ev = make_event(rsvp_closes_at=past)["event"]
     assert ev["status"] == "open" and ev["accepting_rsvps"] is False
     pay(client, ev, attendee(ev["id"]).memo())
@@ -499,3 +505,10 @@ def test_sqlite_overwrites_deleted_rows(tmp_path):
 
     with make_engine(f"sqlite:///{tmp_path}/s.db").connect() as conn:
         assert conn.execute(text("PRAGMA secure_delete")).scalar() == 1
+
+
+def test_rsvps_must_close_before_the_start(client):
+    body = {"title": "x", "starts_at": "2026-11-30T18:00:00Z", "capacity": 5, "deposit_zat": 500_000}
+    r = client.post("/events", json=body | {"rsvp_closes_at": "2026-12-01T18:00:00Z"})
+    assert r.status_code == 422 and "close before" in r.text
+    assert client.post("/events", json=body | {"rsvp_closes_at": "2026-11-29T18:00:00Z"}).status_code == 201

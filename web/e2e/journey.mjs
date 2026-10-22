@@ -110,14 +110,62 @@ try {
   await p.getByText("Welcome in").waitFor();
   step("door checked the ticket in");
 
+  // 6b. Offline, the door decides from its saved list and syncs later. A ticket
+  // it doesn't know is "can't confirm", never "not valid".
+  await p.context().setOffline(true);
+  await p.fill("#ticket-code", `unlisted:${t.eventId}:${"A".repeat(43)}`);
+  await p.getByRole("button", { name: "Check", exact: true }).click();
+  await p.getByText("Can't confirm offline").waitFor();
+  const t2 = tickets[1];
+  await p.fill("#ticket-code", `unlisted:${t2.eventId}:${t2.secret}`);
+  await p.getByRole("button", { name: "Check", exact: true }).click();
+  await p.getByText("Welcome in").waitFor();
+  await p.getByText("1 check-in to sync").waitFor();
+  await p.context().setOffline(false);
+  await p.getByText("1 check-in to sync").waitFor({ state: "detached", timeout: 30000 });
+  step("offline check-in queued, then synced");
+
+  // 6c. A wrong-amount payment is returned, and the dashboard says so.
+  const ev = await (await fetch(`${API}/events/${t.eventId}`)).json();
+  const memo = `UNL1 ${t.eventId} ${"B".repeat(43)} ${await address()}`;
+  const memoB64 = Buffer.from(memo).toString("base64url");
+  await fetch(`${API}/sim/pay`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address: ev.address, amount_zat: ev.deposit_zat + 1, memo_b64url: memoB64 }),
+  });
+  const list = await (await fetch(`${API}/events/${t.eventId}/tickets`)).json();
+  if (!list.rejected.some((r) => r.reason === "wrong_amount")) throw new Error("wrong-amount payment was not rejected");
+  step("wrong-amount payment rejected for return");
+
+  // Everyone came, so no forfeit pays the refund fees: the organiser tops up
+  // the event wallet (a payment with no memo), as the dashboard asks.
+  await fetch(`${API}/sim/pay`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address: ev.address, amount_zat: 100_000, memo_b64url: "" }),
+  });
+
+  // 6d. A tampered manage link is refused.
+  await p.goto(`${BASE}/manage/${t.eventId}#k=not-the-token`);
+  await p.getByText("This manage link isn't valid").waitFor();
+  step("bad manage link refused");
+
   // 7. End the event: the refund confirms, the no-show deposit is swept, then purge.
   await p.goto(BASE + "/events");
   await p.getByText("Friday tenants").first().waitFor();
   await p.getByRole("link", { name: "Manage" }).first().click();
   await p.waitForURL("**/manage/**");
+  await p.click("text=Close RSVPs");
+  await p.getByRole("button", { name: "Reopen RSVPs" }).waitFor();
+  await p.click("text=Reopen RSVPs");
+  await p.getByRole("button", { name: "Close RSVPs" }).waitFor();
+  await p.click("text=Money");
+  await p.getByText("Returned", { exact: true }).first().waitFor({ timeout: 15000 });
+  step("dashboard closed and reopened RSVPs, and shows the returned payment");
   await p.click("text=End event & refund");
   await p.getByText("settled", { exact: true }).waitFor({ timeout: 60000 });
-  step("settled: refund confirmed and no-shows swept");
+  step("settled: refunds confirmed and leftover fees swept");
   await p.click("text=Purge all data");
   await p.getByText("Purged", { exact: true }).waitFor({ timeout: 15000 });
   await p.waitForTimeout(1500);

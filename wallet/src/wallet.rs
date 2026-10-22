@@ -14,7 +14,7 @@ use rand::rngs::OsRng;
 use secrecy::ExposeSecret;
 use tokio::sync::Mutex;
 use tonic::Code;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use zcash_address::ZcashAddress;
 use zcash_client_backend::{
     data_api::{
@@ -23,7 +23,7 @@ use zcash_client_backend::{
             input_selection::{GreedyInputSelector, LockedInputPolicy, SpendPolicy},
             propose_send_max_transfer, propose_transfer, ConfirmationsPolicy, SpendingKeys,
         },
-        AccountBirthday, MaxSpendMode, TransactionDataRequest, TransactionStatus, WalletRead,
+        Account as _, AccountBirthday, MaxSpendMode, TransactionDataRequest, TransactionStatus, WalletRead,
         WalletWrite,
     },
     fees::{zip317::SingleOutputChangeStrategy, DustOutputPolicy, StandardFeeRule},
@@ -55,6 +55,15 @@ use crate::{
 
 /// The wallet refuses to delete an account holding more than this.
 pub const DELETE_MAX_ZAT: u64 = 20_000;
+/// Longest a single sync may hold the writer.
+const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Syncs in a row a received transaction may be missing from lightwalletd
+/// (about an hour at the default interval) before its memo is given up on.
+const ENHANCE_MAX_MISSES: u32 = 360;
+/// Blocks past its expiry height before an unmined transaction counts as
+/// expired, so a short reorg can't make a transaction that may still be mined
+/// look dead (and be rebuilt).
+const EXPIRY_DEPTH: u32 = 10;
 
 pub type Db = WalletDb<rusqlite::Connection, Network, SystemClock, OsRng>;
 
@@ -131,6 +140,8 @@ pub struct Wallet {
     tip: AtomicU32,
     scanned: AtomicU32,
     prover: LocalTxProver,
+    /// How many syncs in a row lightwalletd answered "not found" for a received transaction.
+    misses: Mutex<std::collections::HashMap<TxId, u32>>,
 }
 
 impl Wallet {
@@ -142,6 +153,7 @@ impl Wallet {
         let tip = db.chain_height()?.map(u32::from).unwrap_or(0);
         let scanned = db.block_fully_scanned()?.map(|m| u32::from(m.block_height())).unwrap_or(0);
         let seeds = SeedStore::open(&data_dir.join("seeds"), seed_key_hex)?;
+        recover_staged_seeds(&params, &db, &seeds)?;
         let ops = OpStore::open(&data_dir.join("ops.sqlite"))?;
         ops.prune(30)?;
         Ok(Arc::new(Self {
@@ -157,6 +169,7 @@ impl Wallet {
             tip: AtomicU32::new(tip),
             scanned: AtomicU32::new(scanned),
             prover: LocalTxProver::bundled(),
+            misses: Default::default(),
         }))
     }
 
@@ -218,56 +231,91 @@ impl Wallet {
     }
 
     async fn sync_inner(&self, client: &mut Client) -> anyhow::Result<()> {
-        let mut db = self.db.lock().await;
-        if db.get_account_ids()?.is_empty() {
-            // Nothing to scan for yet; just track the tip.
-            let latest = client.get_latest_block(ChainSpec::default()).await?.into_inner();
-            self.tip.store(latest.height as u32, Ordering::Relaxed);
-            return Ok(());
-        }
-        zcash_client_backend::sync::run(client, &self.params, &self.cache, &mut *db, 1000)
-            .await
-            .map_err(|e| anyhow!("sync failed: {e}"))?;
-        let tip = db.chain_height()?.ok_or_else(|| anyhow!("chain height unknown after sync"))?;
-        self.enhance(client, &mut db, tip).await?;
-        self.tip.store(u32::from(tip), Ordering::Relaxed);
-        if let Some(h) = db.block_fully_scanned()?.map(|m| u32::from(m.block_height())) {
-            self.scanned.store(h, Ordering::Relaxed);
-        }
+        let tip = {
+            let mut db = self.db.lock().await;
+            if db.get_account_ids()?.is_empty() {
+                // Nothing to scan for yet; just track the tip.
+                let latest = client.get_latest_block(ChainSpec::default()).await?.into_inner();
+                self.tip.store(latest.height as u32, Ordering::Relaxed);
+                return Ok(());
+            }
+            // Bounded, so a stalled block stream can't hold the writer forever.
+            tokio::time::timeout(SYNC_TIMEOUT, zcash_client_backend::sync::run(client, &self.params, &self.cache, &mut *db, 1000))
+                .await
+                .map_err(|_| anyhow!("sync timed out"))?
+                .map_err(|e| anyhow!("sync failed: {e}"))?;
+            let tip = db.chain_height()?.ok_or_else(|| anyhow!("chain height unknown after sync"))?;
+            // Stored before fetching memos, so confirmations and expiry keep
+            // moving even while a transaction can't be fetched.
+            self.tip.store(u32::from(tip), Ordering::Relaxed);
+            if let Some(h) = db.block_fully_scanned()?.map(|m| u32::from(m.block_height())) {
+                self.scanned.store(h, Ordering::Relaxed);
+            }
+            tip
+        };
+        self.enhance(client, tip).await;
         Ok(())
     }
 
-    async fn enhance(&self, client: &mut Client, db: &mut Db, tip: BlockHeight) -> anyhow::Result<()> {
+    /// Fetch the full transactions the wallet asks for. Network fetches happen
+    /// without the writer lock, so account creation and sends never queue
+    /// behind them. A failed fetch is logged and retried on the next sync; it
+    /// never stops the others.
+    async fn enhance(&self, client: &mut Client, tip: BlockHeight) {
         let mut done = BTreeSet::new();
         loop {
-            let requests: Vec<_> = db
-                .transaction_data_requests()?
-                .into_iter()
-                .filter(|r| !done.contains(r))
-                .collect();
+            let requests = match self.db.lock().await.transaction_data_requests() {
+                Ok(r) => r.into_iter().filter(|r| !done.contains(r)).collect::<Vec<_>>(),
+                Err(e) => return warn!(error = %e, "could not list the transactions to fetch"),
+            };
             if requests.is_empty() {
-                return Ok(());
+                return;
             }
             for request in requests {
-                match &request {
-                    TransactionDataRequest::GetStatus(txid) => {
-                        let status = match self.fetch_tx_isolated(client, tip, *txid).await? {
-                            None => TransactionStatus::TxidNotRecognized,
-                            Some((_, Some(h))) => TransactionStatus::Mined(h),
-                            Some((_, None)) => TransactionStatus::NotInMainChain,
-                        };
-                        db.set_transaction_status(*txid, status)?;
-                    }
-                    TransactionDataRequest::Enhancement(txid) => match self.fetch_tx_isolated(client, tip, *txid).await? {
-                        None => db.set_transaction_status(*txid, TransactionStatus::TxidNotRecognized)?,
-                        Some((tx, mined)) => decrypt_and_store_transaction(&self.params, db, &tx, mined)?,
-                    },
-                    #[allow(unreachable_patterns)]
-                    _ => {}
+                if let Err(e) = self.serve(client, tip, &request).await {
+                    warn!(error = %format!("{e:#}"), "could not fetch a transaction; retrying on the next sync");
                 }
                 done.insert(request);
             }
         }
+    }
+
+    async fn serve(&self, client: &mut Client, tip: BlockHeight, request: &TransactionDataRequest) -> anyhow::Result<()> {
+        match request {
+            TransactionDataRequest::GetStatus(txid) => {
+                let status = match self.fetch_tx_isolated(client, tip, *txid).await? {
+                    None => TransactionStatus::TxidNotRecognized,
+                    Some((_, Some(h))) => TransactionStatus::Mined(h),
+                    Some((_, None)) => TransactionStatus::NotInMainChain,
+                };
+                self.db.lock().await.set_transaction_status(*txid, status)?;
+            }
+            TransactionDataRequest::Enhancement(txid) => match self.fetch_tx_isolated(client, tip, *txid).await? {
+                Some((tx, mined)) => {
+                    self.misses.lock().await.remove(txid);
+                    let mut db = self.db.lock().await;
+                    decrypt_and_store_transaction(&self.params, &mut *db, &tx, mined)?;
+                }
+                None => {
+                    // The wallet saw this transaction in a block, so "not found" means
+                    // the server is lagging. Marking it unrecognised would drop its
+                    // memo, and with it an RSVP, for good: retry instead, and give up
+                    // only after many syncs.
+                    let mut misses = self.misses.lock().await;
+                    let n = misses.entry(*txid).or_insert(0);
+                    *n += 1;
+                    if *n >= ENHANCE_MAX_MISSES {
+                        misses.remove(txid);
+                        drop(misses);
+                        error!("lightwalletd never returned a transaction this wallet received; its memo is lost");
+                        self.db.lock().await.set_transaction_status(*txid, TransactionStatus::TxidNotRecognized)?;
+                    }
+                }
+            },
+            #[allow(unreachable_patterns)]
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Fetches one of this wallet's transactions. Through Tor, each fetch gets a
@@ -331,7 +379,8 @@ impl Wallet {
         };
         let account = uuid.expose_uuid().to_string();
         self.seeds.commit(&staged, &account)?;
-        info!(%account, birthday = latest.height, "created account");
+        debug!(%account, birthday = latest.height, "created account");
+        info!("created an event account");
         Ok(account)
     }
 
@@ -358,7 +407,9 @@ impl Wallet {
             bail!("no account {account}");
         }
         let Some(summary) = db.get_wallet_summary(ConfirmationsPolicy::default())? else {
-            return Ok((0, 0));
+            // Not "empty": the wallet can't tell yet (it hasn't synced). Saying 0
+            // here would let an account holding money be deleted.
+            bail!("the wallet hasn't synced far enough to report balances; try again shortly");
         };
         Ok(summary
             .account_balances()
@@ -437,29 +488,82 @@ impl Wallet {
         Ok(row.map(|(mined, expiry)| match (mined, expiry) {
             (Some(h), _) => TxState::Mined { confirmations: self.confirmations(Some(h)) },
             // Expired once every block up to its expiry height has been scanned without it.
-            (None, Some(e)) if e != 0 && self.scanned() > e => TxState::Expired,
+            (None, Some(e)) if e != 0 && self.scanned() > e.saturating_add(EXPIRY_DEPTH) => TxState::Expired,
             _ => TxState::Pending,
         }))
     }
 
     /// Delete an event's account, its transactions and memos, and its seed.
-    pub async fn delete_account(&self, account: &str) -> anyhow::Result<()> {
+    ///
+    /// Idempotent: deleting an account that is already gone finishes whatever an
+    /// interrupted delete left behind (seed, operations) and succeeds, so a caller
+    /// that timed out can simply ask again.
+    pub async fn delete_account(self: &Arc<Self>, account: &str) -> anyhow::Result<()> {
         let uuid = Self::parse_account(account)?;
+        if self.reader()?.get_account_ids()?.contains(&uuid) {
+            self.ensure_deletable(account, uuid)?;
+            let mut db = self.db.lock().await;
+            // Again under the writer lock: no send can start building from here on.
+            self.ensure_deletable(account, uuid)?;
+            db.delete_account(uuid)?;
+        }
+        self.seeds.delete(account)?;
+        self.ops.delete_account(account)?;
+        debug!(%account, "deleted account and its seed");
+        info!("deleted an event account and its seed");
+        // Freed pages and the WAL still hold the deleted keys and memos until the
+        // file is rewritten. That can take a while, so it runs after replying.
+        let wallet = Arc::clone(self);
+        tokio::spawn(async move {
+            let _writer = wallet.db.lock().await;
+            if let Err(e) = tokio::task::block_in_place(|| wallet.compact()) {
+                error!(error = %format!("{e:#}"), "could not rewrite the wallet database after a delete; deleted data may remain on disk");
+            }
+        });
+        Ok(())
+    }
+
+    /// Refuses while anything could still move this account's money: deleting
+    /// the seed would destroy it. Covers unconfirmed value, sends being built,
+    /// and built transactions that could still be mined (their inputs show in
+    /// no balance until they expire).
+    fn ensure_deletable(&self, account: &str, uuid: AccountUuid) -> anyhow::Result<()> {
         let (spendable, pending) = self.balance(account)?;
         if spendable + pending > DELETE_MAX_ZAT {
             bail!("account still holds {} zatoshis; sweep it before deleting", spendable + pending);
         }
-        {
-            let mut db = self.db.lock().await;
-            db.delete_account(uuid)?;
-            // Freed pages and the WAL still hold the deleted keys and memos until rewritten.
-            if let Err(e) = self.compact() {
-                warn!(%account, "could not compact the wallet database after delete: {e:#}");
+        for op in self.ops.for_account(account)? {
+            if op.state == "executing" {
+                bail!("a send from this account is still being built; try again once it finishes");
+            }
+            if let Some(txid) = &op.txid {
+                if matches!(self.tx_state(txid)?, Some(TxState::Pending)) {
+                    bail!("a send from this account could still be mined; try again once it confirms or expires");
+                }
             }
         }
-        self.seeds.delete(account)?;
-        self.ops.delete_account(account)?;
-        info!(%account, "deleted account and its seed");
+        let conn = self.read_conn()?;
+        let in_flight: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM (
+               SELECT t.id_tx FROM orchard_received_note_spends s
+                 JOIN orchard_received_notes n ON n.id = s.orchard_received_note_id
+                 JOIN accounts a ON a.id = n.account_id
+                 JOIN transactions t ON t.id_tx = s.transaction_id
+                WHERE a.uuid = ?1 AND t.mined_height IS NULL
+                  AND (t.expiry_height IS NULL OR t.expiry_height = 0 OR t.expiry_height + ?3 >= ?2)
+               UNION
+               SELECT t.id_tx FROM sapling_received_note_spends s
+                 JOIN sapling_received_notes n ON n.id = s.sapling_received_note_id
+                 JOIN accounts a ON a.id = n.account_id
+                 JOIN transactions t ON t.id_tx = s.transaction_id
+                WHERE a.uuid = ?1 AND t.mined_height IS NULL
+                  AND (t.expiry_height IS NULL OR t.expiry_height = 0 OR t.expiry_height + ?3 >= ?2))",
+            rusqlite::params![uuid.expose_uuid().as_bytes().to_vec(), self.scanned(), EXPIRY_DEPTH],
+            |r| r.get(0),
+        )?;
+        if in_flight > 0 {
+            bail!("a transaction spending this account's funds could still be mined; try again once it expires");
+        }
         Ok(())
     }
 
@@ -498,11 +602,11 @@ impl Wallet {
         }
         let _guard = self.submit_lock.lock().unwrap();
         let existing = self.ops.by_key(key)?;
-        let opid = match existing {
+        let (opid, attempt) = match existing {
             None => {
                 let opid = format!("opid-{}", uuid::Uuid::new_v4());
                 self.ops.insert(&opid, key, account)?;
-                opid
+                (opid, 0)
             }
             Some(Op { account: ref a, .. }) if a != account => bail!("idempotency key already used by another account"),
             Some(op) if op.state == "executing" => return Ok(op.opid),
@@ -510,42 +614,60 @@ impl Wallet {
                 Some(TxState::Mined { .. }) => return Ok(opid),
                 Some(TxState::Pending) => {
                     let wallet = Arc::clone(self);
-                    let id = opid.clone();
-                    tokio::spawn(async move { wallet.rebroadcast(&id, &txid).await });
+                    tokio::spawn(async move { wallet.rebroadcast(&txid).await });
                     return Ok(opid);
                 }
                 Some(TxState::Expired) => {
                     // Txids stay out of the logs: they outlive a purge and match attendees' wallets.
                     debug!(%txid, "transaction expired unmined; building a replacement");
                     info!("transaction expired unmined; building a replacement");
-                    self.ops.restart(&opid)?;
-                    opid
+                    let attempt = self.ops.restart(&opid)?;
+                    (opid, attempt)
                 }
-                None => bail!("transaction {txid} for this key is unknown to the wallet; refusing to send again"),
+                None => {
+                    debug!(%txid, "transaction for this key is unknown");
+                    bail!("the transaction for this key is unknown to the wallet; refusing to send again")
+                }
             },
             Some(op) => {
-                self.ops.restart(&op.opid)?;
-                op.opid
+                let attempt = self.ops.restart(&op.opid)?;
+                (op.opid, attempt)
             }
         };
+        // The build runs in its own task so a panic (in proving, say) is caught
+        // here and recorded, instead of leaving the operation executing forever.
         let wallet = Arc::clone(self);
         let (id, account) = (opid.clone(), account.to_string());
         tokio::spawn(async move {
-            match wallet.build_and_broadcast(&id, &account, kind).await {
-                Ok(txid) => {
+            let build = {
+                let (wallet, id) = (Arc::clone(&wallet), id.clone());
+                tokio::spawn(async move { wallet.build_and_broadcast(&id, attempt, &account, kind).await })
+            };
+            let (state, error) = match build.await {
+                Ok(Ok(txid)) => {
                     debug!(%txid, "broadcast");
-                    let _ = wallet.ops.finish(&id, "success", "");
+                    ("success", String::new())
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "send failed");
+                    ("failed", e.to_string())
                 }
                 Err(e) => {
-                    warn!(error = %e, "send failed");
-                    let _ = wallet.ops.finish(&id, "failed", &e.to_string());
+                    error!(error = %e, "send task crashed");
+                    ("failed", "the send crashed; check the wallet log".to_string())
                 }
+            };
+            if let Err(e) = wallet.ops.finish(&id, attempt, state, &error) {
+                error!(error = %e, "could not record how a send ended");
             }
         });
         Ok(opid)
     }
 
-    async fn rebroadcast(&self, opid: &str, txid: &str) {
+    /// Send an already-built transaction again. It never touches the
+    /// operation's state: the operation may have moved on (expired and been
+    /// rebuilt) by the time this finishes, and must not be overwritten.
+    async fn rebroadcast(&self, txid: &str) {
         let result = async {
             let id = TxId::from_hex(txid).ok_or_else(|| anyhow!("bad txid"))?;
             let tx = self.reader()?.get_transaction(id)?.ok_or_else(|| anyhow!("transaction not found"))?;
@@ -554,14 +676,9 @@ impl Wallet {
             self.broadcast(raw).await
         }
         .await;
-        match result {
-            Ok(()) => {
-                let _ = self.ops.finish(opid, "success", "");
-            }
-            Err(e) => {
-                debug!(%txid, "rebroadcast failed");
-                warn!(error = %e, "rebroadcast failed")
-            }
+        if let Err(e) = result {
+            debug!(%txid, "rebroadcast failed");
+            warn!(error = %e, "rebroadcast failed")
         }
     }
 
@@ -570,7 +687,12 @@ impl Wallet {
         let resp = client.send_transaction(raw).await?.into_inner();
         let msg = resp.error_message.to_lowercase();
         // Already known to the node: that is what a rebroadcast hopes for.
-        if resp.error_code != 0 && !msg.contains("already") && !msg.contains("txn-mempool-conflict") {
+        if resp.error_code != 0 && msg.contains("txn-mempool-conflict") {
+            // A different transaction spending the same notes is in the mempool.
+            // Only this wallet can spend them, so it is one of ours; whichever is
+            // mined wins, and the other expires. Worth knowing, not failing.
+            warn!("broadcast conflicts with another transaction of this wallet in the mempool");
+        } else if resp.error_code != 0 && !msg.contains("already") {
             bail!("lightwalletd rejected the transaction ({}): {}", resp.error_code, resp.error_message);
         }
         Ok(())
@@ -600,7 +722,7 @@ impl Wallet {
         }
     }
 
-    async fn build_and_broadcast(&self, opid: &str, account: &str, kind: SendKind) -> anyhow::Result<String> {
+    async fn build_and_broadcast(&self, opid: &str, attempt: i64, account: &str, kind: SendKind) -> anyhow::Result<String> {
         let uuid = Self::parse_account(account)?;
         let seed = self.seeds.load(account)?;
         let usk = UnifiedSpendingKey::from_seed(&self.params, seed.expose_secret(), zip32::AccountId::ZERO)
@@ -677,7 +799,9 @@ impl Wallet {
             (tx.txid(), amount, raw)
         };
         // Recorded before broadcasting: from here on, this key's money may be on its way.
-        self.ops.set_built(opid, &txid.to_string(), amount)?;
+        // Refused if this attempt was superseded, and then nothing is broadcast: the
+        // built transaction's notes are released when it expires.
+        self.ops.set_built(opid, attempt, &txid.to_string(), amount)?;
         self.broadcast(raw).await?;
         Ok(txid.to_string())
     }
@@ -706,6 +830,27 @@ impl Wallet {
             zcash_protocol::consensus::NetworkType::Regtest => "regtest",
         }
     }
+}
+
+/// A create interrupted between creating the account and committing its seed
+/// leaves the seed under its staged name: commit it to the account it belongs
+/// to, or the account's funds could never be spent. A staged seed with no
+/// account was never used and is discarded.
+fn recover_staged_seeds(params: &Network, db: &Db, seeds: &SeedStore) -> anyhow::Result<()> {
+    for staged in seeds.staged()? {
+        let seed = seeds.load(&staged)?;
+        let ufvk = UnifiedSpendingKey::from_seed(params, seed.expose_secret(), zip32::AccountId::ZERO)
+            .map_err(|e| anyhow!("key derivation failed: {e:?}"))?
+            .to_unified_full_viewing_key();
+        match db.get_account_for_ufvk(&ufvk)? {
+            Some(account) => {
+                seeds.commit(&staged, &account.id().expose_uuid().to_string())?;
+                warn!("recovered the seed of an account whose creation was interrupted");
+            }
+            None => seeds.discard(&staged),
+        }
+    }
+    Ok(())
 }
 
 impl Wallet {

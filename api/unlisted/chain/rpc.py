@@ -24,6 +24,11 @@ def _zat(entry: dict, key: str = "amount") -> int:
     return int((Decimal(str(entry[key])) * ZAT_PER_ZEC).to_integral_value())
 
 
+# Creating and deleting accounts wait for the wallet's writer, which a sync can
+# hold for a while; giving up early would leave an account the API never records.
+SLOW_TIMEOUT_S = 180.0
+
+
 class RpcChain:
     def __init__(self, url: str, user: str, password: str, privacy_policy: str = "FullPrivacy",
                  min_conf: int = 1, timeout: float = 30.0):
@@ -33,10 +38,10 @@ class RpcChain:
         self._policy = privacy_policy
         self._min_conf = min_conf
 
-    def _call(self, method: str, *params):
+    def _call(self, method: str, *params, timeout: float | None = None):
         body = {"jsonrpc": "1.0", "id": next(self._ids), "method": method, "params": list(params)}
         try:
-            r = self._client.post("/", json=body)
+            r = self._client.post("/", json=body, **({"timeout": timeout} if timeout else {}))
         except httpx.HTTPError as e:
             raise ChainError(f"wallet unreachable: {e}") from e
         try:
@@ -52,10 +57,19 @@ class RpcChain:
         return int(self._call("getblockcount"))
 
     def new_event_account(self) -> tuple[str, str]:
-        account = str(self._call("z_getnewaccount")["account"])
+        account = str(self._call("z_getnewaccount", timeout=SLOW_TIMEOUT_S)["account"])
         # Orchard-only: payers and refunds stay inside one pool, so no
         # cross-pool transfer ever reveals an amount.
-        addr = self._call("z_getaddressforaccount", account, ["orchard"])["address"]
+        try:
+            addr = self._call("z_getaddressforaccount", account, ["orchard"], timeout=SLOW_TIMEOUT_S)["address"]
+        except ChainError:
+            # The account is new and empty: remove it rather than leave one the
+            # API never records (it would be scanned forever and never purged).
+            try:
+                self.delete_account(account)
+            except ChainError:
+                pass
+            raise
         return account, addr
 
     def received(self, account_ref: str, address: str, since_height: int = 0) -> list[ReceivedNote]:
@@ -91,6 +105,8 @@ class RpcChain:
             }
             for r in recipients
         ]
+        # minconf keeps zcashd's parameter order; unlisted-wallet applies librustzcash's
+        # own confirmation policy (10 for received notes, 3 for change) instead.
         return self._call("z_sendmany", from_address, amounts, self._min_conf, None, self._policy, key)
 
     def sweep(self, account_ref: str, from_address: str, to_address: str, memo: bytes, key: str) -> str:
@@ -116,4 +132,5 @@ class RpcChain:
         return TxStatus(r["status"], int(r.get("confirmations", 0)))
 
     def delete_account(self, account_ref: str) -> None:
-        self._call("z_deleteaccount", account_ref)
+        # Idempotent on the wallet's side, so a timed-out delete can be retried.
+        self._call("z_deleteaccount", account_ref, timeout=SLOW_TIMEOUT_S)

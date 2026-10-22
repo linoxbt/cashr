@@ -67,7 +67,24 @@ impl SeedStore {
 
     pub fn commit(&self, staged: &str, account: &str) -> anyhow::Result<()> {
         fs::rename(self.path(staged), self.path(account))?;
+        // The rename only survives a power cut once the directory is synced.
+        fs::File::open(&self.dir)?.sync_all()?;
         Ok(())
+    }
+
+    /// Seeds staged by a create that never finished (the process died between
+    /// staging and committing).
+    pub fn staged(&self) -> anyhow::Result<Vec<String>> {
+        let mut out = vec![];
+        for entry in fs::read_dir(&self.dir)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = name.strip_suffix(".seed") {
+                if stem.starts_with("staged-") {
+                    out.push(stem.to_string());
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub fn discard(&self, staged: &str) {
@@ -90,8 +107,13 @@ impl SeedStore {
     pub fn delete(&self, account: &str) -> anyhow::Result<()> {
         let path = self.path(account);
         if let Ok(len) = fs::metadata(&path).map(|m| m.len()) {
-            // Best effort overwrite before unlinking.
-            let _ = fs::write(&path, vec![0u8; len as usize]);
+            // Overwrite in place (no truncation, which would just free the old
+            // blocks) before unlinking. Best effort: a journaling or copy-on-write
+            // filesystem may keep old copies, which is why seeds are encrypted.
+            use std::io::Write;
+            if let Ok(mut f) = fs::OpenOptions::new().write(true).open(&path) {
+                let _ = f.write_all(&vec![0u8; len as usize]).and_then(|_| f.sync_all());
+            }
         }
         match fs::remove_file(&path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),

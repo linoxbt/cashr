@@ -82,8 +82,12 @@ fn parse_zec(v: &Value) -> Result<Zatoshis, RpcError> {
     if whole.is_empty() || !whole.chars().all(|c| c.is_ascii_digit()) || frac.len() > 8 || !frac.chars().all(|c| c.is_ascii_digit()) {
         return Err(param_err(format!("invalid amount {text}")));
     }
-    let zat = whole.parse::<u64>().map_err(|_| param_err("amount too large"))? * 100_000_000
-        + format!("{frac:0<8}").parse::<u64>().unwrap_or(0);
+    let zat = whole
+        .parse::<u64>()
+        .ok()
+        .and_then(|w| w.checked_mul(100_000_000))
+        .and_then(|w| w.checked_add(format!("{frac:0<8}").parse::<u64>().unwrap_or(0)))
+        .ok_or_else(|| param_err("amount too large"))?;
     Zatoshis::from_u64(zat).map_err(|_| param_err("amount out of range"))
 }
 
@@ -236,5 +240,8 @@ mod tests {
         assert_eq!(zat(json!("0.000000001")), None);
         assert_eq!(zat(json!("-1")), None);
         assert_eq!(zat(json!("1e3")), None);
+        // Would wrap around u64 and come out small without checked arithmetic.
+        assert_eq!(zat(json!("184467440738")), None);
+        assert_eq!(zat(json!("18446744073709551615")), None);
     }
 }

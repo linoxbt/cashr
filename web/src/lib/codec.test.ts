@@ -76,3 +76,14 @@ test("refund addresses must carry an Orchard receiver", () => {
   assert.equal(addressProblem(BOTH, "main"), null);
   assert.match(addressProblem(SAPLING_ONLY, "main") ?? "", /Orchard/);
 });
+
+// Generated once with the Python F4Jumble/bech32m helpers (same vector in api/tests/test_ua.py): an Orchard receiver (bytes 0..42)
+// followed by an unknown receiver whose typecode and length need multi-byte
+// CompactSizes. Both parsers must accept it, as ZIP 316 allows.
+const MULTIBYTE_UA = "u1rexdud0f8y83nem3s7shlu2edrrwhjz79r5t8mmxgf582lhlg8ss89qera4wxq6pv7s60254sleueepr9eh6ggyjlrswy4tkufw3ewp3ahsmw907u3qapjtntp522ga06jddxkc9t6gs777z2s649dwn2yq5vz8phqxdgmjs5ad36snsdurw0zeumypemrnny99td58vj29ujr4p078mgjwypczx39kt430h9d6x7hvwjjkqssh7tlu2g2ura2xu4jls0lehhhmr3x4p2t9xthvvfsjrxj8dnyhhtr63eu7qafgptwzx726tggmvmd7sa23q20yhamj36zclch8nnnjacrqm34jkwvkfsgclundfn5cgu3y260hezpvrpk522cd8489crwfcs8sa52m89rnn586stng5dm46sfg4fjevjp267quptsukg2dvdhnlw2vw8m33qq567pwu5d7q0wr3aajcnhadur7gq9vjkxymt8wvlkthrap0yxvlqy33mnmx9cg3vrekku6hzd3lm2vyggp5lg7pljh4jpwk6wksx6f3rxl6cv5xjxpzs6lntm7qfrggujmk2ccp65g3f";
+
+test("UA receivers with multi-byte CompactSizes parse like the Python side", () => {
+  const r = decodeUnified(MULTIBYTE_UA, "main");
+  assert.ok(r?.orchard);
+  assert.deepEqual([...r.orchard], Array.from({ length: 43 }, (_, i) => i));
+});
