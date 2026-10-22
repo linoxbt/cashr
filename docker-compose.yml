@@ -12,6 +12,7 @@ x-logging: &logging
   options:
     max-size: "1m"
     max-file: "1"
+    compress: "false"  # the local driver can't compress with only one file
 
 services:
   # The wallet reaches lightwalletd through Tor. Otherwise lightwalletd's
