@@ -1,9 +1,9 @@
 [package]
-name = "unlisted-wallet"
+name = "cashr-wallet"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Light-client Zcash wallet for Unlisted: syncs from lightwalletd, speaks a zcashd-style JSON-RPC subset."
+description = "Light-client Zcash wallet for cashr: syncs from lightwalletd, speaks a zcashd-style JSON-RPC subset."
 
 [dependencies]
 zcash_client_backend = { version = "0.24", features = ["lightwalletd-tonic", "lightwalletd-tonic-tls-webpki-roots", "orchard", "sync"] }

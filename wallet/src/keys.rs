@@ -4,7 +4,7 @@
 //! wallet-wide seed. Purging an event deletes its seed, after which nobody,
 //! including whoever holds this server, can derive the keys that decrypt that
 //! event's memos from the chain again. Seeds are encrypted with
-//! ChaCha20-Poly1305 under `UW_SEED_KEY`, so a copy of the data volume alone
+//! ChaCha20-Poly1305 under `CASHR_WALLET_SEED_KEY`, so a copy of the data volume alone
 //! cannot spend anything. It is still private data: `wallet.sqlite` keeps each
 //! live event's viewing key and its decrypted memos (ticket hashes and refund
 //! addresses) until the event is purged.
@@ -22,7 +22,9 @@ use chacha20poly1305::{
 use rand::{rngs::OsRng, RngCore};
 use secrecy::{ExposeSecret, SecretVec};
 
-const AAD: &[u8] = b"unlisted-wallet seed v1";
+const AAD: &[u8] = b"cashr-wallet seed v1";
+/// Seeds written before the rename to cashr were bound to this; they still open.
+const OLD_AAD: &[u8] = b"unlisted-wallet seed v1";
 
 pub struct SeedStore {
     dir: PathBuf,
@@ -32,9 +34,9 @@ pub struct SeedStore {
 impl SeedStore {
     /// `key_hex` is 64 hex characters (32 bytes).
     pub fn open(dir: &Path, key_hex: &str) -> anyhow::Result<Self> {
-        let key = hex::decode(key_hex.trim()).context("UW_SEED_KEY must be hex")?;
+        let key = hex::decode(key_hex.trim()).context("CASHR_WALLET_SEED_KEY must be hex")?;
         if key.len() != 32 {
-            bail!("UW_SEED_KEY must be 32 bytes (64 hex characters)");
+            bail!("CASHR_WALLET_SEED_KEY must be 32 bytes (64 hex characters)");
         }
         fs::create_dir_all(dir)?;
         Ok(Self { dir: dir.to_path_buf(), cipher: ChaCha20Poly1305::new(Key::from_slice(&key)) })
@@ -106,10 +108,10 @@ impl SeedStore {
             bail!("seed file for {account} is damaged");
         }
         let (nonce, ct) = data.split_at(12);
-        let seed = self
-            .cipher
-            .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad: AAD })
-            .map_err(|_| anyhow!("cannot decrypt the seed for {account}: wrong UW_SEED_KEY?"))?;
+        let open = |aad| self.cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad });
+        let seed = open(AAD)
+            .or_else(|_| open(OLD_AAD))
+            .map_err(|_| anyhow!("cannot decrypt the seed for {account}: wrong CASHR_WALLET_SEED_KEY?"))?;
         Ok(SecretVec::new(seed))
     }
 
@@ -146,6 +148,20 @@ pub fn write_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeds_from_before_the_rename_still_open() {
+        let dir = std::env::temp_dir().join(format!("uw-seeds-{}", uuid::Uuid::new_v4()));
+        let store = SeedStore::open(&dir, &"11".repeat(32)).unwrap();
+        let mut nonce = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce);
+        let ct = store.cipher.encrypt(Nonce::from_slice(&nonce), Payload { msg: &[9u8; 32], aad: OLD_AAD }).unwrap();
+        let mut data = nonce.to_vec();
+        data.extend_from_slice(&ct);
+        write_private(&store.path("old-acct"), &data).unwrap();
+        assert_eq!(store.load("old-acct").unwrap().expose_secret(), &vec![9u8; 32]);
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn seeds_round_trip_and_are_encrypted() {

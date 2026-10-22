@@ -48,8 +48,8 @@ export function ServerStatus() {
         </div>
         <div className="text-ink-3">
           {API_CONFIGURED
-            ? "The Unlisted server can't be reached, so events can't be created or joined right now."
-            : "This copy of Unlisted isn't connected to a server yet, so events can't be created or joined here."}{" "}
+            ? "The cashr server can't be reached, so events can't be created or joined right now."
+            : "This copy of cashr isn't connected to a server yet, so events can't be created or joined here."}{" "}
           <Link href="/docs#self-hosting" className="text-ink-2 underline decoration-ink-4 underline-offset-4 hover:text-ink">Run your own</Link>
         </div>
       </div>

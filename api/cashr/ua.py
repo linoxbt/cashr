@@ -1,6 +1,6 @@
 """Unified Address decoding (ZIP 316): bech32m → F4Jumble⁻¹ → receivers.
 
-Unlisted refunds are sent Orchard-to-Orchard so nothing about them is visible
+cashr refunds are sent Orchard-to-Orchard so nothing about them is visible
 on chain. A refund address is therefore only usable if it contains an Orchard
 receiver, and this module is how the server checks that without asking a
 wallet.

@@ -67,7 +67,7 @@ async fn socks_connect(proxy: &str, uri: &Uri) -> anyhow::Result<TokioIo<tokio::
     let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
     let mut login = [0u8; 16];
     OsRng.fill_bytes(&mut login);
-    let stream = Socks5Stream::connect_with_password(proxy, (host, port), &hex::encode(login), "unlisted")
+    let stream = Socks5Stream::connect_with_password(proxy, (host, port), &hex::encode(login), "cashr")
         .await
         .with_context(|| format!("connecting through the SOCKS proxy at {proxy}"))?;
     Ok(TokioIo::new(stream.into_inner()))

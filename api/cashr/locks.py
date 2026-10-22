@@ -33,7 +33,7 @@ def acquire_writer_lock(database_url: str) -> WriterLock:
         except BlockingIOError:
             os.close(fd)
             raise RuntimeError(
-                "Another Unlisted API process is using this database. Run exactly one (one worker, one replica)."
+                "Another cashr API process is using this database. Run exactly one (one worker, one replica)."
             ) from None
 
         def release() -> None:
@@ -47,11 +47,11 @@ def acquire_writer_lock(database_url: str) -> WriterLock:
 
     eng = create_engine(database_url, pool_size=1, max_overflow=0)
     conn = eng.connect()
-    key = zlib.crc32(b"unlisted-writer")
+    key = zlib.crc32(b"cashr-writer")
     if not conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": key}).scalar():
         conn.close()
         raise RuntimeError(
-            "Another Unlisted API process holds the database. Run exactly one (one worker, one replica)."
+            "Another cashr API process holds the database. Run exactly one (one worker, one replica)."
         )
 
     def release_pg() -> None:

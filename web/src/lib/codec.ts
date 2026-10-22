@@ -1,10 +1,10 @@
-// Wire formats. Must match api/unlisted/codec.py exactly; see docs/PROTOCOL.md.
+// Wire formats. Must match api/cashr/codec.py exactly; see docs/PROTOCOL.md.
 import { hasOrchardReceiver } from "./ua.ts";
 
-export const MEMO_TAG = "UNL1";
+export const MEMO_TAG = "CSH1";
 export const ZAT_PER_ZEC = 100_000_000;
-export const TICKET_QR_PREFIX = "unlisted";
-/** 512-byte memo minus "UNL1 ", a 10-character event id, a 43-character hash and two spaces. */
+export const TICKET_QR_PREFIX = "cashr";
+/** 512-byte memo minus "CSH1 ", a 10-character event id, a 43-character hash and two spaces. */
 export const MAX_REFUND_ADDRESS = 512 - (MEMO_TAG.length + 1 + 10 + 1 + 43 + 1);
 
 const enc = new TextEncoder();
@@ -61,7 +61,7 @@ export function ticketQr(eventId: string, secret: string): string {
 }
 
 export function parseTicketQr(text: string): { eventId: string; secret: string } | null {
-  const m = text.trim().match(/^unlisted:([a-z0-9]{10}):([A-Za-z0-9_-]{43})$/);
+  const m = text.trim().match(/^cashr:([a-z0-9]{10}):([A-Za-z0-9_-]{43})$/);
   return m ? { eventId: m[1], secret: m[2] } : null;
 }
 
@@ -124,7 +124,7 @@ export function addressProblem(address: string, network: string): string | null 
     return "That is an older Sapling address. Use your wallet's Unified Address (it starts with “u1”).";
   }
   if (!addressKind(a, network)) return "That does not look like a valid Zcash address.";
-  // The memo carries "UNL1 <event id> <ticket hash> <address>" in 512 bytes.
+  // The memo carries "CSH1 <event id> <ticket hash> <address>" in 512 bytes.
   if (a.length > MAX_REFUND_ADDRESS) return "That address is too long to fit in the payment memo. Use your wallet's shielded address.";
   if (!hasOrchardReceiver(a, network)) {
     return "This address can't receive a private (Orchard) refund. Copy the shielded address from ZODL's Receive screen.";
@@ -138,6 +138,6 @@ export const REJECTION_TEXT: Record<string, string> = {
   wrong_event: "The payment was for a different event.",
   rsvps_closed: "RSVPs had already closed.",
   duplicate_ticket: "That ticket was already used.",
-  address_reused: "That refund address was already used for an Unlisted RSVP.",
+  address_reused: "That refund address was already used for an cashr RSVP.",
   bad_refund_address: "The refund address in the memo can't receive a private (Orchard) refund, so this payment can't be returned automatically. Ask the organiser.",
 };

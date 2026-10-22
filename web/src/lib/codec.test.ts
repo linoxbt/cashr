@@ -45,16 +45,16 @@ test("ticket hash is base64url sha256", async () => {
 
 test("memo layout", () => {
   const m = new TextDecoder().decode(encodeMemo("abcde12345", "A".repeat(43), "u1x"));
-  assert.equal(m, `UNL1 abcde12345 ${"A".repeat(43)} u1x`);
+  assert.equal(m, `CSH1 abcde12345 ${"A".repeat(43)} u1x`);
 });
 
 test("ticket QR parsing", () => {
   const secret = b64url(new Uint8Array(32).fill(7));
-  assert.deepEqual(parseTicketQr(`unlisted:abcde12345:${secret}`), { eventId: "abcde12345", secret });
+  assert.deepEqual(parseTicketQr(`cashr:abcde12345:${secret}`), { eventId: "abcde12345", secret });
   assert.equal(parseTicketQr("https://example.com"), null);
 });
 
-// Real mainnet addresses produced by unlisted-wallet (librustzcash); same as api/tests/test_ua.py.
+// Real mainnet addresses produced by cashr-wallet (librustzcash); same as api/tests/test_ua.py.
 const ORCHARD_ONLY = "u17j7e5kk4uzh698uajv4lah3mtt2x7jyewk3ya5tjvhjzp6yc5x260svm66uveezd93htyy3u0pyg80gpttfujfvj5pvlcqhngskrvpyd";
 const SAPLING_ONLY = "u1r4epe0uuztny46hl3pkrdv4tqlxxu59jcvj3wtnrsljt4glvvzfrumu8d827h8vgxf7pzkjenye60k392eeegpzdx5y7r3vpaysausau";
 const BOTH =

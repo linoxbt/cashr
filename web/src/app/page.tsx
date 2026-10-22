@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { DemoCta } from "@/components/DemoCta";
 import { TapeDeck } from "@/components/TapeDeck";
 import { TAPES } from "@/components/tapes";
 
@@ -33,13 +34,19 @@ const SEIZED = [
 export default function Home() {
   return (
     <>
-      <h1 className="sr-only">Unlisted: RSVPs without a guest list</h1>
+      <h1 className="sr-only">cashr: RSVPs without a guest list</h1>
       {/* The deck fills the screen from the very top, under the on-screen display. */}
       <div className="-mt-24 sm:-mt-32">
         <TapeDeck tapes={TAPES} />
       </div>
 
       <div className="mx-auto max-w-page space-y-24 px-4 pb-8 pt-10 sm:px-8">
+        <section className="flex flex-wrap items-center gap-3">
+          <Link href="/new" className="btn bg-gold text-gold-on hover:bg-gold/90">Create an event</Link>
+          <DemoCta />
+          <span className="text-sm text-ink-3">The demo runs the same app on a simulated chain, so you can try every step.</span>
+        </section>
+
         <section>
           <p className="eyebrow">For groups that can&rsquo;t afford a leaked list</p>
           <h2 className="mt-3 max-w-3xl text-5xl leading-[1.02] sm:text-6xl">
@@ -62,7 +69,7 @@ export default function Home() {
             <h2 className="mt-3 text-5xl leading-[1.02]">There is nothing on it to find.</h2>
             <p className="mt-5 leading-relaxed text-ink-2">
               Every RSVP tool keeps a database of people. Breaches, subpoenas and stolen devices turn it into a target list.
-              Unlisted only stores random ticket hashes and one-time refund addresses, and deletes them after the event.
+              cashr only stores random ticket hashes and one-time refund addresses, and deletes them after the event.
             </p>
             <p className="mt-4 leading-relaxed text-ink-2">
               That works because of Zcash&rsquo;s shielded pool: a deposit can come from someone unknown, and a refund can go
@@ -76,7 +83,7 @@ export default function Home() {
                 <tr>
                   <th className="px-5 py-3 font-medium">A seized server reveals</th>
                   <th className="px-5 py-3 font-medium">Typical RSVP tool</th>
-                  <th className="px-5 py-3 font-medium">Unlisted</th>
+                  <th className="px-5 py-3 font-medium">cashr</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-ink/[0.08]">
@@ -100,7 +107,8 @@ export default function Home() {
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
-            <Link href="/new" className="btn bg-gold text-screen hover:bg-gold/90">Create an event</Link>
+            <Link href="/new" className="btn bg-gold text-gold-on hover:bg-gold/90">Create an event</Link>
+            <DemoCta />
             <Link href="/app" className="btn-secondary">Open the app</Link>
             <Link href="/docs" className="btn-ghost">Docs</Link>
           </div>

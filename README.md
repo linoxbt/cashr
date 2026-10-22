@@ -1,4 +1,4 @@
-# Unlisted
+# cashr
 
 **RSVPs without a guest list.** A refundable deposit in shielded ZEC stops no-shows, and nobody, not even the
 organiser, ever holds a list of who came.
@@ -11,7 +11,7 @@ Support groups, union organisers, journalists and activists need RSVPs because n
 RSVP tool produces a list of names, emails or wallet addresses, and a breach, subpoena or seized laptop turns it into
 a target list.
 
-Unlisted replaces the list with:
+cashr replaces the list with:
 
 1. **A secret made on the attendee's phone.** Only its SHA-256 hash is ever sent.
 2. **A shielded deposit.** The hash and a one-time refund address ride in the payment's encrypted memo. Nobody can see
@@ -48,7 +48,7 @@ stored and what could still leak.
 ## Repository
 
 ```
-wallet/  unlisted-wallet (Rust, librustzcash): light-client Zcash wallet syncing from lightwalletd.
+wallet/  cashr-wallet (Rust, librustzcash): light-client Zcash wallet syncing from lightwalletd.
          One account per event from its own encrypted seed, memo decryption, Orchard-only refunds,
          idempotent sends that survive restarts, JSON-RPC.
 api/     FastAPI service: deposit scanner, RSVP rules, settlement, door API, purge (Python 3.11+)
@@ -76,7 +76,7 @@ payment"):
 
 ```bash
 cd api && uv venv && uv pip install -e '.[dev]'
-UNLISTED_CHAIN=sim UNLISTED_SECRET=dev .venv/bin/uvicorn unlisted.main:app --port 8000 --no-access-log
+CASHR_CHAIN=sim CASHR_SECRET=dev .venv/bin/uvicorn cashr.main:app --port 8000 --no-access-log
 cd web && npm install && NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 ```
 

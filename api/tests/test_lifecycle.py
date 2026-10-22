@@ -3,9 +3,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from conftest import auth
 
-from unlisted.chain.sim import EXPIRY_DELTA, random_unified_address
-from unlisted.engine import RSVP_GRACE_BLOCKS
-from unlisted.db import Deposit, Event, Payout, Rsvp, SeenAddress
+from cashr.chain.sim import EXPIRY_DELTA, random_unified_address
+from cashr.engine import RSVP_GRACE_BLOCKS
+from cashr.db import Deposit, Event, Payout, Rsvp, SeenAddress
 
 
 def tickets(client, event_id):
@@ -111,7 +111,7 @@ def test_lost_response_never_pays_twice(client, make_event, attendee):
 
 
 def test_restarted_api_resumes_without_paying_twice(client, make_event, attendee):
-    from unlisted.engine import Engine
+    from cashr.engine import Engine
 
     created = make_event(forfeit_address=random_unified_address())
     ev, admin, door = created["event"], created["admin_token"], created["door_token"]
@@ -155,7 +155,7 @@ def test_expired_refund_is_sent_again(client, make_event, attendee):
 
 
 def test_pending_refund_is_rebroadcast_not_resent(client, make_event, attendee):
-    from unlisted.engine import REBROADCAST_EVERY
+    from cashr.engine import REBROADCAST_EVERY
 
     created = make_event()
     ev, admin, door = created["event"], created["admin_token"], created["door_token"]
@@ -209,7 +209,7 @@ def test_without_fund_address_money_is_kept_and_purge_refused(client, make_event
 
 
 def test_unknown_operation_stops_for_a_person(client, make_event, attendee):
-    from unlisted.chain.base import OpStatus
+    from cashr.chain.base import OpStatus
 
     created = make_event()
     ev, admin, door = created["event"], created["admin_token"], created["door_token"]
@@ -350,8 +350,8 @@ def test_create_validation(client):
 def test_event_creation_is_rate_limited(tmp_path, chain):
     from fastapi.testclient import TestClient
 
-    from unlisted.app import create_app
-    from unlisted.config import Settings
+    from cashr.app import create_app
+    from cashr.config import Settings
 
     settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/r.db", run_scanner=False,
                         secret="s", create_per_hour=2)
@@ -361,20 +361,20 @@ def test_event_creation_is_rate_limited(tmp_path, chain):
 
 
 def test_chain_mode_must_be_explicit():
-    from unlisted.chain import make_chain
-    from unlisted.config import Settings
+    from cashr.chain import make_chain
+    from cashr.config import Settings
 
     with pytest.raises(ValueError):
         make_chain(Settings(chain_mode=""))
 
 
 def test_one_process_per_database(tmp_path, chain):
-    from unlisted.app import create_app
-    from unlisted.config import Settings
+    from cashr.app import create_app
+    from cashr.config import Settings
 
     settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/w.db", run_scanner=False, secret="s")
     first = create_app(settings, chain)
-    with pytest.raises(RuntimeError, match="Another Unlisted API process"):
+    with pytest.raises(RuntimeError, match="Another cashr API process"):
         create_app(settings, chain)
     first.state.writer_lock.release()
     create_app(settings, chain).state.writer_lock.release()
@@ -393,7 +393,7 @@ def test_refund_address_without_orchard_is_reported(client, make_event, attendee
 
 def test_async_shortfall_waits_for_top_up(client, make_event, attendee):
     """The wallet reports insufficient funds only when the operation runs."""
-    from unlisted.chain.base import OpStatus
+    from cashr.chain.base import OpStatus
 
     created = make_event()
     ev, admin, door = created["event"], created["admin_token"], created["door_token"]
@@ -446,7 +446,7 @@ def test_one_broken_event_does_not_stop_scanning(client, make_event, attendee):
 def test_old_database_gains_new_columns(tmp_path):
     import sqlite3
 
-    from unlisted.db import init_db, make_engine
+    from cashr.db import init_db, make_engine
 
     path = tmp_path / "old.db"
     con = sqlite3.connect(path)
@@ -501,7 +501,7 @@ def test_purge_rechecks_funds_under_the_lock(client, make_event, attendee):
 def test_sqlite_overwrites_deleted_rows(tmp_path):
     from sqlalchemy import text
 
-    from unlisted.db import make_engine
+    from cashr.db import make_engine
 
     with make_engine(f"sqlite:///{tmp_path}/s.db").connect() as conn:
         assert conn.execute(text("PRAGMA secure_delete")).scalar() == 1

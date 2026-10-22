@@ -14,7 +14,9 @@ export interface StoredTicket {
   startsAt?: string;
 }
 
-export const TICKETS_KEY = "unlisted.tickets.v1";
+export const TICKETS_KEY = "cashr.tickets.v1";
+export const THEME_KEY = "cashr.theme";
+export type Theme = "dark" | "light";
 const TICKETS = TICKETS_KEY;
 
 function read<T>(store: Storage | undefined, key: string, fallback: T): T {
@@ -35,8 +37,38 @@ function write(store: Storage | undefined, key: string, value: unknown): boolean
   }
 }
 
-const local = () => (typeof window === "undefined" ? undefined : window.localStorage);
-const session = () => (typeof window === "undefined" ? undefined : window.sessionStorage);
+// Keys were "unlisted.*" before the app was renamed cashr. Move them once, so
+// tickets and remembered links saved under the old name are kept.
+const LEGACY_PREFIX = "unlisted.";
+const migrated = new WeakSet<Storage>();
+function migrate(store: Storage): Storage {
+  if (migrated.has(store)) return store;
+  migrated.add(store);
+  try {
+    for (const key of Object.keys(store)) {
+      if (!key.startsWith(LEGACY_PREFIX)) continue;
+      const renamed = "cashr." + key.slice(LEGACY_PREFIX.length);
+      const value = store.getItem(key);
+      if (store.getItem(renamed) === null && value !== null) store.setItem(renamed, value);
+      store.removeItem(key);
+    }
+  } catch {
+    /* storage blocked: nothing to move */
+  }
+  return store;
+}
+
+// Even reading window.localStorage throws when site data is blocked.
+function storage(kind: "localStorage" | "sessionStorage"): Storage | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return migrate(window[kind]);
+  } catch {
+    return undefined;
+  }
+}
+const local = () => storage("localStorage");
+const session = () => storage("sessionStorage");
 
 export function getTicket(eventId: string): StoredTicket | null {
   return read<Record<string, StoredTicket>>(local(), TICKETS, {})[eventId] ?? null;
@@ -78,7 +110,7 @@ export function forgetKeys(keys: string[]): void {
  * and strip it from the address bar so it does not end up in screenshots.
  */
 export function takeLinkToken(scope: string): string | null {
-  const key = `unlisted.token.${scope}`;
+  const key = `cashr.token.${scope}`;
   if (typeof window === "undefined") return null;
   const m = window.location.hash.match(/k=([A-Za-z0-9_-]+)/);
   if (m) {
@@ -99,7 +131,7 @@ export interface SavedEvent {
   savedAt: string;
 }
 
-const EVENTS = "unlisted.events.v1";
+const EVENTS = "cashr.events.v1";
 
 export function listTickets(): StoredTicket[] {
   return Object.values(read<Record<string, StoredTicket>>(local(), TICKETS, {})).sort((a, b) =>

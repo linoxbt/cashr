@@ -14,7 +14,7 @@ def make_chain(settings: Settings) -> Chain:
         from .sim import SimChain
 
         return SimChain(settings.network)
-    raise ValueError(f"Set UNLISTED_CHAIN to 'rpc' or 'sim' (got {settings.chain_mode!r}).")
+    raise ValueError(f"Set CASHR_CHAIN to 'rpc' or 'sim' (got {settings.chain_mode!r}).")
 
 
 __all__ = ["Balance", "Chain", "ChainError", "OpStatus", "ReceivedNote", "Recipient", "TxStatus", "make_chain"]

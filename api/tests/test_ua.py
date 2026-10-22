@@ -1,10 +1,10 @@
-"""UA decoding against real mainnet addresses produced by librustzcash (unlisted-wallet)."""
+"""UA decoding against real mainnet addresses produced by librustzcash (cashr-wallet)."""
 
 import pytest
 
-from unlisted.chain.sim import random_unified_address
-from unlisted.codec import is_orchard_address
-from unlisted.ua import UAError, decode_unified, f4jumble, f4jumble_inv
+from cashr.chain.sim import random_unified_address
+from cashr.codec import is_orchard_address
+from cashr.ua import UAError, decode_unified, f4jumble, f4jumble_inv
 
 ORCHARD_ONLY = "u17j7e5kk4uzh698uajv4lah3mtt2x7jyewk3ya5tjvhjzp6yc5x260svm66uveezd93htyy3u0pyg80gpttfujfvj5pvlcqhngskrvpyd"
 SAPLING_ONLY = "u1r4epe0uuztny46hl3pkrdv4tqlxxu59jcvj3wtnrsljt4glvvzfrumu8d827h8vgxf7pzkjenye60k392eeegpzdx5y7r3vpaysausau"

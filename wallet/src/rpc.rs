@@ -1,6 +1,6 @@
-//! The JSON-RPC methods Unlisted's API uses. Names follow zcashd where one
+//! The JSON-RPC methods cashr's API uses. Names follow zcashd where one
 //! exists; idempotent sends, sweeps, transaction status and account deletion
-//! are unlisted-wallet extensions.
+//! are cashr-wallet extensions.
 
 use std::sync::Arc;
 
@@ -96,7 +96,7 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
     match method {
         "getblockcount" => Ok(json!(w.tip())),
 
-        // Unlisted extension: the chain height at a moment (the last scanned block
+        // cashr extension: the chain height at a moment (the last scanned block
         // mined at or before it), so a deadline can be judged in blocks.
         "z_heightattime" => {
             let t = params.first().and_then(Value::as_i64).ok_or_else(|| param_err("unix time required"))?;

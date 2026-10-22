@@ -28,7 +28,7 @@ from .codec import is_orchard_address, try_decode_memo
 from .config import Settings
 from .db import Deposit, Event, Payout, Rsvp, SeenAddress
 
-log = logging.getLogger("unlisted.engine")
+log = logging.getLogger("cashr.engine")
 
 ACTIVE = ("open", "closed", "settling", "settled")
 DOOR_OPEN = ("open", "closed")
@@ -44,8 +44,8 @@ SLOW_SCAN_EVERY = 8
 BALANCE_TTL_S = 10.0
 # Memos stay in the recipient's wallet for good, so they never name the event:
 # a refund memo with a title would prove attendance long after the purge.
-REFUND_MEMO = "Unlisted: deposit refunded."
-NO_SHOW_MEMO = "Unlisted: no-show deposits."
+REFUND_MEMO = "cashr: deposit refunded."
+NO_SHOW_MEMO = "cashr: no-show deposits."
 PURGED_TITLE = "Purged event"
 # A payment sent just before RSVPs closed can be mined a block or two later;
 # it still counts. Measured from the chain height when RSVPs closed.
@@ -309,7 +309,7 @@ class Engine:
             if refund > 0:
                 db.add(Payout(event_id=ev.id, kind="reject", recipients=[{
                     "address": memo.refund_address, "amount_zat": refund,
-                    "memo": f"Unlisted: payment returned ({reason}).",
+                    "memo": f"cashr: payment returned ({reason}).",
                     "rsvp_id": None,
                 }]))
             else:

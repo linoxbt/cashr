@@ -21,7 +21,7 @@ export default function Events() {
           </Channel>
           <Channel n="01" title="New event">
             <p className="text-sm text-ink-2">Deposit, capacity, done. No account.</p>
-            <Link href="/new" className="btn bg-gold mt-5 self-start text-screen hover:bg-gold/90">Create an event</Link>
+            <Link href="/new" className="btn bg-gold mt-5 self-start text-gold-on hover:bg-gold/90">Create an event</Link>
           </Channel>
         </div>
       </div>

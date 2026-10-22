@@ -58,7 +58,7 @@ const TRUST = [
   "The organiser's links are bearer secrets. Anyone with the manage link can settle or purge the event.",
   "The door device sees ticket hashes, seats and the event's check-in count, and keeps them to work offline until the event is settled. It never sees refund addresses.",
   "The organiser's dashboard shows each ticket's hash and whether it was checked in, but only a shortened refund address.",
-  "Unlisted can't hide that an event exists, or protect against someone photographing the room.",
+  "cashr can't hide that an event exists, or protect against someone photographing the room.",
 ];
 
 export default function Privacy() {

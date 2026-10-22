@@ -38,8 +38,8 @@ export default function Door() {
 }
 
 function DoorFor({ id }: { id: string }) {
-  const cacheKey = `unlisted.door.${id}`;
-  const queueKey = `unlisted.door.queue.${id}`;
+  const cacheKey = `cashr.door.${id}`;
+  const queueKey = `cashr.door.queue.${id}`;
   const [token, setToken] = useState<string | null | undefined>(undefined);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [queue, setQueue] = useState<string[]>([]);
@@ -261,7 +261,7 @@ function DoorFor({ id }: { id: string }) {
             ) : (
               <>
                 <p className="text-sm text-ink-3">Point the camera at an attendee&rsquo;s ticket.</p>
-                <button className="btn bg-gold text-screen hover:bg-gold/90" onClick={startCamera} disabled={camera === "starting"}>
+                <button className="btn bg-gold text-gold-on hover:bg-gold/90" onClick={startCamera} disabled={camera === "starting"}>
                   {camera === "starting" && <Spinner />} Start scanning
                 </button>
               </>
@@ -289,7 +289,7 @@ function DoorFor({ id }: { id: string }) {
         }}
       >
         <label htmlFor="ticket-code" className="sr-only">Ticket code</label>
-        <input id="ticket-code" className="input font-mono text-xs" value={manual} onChange={(e) => setManual(e.target.value)} placeholder="Or paste a ticket code: unlisted:…" spellCheck={false} />
+        <input id="ticket-code" className="input font-mono text-xs" value={manual} onChange={(e) => setManual(e.target.value)} placeholder="Or paste a ticket code: cashr:…" spellCheck={false} />
         <button className="btn-secondary" type="submit">Check</button>
       </form>
 

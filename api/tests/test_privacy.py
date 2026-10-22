@@ -3,8 +3,8 @@
 from conftest import auth
 from test_lifecycle import admin_view, checkin, pay, settle, tickets
 
-from unlisted.chain.sim import random_unified_address
-from unlisted.db import Event, SeenAddress
+from cashr.chain.sim import random_unified_address
+from cashr.db import Event, SeenAddress
 
 
 def test_public_list_hides_check_ins_until_settlement(client, make_event, attendee):
@@ -90,7 +90,7 @@ def test_deadline_is_judged_by_when_a_payment_was_mined(client, make_event, atte
 
     from test_lifecycle import advance
 
-    from unlisted.engine import RSVP_GRACE_BLOCKS
+    from cashr.engine import RSVP_GRACE_BLOCKS
 
     just_passed = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
     ev = make_event(rsvp_closes_at=just_passed)["event"]
@@ -122,9 +122,9 @@ def test_idle_events_are_retired_a_day_after_they_start(client, make_event, atte
 def test_api_docs_are_off_outside_sim(tmp_path):
     from fastapi.testclient import TestClient
 
-    from unlisted.app import create_app
-    from unlisted.chain.sim import SimChain
-    from unlisted.config import Settings
+    from cashr.app import create_app
+    from cashr.chain.sim import SimChain
+    from cashr.config import Settings
 
     app = create_app(Settings(chain_mode="rpc", database_url=f"sqlite:///{tmp_path}/d.db", run_scanner=False,
                               secret="s"), SimChain("main"))

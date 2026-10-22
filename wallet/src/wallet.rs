@@ -1,4 +1,4 @@
-//! The wallet: one account per Unlisted event, each from its own seed.
+//! The wallet: one account per cashr event, each from its own seed.
 
 use std::{
     collections::BTreeSet,
@@ -383,7 +383,7 @@ impl Wallet {
         // account can always be spent.
         let staged = self.seeds.stage(&seed)?;
         let mut db = self.db.lock().await;
-        let created = db.create_account("unlisted-event", &seed, &birthday, None);
+        let created = db.create_account("cashr-event", &seed, &birthday, None);
         let (uuid, _) = match created {
             Ok(v) => v,
             Err(e) => {

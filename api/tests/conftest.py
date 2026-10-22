@@ -4,10 +4,10 @@ import secrets
 import pytest
 from fastapi.testclient import TestClient
 
-from unlisted.app import create_app
-from unlisted.chain.sim import SimChain, random_unified_address
-from unlisted.codec import RsvpMemo, encode_memo, ticket_hash
-from unlisted.config import Settings
+from cashr.app import create_app
+from cashr.chain.sim import SimChain, random_unified_address
+from cashr.codec import RsvpMemo, encode_memo, ticket_hash
+from cashr.config import Settings
 
 
 @pytest.fixture

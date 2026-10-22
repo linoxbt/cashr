@@ -1,11 +1,11 @@
-"""RpcChain against a fake unlisted-wallet JSON-RPC endpoint."""
+"""RpcChain against a fake cashr-wallet JSON-RPC endpoint."""
 
 import json
 
 import httpx
 
-from unlisted.chain.base import Recipient
-from unlisted.chain.rpc import RpcChain
+from cashr.chain.base import Recipient
+from cashr.chain.rpc import RpcChain
 
 
 def make_chain(handler):
@@ -27,7 +27,7 @@ def responder(results: dict, calls: list):
 
 def test_account_and_received_notes():
     calls = []
-    memo = b"UNL1 abc".ljust(512, b"\x00")
+    memo = b"CSH1 abc".ljust(512, b"\x00")
     c = make_chain(responder({
         "z_getnewaccount": {"account": "0b6f-uuid"},
         "z_getaddressforaccount": {"account": "0b6f-uuid", "address": "u1event"},
@@ -89,7 +89,7 @@ def test_failed_status_is_reported():
 def test_unreachable_wallet_is_a_chain_error():
     import pytest
 
-    from unlisted.chain.base import ChainError
+    from cashr.chain.base import ChainError
 
     def boom(request):
         raise httpx.ConnectTimeout("timed out")

@@ -1,19 +1,25 @@
 import type { Config } from "tailwindcss";
 
 // CRT palette. Token names are kept from the original theme so pages read the
-// same: `ink` is the foreground (phosphor cream), `paper` the screen.
+// same: `ink` is the foreground, `paper` and `screen` the surfaces. Each token is
+// a CSS variable (globals.css) with a dark and a white theme value, written as
+// "r g b" so opacity modifiers like `text-ink/50` keep working.
+const v = (name: string) => `rgb(var(--${name}) / <alpha-value>)`;
+
 export default {
   content: ["./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
-        ink: { DEFAULT: "#ECE9E1", 2: "#CFCBC2", 3: "#9A968E", 4: "#6B6862" },
-        paper: { DEFAULT: "#111111", 2: "#191919", 3: "#222222" },
-        screen: { DEFAULT: "#111111", 2: "#161616", 3: "#1D1D1D", bezel: "#050505" },
-        gold: { DEFAULT: "#F4B728", soft: "#2A2312", ink: "#F4C95A" },
-        ok: { DEFAULT: "#2FA36B", soft: "#12251B" },
-        warn: { DEFAULT: "#D99A1E", soft: "#2A2112" },
-        bad: { DEFAULT: "#E5484D", soft: "#2C1416" },
+        ink: { DEFAULT: v("ink"), 2: v("ink-2"), 3: v("ink-3"), 4: v("ink-4") },
+        paper: { DEFAULT: v("paper"), 2: v("paper-2"), 3: v("paper-3") },
+        screen: { DEFAULT: v("screen"), 2: v("screen-2"), 3: v("screen-3"), bezel: v("bezel-tone") },
+        // Wells sit under inputs and panels: darker than the screen in the dark theme, white in the white one.
+        well: v("well"),
+        gold: { DEFAULT: v("gold"), soft: v("gold-soft"), ink: v("gold-ink"), on: v("on-gold") },
+        ok: { DEFAULT: v("ok"), soft: v("ok-soft") },
+        warn: { DEFAULT: v("warn"), soft: v("warn-soft") },
+        bad: { DEFAULT: v("bad"), soft: v("bad-soft") },
         tape: { red: "#E0262B", gold: "#F4B728", violet: "#7C5CFF", green: "#3DD68C", blue: "#3B6CFF", bone: "#E8E1D0" },
       },
       fontFamily: {

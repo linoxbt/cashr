@@ -1,5 +1,5 @@
 // End-to-end journey against a running web app and a *simulated* API.
-//   API:  UNLISTED_CHAIN=sim UNLISTED_SECRET=dev UNLISTED_SCAN_INTERVAL=1 uvicorn unlisted.main:app
+//   API:  CASHR_CHAIN=sim CASHR_SECRET=dev CASHR_SCAN_INTERVAL=1 uvicorn cashr.main:app
 //   Web:  NEXT_PUBLIC_API_URL=http://localhost:8000 npm run build && npm start
 //   Run:  node e2e/journey.mjs   (BASE, API, CHROMIUM env vars override defaults)
 import { chromium } from "playwright";
@@ -55,6 +55,13 @@ try {
   step("tapes never cover the caption");
   await p.setViewportSize({ width: 1440, height: 900 });
 
+  // The demo (a simulated chain) points back to the real app and offers no "try the demo".
+  await p.goto(BASE + "/");
+  const back = await p.getByRole("link", { name: /Use the real app/ }).getAttribute("href");
+  if (!/^https:\/\//.test(back ?? "")) throw new Error(`demo banner links to ${back}`);
+  if (await p.getByTestId("demo-link").count()) throw new Error("the demo offers a link to itself");
+  step("demo banner links to the real app");
+
   // 3. Host an event, remembered on this device.
   await p.goto(BASE + "/new");
   await p.fill("#title", "Friday tenants' meeting");
@@ -71,7 +78,7 @@ try {
   // 4. RSVP and pay from /join, twice (one will be a no-show).
   const tickets = [];
   for (let i = 0; i < 2; i++) {
-    if (i) await p.evaluate(() => localStorage.removeItem("unlisted.tickets.v1"));
+    if (i) await p.evaluate(() => localStorage.removeItem("cashr.tickets.v1"));
     await p.goto(BASE + "/join");
     await p.getByText("On air").waitFor();
     await p.fill("#open-link-e", invite);
@@ -82,7 +89,7 @@ try {
     await p.click("text=Continue to deposit");
     await p.click("text=Simulate this payment");
     await p.getByText("You're going").waitFor({ timeout: 20000 });
-    tickets.push(await p.evaluate(() => Object.values(JSON.parse(localStorage.getItem("unlisted.tickets.v1")))[0]));
+    tickets.push(await p.evaluate(() => Object.values(JSON.parse(localStorage.getItem("cashr.tickets.v1")))[0]));
   }
   step("two attendees RSVP'd and paid");
 
@@ -105,7 +112,7 @@ try {
   await p.waitForURL("**/door/**");
   await p.getByText("Friday tenants").waitFor();
   const t = tickets[0];
-  await p.fill("input.input", `unlisted:${t.eventId}:${t.secret}`);
+  await p.fill("input.input", `cashr:${t.eventId}:${t.secret}`);
   await p.getByRole("button", { name: "Check", exact: true }).click();
   await p.getByText("Welcome in").waitFor();
   step("door checked the ticket in");
@@ -113,11 +120,11 @@ try {
   // 6b. Offline, the door decides from its saved list and syncs later. A ticket
   // it doesn't know is "can't confirm", never "not valid".
   await p.context().setOffline(true);
-  await p.fill("#ticket-code", `unlisted:${t.eventId}:${"A".repeat(43)}`);
+  await p.fill("#ticket-code", `cashr:${t.eventId}:${"A".repeat(43)}`);
   await p.getByRole("button", { name: "Check", exact: true }).click();
   await p.getByText("Can't confirm offline").waitFor();
   const t2 = tickets[1];
-  await p.fill("#ticket-code", `unlisted:${t2.eventId}:${t2.secret}`);
+  await p.fill("#ticket-code", `cashr:${t2.eventId}:${t2.secret}`);
   await p.getByRole("button", { name: "Check", exact: true }).click();
   await p.getByText("Welcome in").waitFor();
   await p.getByText("1 check-in to sync").waitFor();
@@ -127,7 +134,7 @@ try {
 
   // 6c. A wrong-amount payment is returned, and the dashboard says so.
   const ev = await (await fetch(`${API}/events/${t.eventId}`)).json();
-  const memo = `UNL1 ${t.eventId} ${"B".repeat(43)} ${await address()}`;
+  const memo = `CSH1 ${t.eventId} ${"B".repeat(43)} ${await address()}`;
   const memoB64 = Buffer.from(memo).toString("base64url");
   await fetch(`${API}/sim/pay`, {
     method: "POST",
@@ -173,7 +180,7 @@ try {
   step("purged, wallet keys destroyed, dashboard clean");
 
   // 8. The attendee's ticket list reflects it.
-  await p.evaluate((t) => localStorage.setItem("unlisted.tickets.v1", JSON.stringify({ [t.eventId]: t })), tickets[0]);
+  await p.evaluate((t) => localStorage.setItem("cashr.tickets.v1", JSON.stringify({ [t.eventId]: t })), tickets[0]);
   await p.goto(BASE + "/tickets");
   await p.getByRole("button", { name: "Check status" }).first().click();
   await p.getByText("Event over", { exact: true }).waitFor({ timeout: 15000 });

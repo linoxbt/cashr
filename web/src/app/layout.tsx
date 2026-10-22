@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { headers } from "next/headers";
 
 import "@fontsource-variable/inter-tight";
 import "@fontsource/ibm-plex-mono/400.css";
@@ -11,7 +12,7 @@ import { Crt } from "@/components/Crt";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: { default: "Unlisted · RSVPs without a guest list", template: "%s · Unlisted" },
+  title: { default: "cashr · RSVPs without a guest list", template: "%s · cashr" },
   description:
     "Refundable shielded-ZEC deposits stop no-shows. Nobody, not even the organiser, ever holds a list of who came.",
   referrer: "no-referrer",
@@ -23,9 +24,20 @@ export const dynamic = "force-dynamic";
 
 export const viewport: Viewport = { themeColor: "#050505", width: "device-width", initialScale: 1, viewportFit: "cover" };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+// Applies the saved theme before the first paint, so a white-theme visitor never
+// sees a dark flash. It carries this response's CSP nonce (src/middleware.ts).
+const THEME_SCRIPT =
+  "try{var t=JSON.parse(localStorage.getItem('cashr.theme')||'null');" +
+  "if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}";
+
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const csp = (await headers()).get("content-security-policy") ?? "";
+  const nonce = csp.match(/'nonce-([^']+)'/)?.[1];
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script nonce={nonce} dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
       <body className="font-sans">
         <Crt>{children}</Crt>
       </body>

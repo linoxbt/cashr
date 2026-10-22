@@ -14,7 +14,7 @@ interface Created {
   door_token: string;
 }
 
-// Matches the API's limit (api/unlisted/app.py MAX_DEPOSIT_ZAT).
+// Matches the API's limit (api/cashr/app.py MAX_DEPOSIT_ZAT).
 const MAX_DEPOSIT_ZAT = 100 * 100_000_000;
 
 export default function NewEvent() {
