@@ -68,3 +68,39 @@ jobs:
       - if: failure()
         uses: actions/upload-artifact@v4
         with: { name: e2e-failure, path: web/e2e-failure.png, if-no-files-found: ignore }
+
+  # Prebuilt images, so servers download them instead of compiling Rust.
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [wallet, api, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image names
+        id: names
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./wallet
+          push: true
+          tags: ghcr.io/${{ steps.names.outputs.owner }}/cashr-wallet:main,ghcr.io/${{ steps.names.outputs.owner }}/cashr-wallet:${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=wallet
+          cache-to: type=gha,mode=max,scope=wallet
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./api
+          push: true
+          tags: ghcr.io/${{ steps.names.outputs.owner }}/cashr-api:main,ghcr.io/${{ steps.names.outputs.owner }}/cashr-api:${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api

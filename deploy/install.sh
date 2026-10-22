@@ -8,7 +8,7 @@
 #             Omit it to use <ip>.sslip.io, which needs no DNS setup.
 # web-origin  Where the web app lives (default https://unlisted-zec.netlify.app).
 #
-# Re-running it updates the code and restarts the services; secrets are kept.
+# Re-running it updates to the latest images and restarts the services; secrets are kept.
 set -euo pipefail
 
 DOMAIN="${1:-}"
@@ -28,12 +28,14 @@ if ! command -v docker >/dev/null; then
   curl -fsSL https://get.docker.com | sh >/dev/null
 fi
 
-# Building the Rust wallet needs about 4 GB of memory; give small servers swap.
-mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-if [ "$mem_kb" -lt 3900000 ] && ! swapon --show | grep -q /swapfile; then
-  say "Adding 4 GB of swap for the build"
-  fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
-  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+# Prebuilt images need about 1 GB; the wallet's data grows slowly after that.
+free_mb=$(df -Pm /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}')
+[ -n "$free_mb" ] || free_mb=$(df -Pm / | awk 'NR==2 {print $4}')
+if [ "$free_mb" -lt 2048 ]; then
+  echo "Only ${free_mb} MB of disk is free; Unlisted needs at least 2 GB. Free some space and re-run." >&2
+  echo "Biggest directories:  du -xh / --max-depth=2 2>/dev/null | sort -h | tail -15" >&2
+  echo "Unused Docker data:   docker system df   (then e.g. docker builder prune)" >&2
+  exit 1
 fi
 
 say "Fetching Unlisted ($BRANCH)"
@@ -76,8 +78,27 @@ ufw allow 80/tcp >/dev/null
 ufw allow 443/tcp >/dev/null
 ufw --force enable >/dev/null
 
-say "Building and starting (the first build takes 10-20 minutes)"
-docker compose --profile https up -d --build
+say "Downloading and starting"
+if docker compose --profile https pull --quiet wallet api caddy; then
+  docker compose --profile https up -d --no-build
+else
+  # No prebuilt image (fork, or registry unreachable): build from source.
+  # That needs about 8 GB of free disk and 4 GB of memory, so add swap if short.
+  if [ "$free_mb" -lt 8192 ]; then
+    echo "Building from source needs about 8 GB of free disk; only ${free_mb} MB is free." >&2
+    exit 1
+  fi
+  mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+  if [ "$mem_kb" -lt 3900000 ] && ! swapon --show | grep -q /swapfile; then
+    say "Adding 4 GB of swap for the build"
+    fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  fi
+  say "Building from source (10-20 minutes)"
+  docker compose --profile https up -d --build
+fi
+# Old images from previous runs are no longer needed.
+docker image prune -f >/dev/null
 
 say "Waiting for https://$DOMAIN/meta"
 for _ in $(seq 1 120); do
