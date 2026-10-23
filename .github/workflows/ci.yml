@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The same toolchain the image builds with (wallet/Dockerfile).
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master, pinned
         with: { toolchain: "1.96.0" }
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: wallet }
@@ -96,12 +96,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Image names
         id: names
-        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          # :main moves only for the newest commit on main: a slower run of an older
+          # commit still publishes its own :<sha>, but never rolls :main back.
+          if [ "$(git ls-remote origin refs/heads/main | cut -f1)" = "${{ github.sha }}" ]; then
+            echo "main_tag=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/build-push-action@v6
         with:
           context: ./wallet
           push: true
-          tags: ghcr.io/${{ steps.names.outputs.owner }}/cashr-wallet:main,ghcr.io/${{ steps.names.outputs.owner }}/cashr-wallet:${{ github.sha }}
+          tags: ${{ steps.names.outputs.main_tag && format('ghcr.io/{0}/cashr-wallet:main,', steps.names.outputs.owner) || '' }}ghcr.io/${{ steps.names.outputs.owner }}/cashr-wallet:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -111,16 +117,16 @@ jobs:
         with:
           context: ./api
           push: true
-          tags: ghcr.io/${{ steps.names.outputs.owner }}/cashr-api:main,ghcr.io/${{ steps.names.outputs.owner }}/cashr-api:${{ github.sha }}
+          tags: ${{ steps.names.outputs.main_tag && format('ghcr.io/{0}/cashr-api:main,', steps.names.outputs.owner) || '' }}ghcr.io/${{ steps.names.outputs.owner }}/cashr-api:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api
 
-  # The live sites build from main, so they never drift behind it. Runs only when
-  # the repository has a NETLIFY_AUTH_TOKEN secret; each site's API comes from a
-  # repository variable (Settings → Secrets and variables → Actions).
+  # Deploys both sites from main, but only once the repository has a
+  # NETLIFY_AUTH_TOKEN secret; until then it warns and the sites are deployed by
+  # hand (docs/DEPLOY.md). Each site's API comes from a repository variable.
   deploy-web:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [web]

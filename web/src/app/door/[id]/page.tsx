@@ -44,6 +44,8 @@ const FACING_KEY = "cashr.door.camera";
 const SCAN_INTERVAL_MS = 125;
 // How long a ticket must be out of view before the camera reads it as a new scan.
 const REPEAT_AFTER_MS = 5_000;
+// A ticket still in view after a failed or unconfirmable check is tried again this soon.
+const RETRY_AFTER_MS = 3_000;
 
 export default function Door() {
   const { id } = useParams<{ id: string }>();
@@ -90,7 +92,8 @@ function DoorFor({ id }: { id: string }) {
         } catch (e) {
           // A request the server rejects outright would be rejected every time: drop it
           // (counted as refused) rather than leave the door stuck offline behind it.
-          const rejected = e instanceof ApiError && e.status >= 400 && e.status < 500 && ![401, 403, 404].includes(e.status);
+          // Only a request the server says is malformed: a rate limit or timeout clears up.
+          const rejected = e instanceof ApiError && [400, 409, 422].includes(e.status);
           if (!rejected) throw e;
           bad = sent.length;
         }
@@ -140,6 +143,12 @@ function DoorFor({ id }: { id: string }) {
     });
   }, [cacheKey]);
 
+  // After a check that failed or couldn't be confirmed, the same ticket still in
+  // view is tried again shortly instead of waiting for it to leave the camera.
+  const retrySoon = () => {
+    lastScan.current.at = Date.now() - REPEAT_AFTER_MS + RETRY_AFTER_MS;
+  };
+
   /** Check one ticket code. False if another check was still running and this one wasn't made. */
   const check = useCallback(async (text: string): Promise<boolean> => {
     if (busy.current || !token) return false;
@@ -169,6 +178,7 @@ function DoorFor({ id }: { id: string }) {
         }
         if (!isUnreachable(e)) {
           setVerdict({ kind: "error", detail: e instanceof Error ? e.message : undefined });
+          retrySoon();
           return true;
         }
         // Offline, timed out, or the host can't reach the API: decide from the
@@ -176,6 +186,7 @@ function DoorFor({ id }: { id: string }) {
         setOnline(false);
         if (!local) {
           setVerdict({ kind: "unverified", offline: true });
+          retrySoon();
           return true;
         }
         if (local.checked_in) {
@@ -190,6 +201,7 @@ function DoorFor({ id }: { id: string }) {
       }
     } catch (e) {
       setVerdict({ kind: "error", detail: e instanceof Error ? e.message : undefined });
+      retrySoon();
     } finally {
       busy.current = false;
     }
@@ -256,8 +268,14 @@ function DoorFor({ id }: { id: string }) {
           // new only after it has been out of view for a while (otherwise a guest who
           // was just let in would read "Already checked in" a moment later).
           const again = code.data === lastScan.current.text && now - lastScan.current.at < REPEAT_AFTER_MS;
-          lastScan.current = { text: code.data, at: now };
-          if (!again) void check(code.data);
+          if (again) {
+            lastScan.current.at = now; // still in view
+          } else if (!busy.current) {
+            // Remembered only once its check really starts: a ticket shown while
+            // another check runs is picked up as soon as that one finishes.
+            lastScan.current = { text: code.data, at: now };
+            void check(code.data);
+          }
         }
       }
       raf = requestAnimationFrame(tick);

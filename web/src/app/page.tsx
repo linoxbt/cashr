@@ -69,7 +69,8 @@ export default function Home() {
             <h2 className="mt-3 text-5xl leading-[1.02]">There is nothing on it to find.</h2>
             <p className="mt-5 leading-relaxed text-ink-2">
               Every RSVP tool keeps a database of people. Breaches, subpoenas and stolen devices turn it into a target list.
-              cashr only stores random ticket hashes and one-time refund addresses, and deletes them after the event.
+              cashr stores no names, emails or phone numbers: only random ticket hashes, one-time refund addresses and
+              payment records, and it deletes them when the organiser purges the event.
             </p>
             <p className="mt-4 leading-relaxed text-ink-2">
               That works because of Zcash&rsquo;s shielded pool: a deposit can come from someone unknown, and a refund can go

@@ -18,7 +18,7 @@ set -euo pipefail
 DOMAIN="${1:-}"
 WEB_ORIGIN="${2:-https://cashr.site}"
 WEB_ORIGIN_GIVEN="${2:+yes}"
-PROXY="${CASHR_PROXY:-caddy}"
+PROXY="${CASHR_PROXY:-}"
 ALPINE="alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
 REPO="${CASHR_REPO:-https://github.com/linoxbt/cashr.git}"
 BRANCH="${CASHR_BRANCH:-main}"
@@ -116,6 +116,12 @@ else
   fi
   grep -q '^CASHR_BACKUP_PASSPHRASE=' .env || echo "CASHR_BACKUP_PASSPHRASE=$(openssl rand -hex 32)" >> .env
 fi
+# Remember the proxy choice, so a later re-run without CASHR_PROXY keeps it.
+if [ -n "$PROXY" ]; then
+  if grep -q '^CASHR_PROXY=' .env; then sed -i "s|^CASHR_PROXY=.*|CASHR_PROXY=$PROXY|" .env; else echo "CASHR_PROXY=$PROXY" >> .env; fi
+fi
+PROXY="$(grep -E '^CASHR_PROXY=' .env | tail -1 | cut -d= -f2- || true)"
+PROXY="${PROXY:-caddy}"
 chmod 600 .env
 
 say "Nightly encrypted backup"
@@ -163,13 +169,20 @@ fi
 # server may run other things).
 docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/linoxbt/cashr" >/dev/null
 
-say "Waiting for https://$DOMAIN/meta"
+if [ "$PROXY" = none ]; then
+  META_URL="http://127.0.0.1:$(grep -E '^CASHR_API_PORT=' .env | tail -1 | cut -d= -f2- || true)"
+  [ "$META_URL" != "http://127.0.0.1:" ] || META_URL="http://127.0.0.1:8000"
+  META_URL="$META_URL/meta"
+else
+  META_URL="https://$DOMAIN/meta"
+fi
+say "Waiting for $META_URL"
 if [ -n "$OLD_VOLUMES" ]; then
   echo "Once cashr is confirmed working, delete the old copies (they still hold pre-rename data):"
   echo "  docker volume rm$OLD_VOLUMES"
 fi
 for _ in $(seq 1 120); do
-  if meta=$(curl -fsS "https://$DOMAIN/meta" 2>/dev/null); then
+  if meta=$(curl -fsS "$META_URL" 2>/dev/null); then
     echo "$meta"
     break
   fi
@@ -184,7 +197,7 @@ cashr backend is running.
   API URL:   https://$DOMAIN
   Next step: set NEXT_PUBLIC_API_URL=https://$DOMAIN on the web app and redeploy it.
 
-Backups: every night at 03:40 UTC, encrypted, into /var/backups/cashr (the last 7).
+Backups: every night at 03:40 server time, encrypted, into /var/backups/cashr (kept 7 days).
   - Copy them off this machine: set CASHR_BACKUP_REMOTE=user@host:/path in $DIR/.env.
   - Keep CASHR_WALLET_SEED_KEY and CASHR_BACKUP_PASSPHRASE from $DIR/.env somewhere offline,
     apart from the backups: restoring needs the passphrase, spending needs the seed key.

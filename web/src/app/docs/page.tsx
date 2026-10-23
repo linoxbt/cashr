@@ -102,8 +102,9 @@ export default function Docs() {
                 phone, and the refund goes back to an address only the attendee knows.
               </p>
               <p>
-                The result: the server never has a list of people to leak. Its whole database for an event is random ticket
-                hashes and one-time refund addresses, and it deletes those when the organiser purges the event.
+                The result: the server never has a list of people to leak. For an event it holds the event&rsquo;s details,
+                random ticket hashes, one-time refund addresses and payment records (the full list is on the threat model
+                page), and it deletes them when the organiser purges the event.
               </p>
             </div>
           </section>

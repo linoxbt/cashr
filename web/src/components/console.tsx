@@ -9,7 +9,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import { Pill, Spinner, formatWhen, sharedMeta, usePoll } from "@/components/ui";
 import { API_CONFIGURED, api, type Meta, type PublicEvent, type RsvpStatus } from "@/lib/api";
 import { linkTarget } from "@/lib/links";
-import { forgetEvent, forgetTicket, listSavedEvents, listTickets, type SavedEvent, type StoredTicket } from "@/lib/storage";
+import { forgetEvent, forgetTicket, listSavedEvents, listTickets, saveTicket, type SavedEvent, type StoredTicket } from "@/lib/storage";
 
 export function Channel({ n, title, children }: { n: string; title: string; children: ReactNode }) {
   return (
@@ -162,6 +162,8 @@ export function MyTickets() {
       const st = await checkTicket(ticket);
       // The event was purged: nothing is left on the server, so nothing stays here.
       if (st === "gone") forgetTicket(ticket.eventId);
+      // Listed or returned: the refund address was only needed for the payment's memo.
+      else if (st !== "pending" && ticket.refundAddress) saveTicket({ ...ticket, refundAddress: "" });
       setStatus((s) => ({ ...s, [ticket.eventId]: st }));
     } catch {
       setStatus((s) => ({ ...s, [ticket.eventId]: "offline" }));

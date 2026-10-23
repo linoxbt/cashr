@@ -73,12 +73,14 @@ wallet or Tor.
 
 ### Backups
 
-`deploy/backup.sh` (nightly at 03:40 UTC from `/etc/cron.d/cashr-backup`, or by hand) writes an encrypted snapshot of
-the `wallet-data` and `api-data` volumes to `/var/backups/cashr`, keeping the last 7. The snapshot is taken with
+`deploy/backup.sh` (nightly at 03:40 server time from `/etc/cron.d/cashr-backup`, or by hand) writes an encrypted
+snapshot of the `wallet-data` and `api-data` volumes to `/var/backups/cashr`, and deletes backups older than 7 days
+on every run. The snapshot is taken with
 SQLite's online backup while the services run, built in memory, and encrypted with `CASHR_BACKUP_PASSPHRASE` before
 it reaches the disk. Set `CASHR_BACKUP_REMOTE` (an rsync target, `user@host:/path`) to copy each one off the server:
 a backup on the same disk doesn't survive it. Keep `CASHR_WALLET_SEED_KEY` and `CASHR_BACKUP_PASSPHRASE` offline,
-apart from the backups: restoring needs the passphrase, spending needs the seed key.
+apart from the backups: restoring needs the passphrase, spending needs the seed key. Both also sit in `.env` on the
+server, so the backups protect against losing the disk's data, not against someone who seizes the server.
 
 A backup keeps events purged after it was taken until it rotates out (a week).
 

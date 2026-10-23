@@ -50,15 +50,25 @@ function writeTrail(trail: string[]) {
     /* storage blocked: Back falls back to the home page */
   }
 }
+// Set just before a full page load through one of this site's own links (the
+// dashboard and door links are plain <a>), so that load still continues the trail.
+const INSIDE_KEY = "cashr.inside";
 let trailChecked = false;
 /** Record a page: returning to the previous one shortens the trail, anything else extends it. */
 function stepTrail(path: string): string[] {
   if (!trailChecked) {
     trailChecked = true;
-    // Arriving fresh (a link or typed address, not Back/Forward or a reload): the
-    // page before this one in the tab's history isn't ours, whatever the trail says.
+    // Arriving fresh (a link from elsewhere or a typed address, not Back/Forward, a
+    // reload or one of our own links): the page before this one isn't ours.
     const nav = performance.getEntriesByType?.("navigation")[0] as PerformanceNavigationTiming | undefined;
-    if (nav?.type === "navigate") writeTrail([]);
+    let inside = false;
+    try {
+      inside = sessionStorage.getItem(INSIDE_KEY) === "1";
+      sessionStorage.removeItem(INSIDE_KEY);
+    } catch {
+      /* storage blocked: treat as arriving fresh */
+    }
+    if (nav?.type === "navigate" && !inside) writeTrail([]);
   }
   const trail = readTrail();
   if (trail[trail.length - 1] === path) return trail;
@@ -205,6 +215,20 @@ export function Crt({ children }: { children: ReactNode }) {
   }, [menu]);
 
   useEffect(() => setBw(readJson<boolean>("cashr.bw", false)), []);
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      const a = (e.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (a && a.origin === window.location.origin) {
+        try {
+          sessionStorage.setItem(INSIDE_KEY, "1");
+        } catch {
+          /* storage blocked */
+        }
+      }
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
+  }, []);
   useEffect(() => {
     setMenu(false);
     // A link to a section (/docs#faq) lands on it; any other new page starts at the top.
