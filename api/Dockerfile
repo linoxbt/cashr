@@ -1,9 +1,11 @@
 FROM python:3.12-slim@sha256:cb33f7f771ecec2ef1225cf39b159591a040391bd73e4c01f00fdfc4c47611d2
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-COPY pyproject.toml ./
+COPY pyproject.toml requirements.lock ./
+# Exact versions with hashes (uv pip compile pyproject.toml --generate-hashes -o requirements.lock).
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 COPY cashr ./cashr
-RUN pip install --no-cache-dir ".[postgres]"
+RUN pip install --no-cache-dir --no-deps .
 RUN useradd --create-home cashr && mkdir -p /data && chown cashr /data
 USER cashr
 ENV CASHR_DATABASE_URL=sqlite:////data/cashr.db

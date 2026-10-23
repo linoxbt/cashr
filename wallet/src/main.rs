@@ -76,6 +76,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let cfg = Config::from_env()?;
     std::fs::create_dir_all(&cfg.data_dir)?;
+    // The databases hold every live event's viewing keys and memos: owner only.
+    #[cfg(unix)]
+    std::fs::set_permissions(&cfg.data_dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let extra_ca_pem = cfg.extra_ca.as_ref().map(std::fs::read).transpose().context("CASHR_WALLET_EXTRA_CA_FILE")?;
     let endpoint = Endpoint { url: cfg.lightwalletd.clone(), extra_ca_pem, socks_proxy: cfg.socks_proxy.clone() };
     let wallet = Wallet::open(cfg.network, &cfg.data_dir, &cfg.seed_key, endpoint)?;

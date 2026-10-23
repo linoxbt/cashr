@@ -1,7 +1,8 @@
 # Tor for the wallet's connection to lightwalletd: the server's address stays
 # hidden from lightwalletd's operator. Built locally from Alpine's package.
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
-RUN apk add --no-cache tor
+# The 0.4.9 series: security fixes still come in, a new series doesn't.
+RUN apk add --no-cache 'tor~=0.4.9'
 COPY torrc /etc/tor/torrc
 USER tor
 EXPOSE 9050

@@ -56,6 +56,10 @@ class RpcChain:
     def tip_height(self) -> int:
         return int(self._call("getblockcount"))
 
+    def sync_age(self) -> int | None:
+        age = self._call("getwalletinfo").get("last_sync_age_s")
+        return None if age is None else int(age)
+
     def height_at(self, unix_time: int) -> int | None:
         h = self._call("z_heightattime", int(unix_time))
         return None if h is None else int(h)

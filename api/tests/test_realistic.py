@@ -21,9 +21,9 @@ from cashr.config import Settings
 def client(tmp_path):
     chain = SimChain("main", async_ops=True)
     settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/t.db",
-                        run_scanner=False, secret="test-secret",
+                        run_scanner=False,
                         # No batching or spreading in logic tests; test_privacy covers both.
-                        list_delay_min=0, refund_spread_min=0)
+                        list_delay_min=0, refund_spread_min=0, door_sync_grace_min=0)
     with TestClient(create_app(settings, chain)) as c:
         c.chain = chain
         c.engine = c.app.state.engine

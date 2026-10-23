@@ -27,7 +27,7 @@ from .chain import Balance, Chain, ChainError, Recipient
 from .codec import is_orchard_address, try_decode_memo
 from .ua import orchard_only
 from .config import Settings
-from .db import Deposit, Event, Payout, Rsvp, SeenAddress, compact_sqlite
+from .db import Deposit, Event, Flag, Payout, Rsvp, compact_sqlite
 
 log = logging.getLogger("cashr.engine")
 
@@ -35,8 +35,8 @@ ACTIVE = ("open", "closed", "settling", "settled")
 DOOR_OPEN = ("open", "closed")
 IN_FLIGHT = ("queued", "submitted", "broadcast")
 MAX_ATTEMPTS = 5
-# Notes this far below the last ingested block are re-read on every scan, so a
-# small reorg cannot hide a deposit.
+# Scans start this far below the event's creation height, so a reorg around
+# creation can't hide a deposit.
 REORG_MARGIN = 100
 # A pending transaction is rebroadcast every this many polls (~5 min at 15 s).
 REBROADCAST_EVERY = 20
@@ -57,6 +57,19 @@ BLOCK_SECONDS = 75
 # An event that never received anything is retired this long after it started,
 # so abandoned events don't keep wallet accounts (and capacity) forever.
 IDLE_RETIRE_AFTER = timedelta(days=1)
+# ...or this long after it was created, whatever its start: otherwise events
+# created far ahead of time could hold the live-event limit for good.
+EMPTY_RETIRE_AFTER = timedelta(days=30)
+# Statuses that count against the server's limit of live events. Settled events
+# only wait to be purged; they don't take a slot.
+COUNTED = ("open", "closed", "settling")
+# Set (with the wipe, in one transaction) until the database file has been
+# rewritten, so purged data can't survive in the WAL past a failed rewrite or a restart.
+COMPACT_FLAG = "compact_owed"
+# A payout the wallet has no record of (its data was lost or replaced). It may
+# already have been paid, so the organiser's "retry" leaves it for the operator.
+UNKNOWN_TO_WALLET = ("The wallet has no record of this payout, so it may already have been paid. "
+                     "The server's operator has to check the wallet before it is sent again.")
 
 _ID_ALPHABET = string.ascii_lowercase + string.digits
 
@@ -75,12 +88,23 @@ def _account_gone(e: ChainError) -> bool:
     return "was deleted" in str(e).lower()
 
 
-def _starts_before(starts_at: str, cutoff: datetime) -> bool:
+def _starts(starts_at: str) -> datetime | None:
     try:
         start = datetime.fromisoformat(starts_at.replace("Z", "+00:00"))
     except ValueError:
-        return False
-    return (start if start.tzinfo else start.replace(tzinfo=timezone.utc)) < cutoff
+        return None
+    return start if start.tzinfo else start.replace(tzinfo=timezone.utc)
+
+
+def _starts_before(starts_at: str, cutoff: datetime) -> bool:
+    start = _starts(starts_at)
+    return start is not None and start < cutoff
+
+
+def rsvp_deadline(ev: Event) -> datetime | None:
+    """When RSVPs stop: the organiser's deadline, and at the latest the start."""
+    times = [t for t in (ev.rsvp_closes_at and _aware(ev.rsvp_closes_at), _starts(ev.starts_at)) if t is not None]
+    return min(times) if times else None
 
 
 def new_event_id() -> str:
@@ -98,12 +122,8 @@ def token_hash(token: str) -> str:
 def accepting_rsvps(ev: Event, now: datetime | None = None) -> bool:
     if ev.status != "open":
         return False
-    closes = ev.rsvp_closes_at
-    if closes is None:
-        return True
-    if closes.tzinfo is None:
-        closes = closes.replace(tzinfo=timezone.utc)
-    return (now or datetime.now(timezone.utc)) <= closes
+    closes = rsvp_deadline(ev)
+    return closes is None or (now or datetime.now(timezone.utc)) <= closes
 
 
 class EngineError(Exception):
@@ -145,24 +165,6 @@ class Engine:
         self._cycle = 0
 
     # ---- helpers --------------------------------------------------------
-    def _period(self) -> int:
-        return int(time.time() // (max(1, self.settings.address_memory_days) * 86400))
-
-    def forget_old_addresses(self) -> None:
-        """Drop reuse digests older than the previous period.
-
-        They outlive purges, so with the server's secret they could confirm that a
-        known address once paid for an RSVP here. Keeping them for one to two
-        periods still refuses reuse across events held close together.
-        """
-        with self.lock, self.sessions() as db:
-            db.query(SeenAddress).filter(SeenAddress.period.is_(None)).update({"period": self._period()})
-            db.query(SeenAddress).filter(SeenAddress.period < self._period() - 1).delete()
-            db.commit()
-
-    def _address_digest(self, address: str) -> str:
-        return hmac.new(self.settings.secret.encode(), address.encode(), hashlib.sha256).hexdigest()
-
     def _get_event(self, db: Session, event_id: str) -> Event:
         ev = db.get(Event, event_id)
         if ev is None:
@@ -193,7 +195,7 @@ class Engine:
         if len(self._created) >= self.settings.create_per_hour:
             raise EngineError("busy", "This server is creating too many events right now. Try again in a while.", 429)
         with self.sessions() as db:
-            live = db.scalar(select(func.count()).select_from(Event).where(Event.status != "purged"))
+            live = db.scalar(select(func.count()).select_from(Event).where(Event.status.in_(COUNTED)))
         if live >= self.settings.max_live_events:
             raise EngineError("busy", "This server is at its limit of live events. Try again after some are purged.", 429)
 
@@ -205,30 +207,40 @@ class Engine:
         with self.lock:
             self._check_capacity()
             self._created.append(time.monotonic())
+        # The tip first: once the account exists, every failure must clean it up.
+        tip = self.chain.tip_height()
         account_ref, address = self.chain.new_event_account()
         admin, door = new_token(), new_token()
-        with self.lock, self.sessions() as db:
-            ev = Event(
-                id=new_event_id(), title=title, starts_at=starts_at, location=location,
-                details=details, capacity=capacity, deposit_zat=deposit_zat,
-                rsvp_closes_at=rsvp_closes_at, forfeit_address=forfeit_address,
-                account_ref=account_ref, address=address,
-                admin_token_hash=token_hash(admin), door_token_hash=token_hash(door),
-                scan_height=self.chain.tip_height(),
-            )
-            # The public list's update schedule starts now, independent of payments.
-            ev.list_publish_at = self._publish_time()
-            db.add(ev)
-            db.commit()
-            return CreatedEvent(ev, admin, door)
+        try:
+            with self.lock, self.sessions() as db:
+                ev = Event(
+                    id=new_event_id(), title=title, starts_at=starts_at, location=location,
+                    details=details, capacity=capacity, deposit_zat=deposit_zat,
+                    rsvp_closes_at=rsvp_closes_at, forfeit_address=forfeit_address,
+                    account_ref=account_ref, address=address,
+                    admin_token_hash=token_hash(admin), door_token_hash=token_hash(door),
+                    scan_height=tip,
+                )
+                # The public list's update schedule starts now, independent of payments.
+                ev.list_publish_at = self._publish_time()
+                db.add(ev)
+                db.commit()
+                return CreatedEvent(ev, admin, door)
+        except Exception:
+            # Nobody knows this account's address yet, so nothing can be in it.
+            try:
+                self.chain.delete_account(account_ref)
+            except ChainError as e:
+                log.warning("could not remove the account of an event that failed to save: %s", e)
+            raise
 
     # ---- ingestion ------------------------------------------------------
     def scan_once(self, full: bool = False) -> None:
         self._cycle += 1
         slow_turn = full or self._cycle % SLOW_SCAN_EVERY == 0
         if slow_turn:
-            self.forget_old_addresses()
             self.retire_idle_events()
+            self.compact_if_owed()
         with self.sessions() as db:
             busy = set(db.scalars(select(Payout.event_id).where(Payout.status.in_(IN_FLIGHT))))
             rows = db.execute(select(Event.id, Event.status).where(Event.status.in_(ACTIVE))).all()
@@ -249,13 +261,13 @@ class Engine:
             account_ref, address = ev.account_ref, ev.address
             since = max(0, ev.scan_height - REORG_MARGIN)
             deadline_passed = ev.status == "open" and ev.close_height is None and not accepting_rsvps(ev)
-            rsvp_closes_at = ev.rsvp_closes_at
+            deadline = rsvp_deadline(ev)
         notes = self.chain.received(account_ref, address, since)
         tip = close_height = None
         if deadline_passed:
             tip = self.chain.tip_height()
             try:
-                close_height = self.chain.height_at(int(_aware(rsvp_closes_at).timestamp()))
+                close_height = self.chain.height_at(int(deadline.timestamp()))
             except ChainError:
                 close_height = None
         with self.lock, self.sessions() as db:
@@ -267,7 +279,7 @@ class Engine:
                 # the wallet has them, else estimated back from now, so a scanner
                 # that was down doesn't stretch the grace.
                 if close_height is None:
-                    late_s = max(0.0, (datetime.now(timezone.utc) - _aware(ev.rsvp_closes_at)).total_seconds())
+                    late_s = max(0.0, (datetime.now(timezone.utc) - deadline).total_seconds())
                     close_height = max(0, tip - int(late_s // BLOCK_SECONDS))
                 ev.close_height = close_height
             known = {
@@ -280,9 +292,12 @@ class Engine:
                  and (n.txid, n.pool, n.out_index) not in known),
                 key=lambda n: (n.height, n.txid, n.out_index),
             )
+            # The floor (scan_height) stays at the event's creation height: the wallet
+            # shows a payment only once its memo is fetched, which can come long after
+            # newer payments were seen, so a floor raised to the newest one would
+            # hide an older payment for good.
             for note in fresh:
                 self._ingest(db, ev, note)
-                ev.scan_height = max(ev.scan_height, note.height)
             self._publish(db, ev)
             db.commit()
         if fresh:
@@ -290,8 +305,11 @@ class Engine:
         self.process_payouts(event_id)
 
     def _ingest(self, db: Session, ev: Event, note) -> None:
+        # No block height: with the ticket it would date each payment. Accepted
+        # deposits don't keep their ticket hash either (the RSVP row has it), so a
+        # txid on file can't be matched to a ticket.
         dep = Deposit(event_id=ev.id, txid=note.txid, pool=note.pool, out_index=note.out_index,
-                      amount_zat=note.amount_zat, height=note.height, kind="float")
+                      amount_zat=note.amount_zat, height=0, kind="float")
         db.add(dep)
         memo = try_decode_memo(note.memo)
         if memo is None:
@@ -315,7 +333,8 @@ class Engine:
             dep.kind, dep.reason = "rejected", reason
             ev.rejected_count += 1
             refund = note.amount_zat - self.settings.reject_fee_zat
-            if refund > 0:
+            # Returning less than a fee would spend the event's float on fees.
+            if refund >= self.settings.reject_fee_zat:
                 db.add(Payout(event_id=ev.id, kind="reject", recipients=[{
                     "address": memo.refund_address, "amount_zat": refund,
                     "memo": f"cashr: payment returned ({reason}).",
@@ -325,11 +344,11 @@ class Engine:
                 ev.float_zat += note.amount_zat
             return
 
-        dep.kind = "rsvp"
+        dep.kind, dep.ticket_hash = "rsvp", ""
         ev.rsvp_count += 1
-        db.add(Rsvp(event_id=ev.id, ticket_hash=memo.ticket_hash,
+        # A random id: an increasing one would record the order people paid in.
+        db.add(Rsvp(id=secrets.randbits(52) + 1, event_id=ev.id, ticket_hash=memo.ticket_hash,
                     refund_address=memo.refund_address, seat=self._free_seat(db, ev)))
-        db.add(SeenAddress(digest=self._address_digest(memo.refund_address), period=self._period()))
         db.flush()
 
     @staticmethod
@@ -382,7 +401,12 @@ class Engine:
                                               Rsvp.ticket_hash == memo.ticket_hash))
         if dup is not None:
             return "duplicate_ticket"
-        if db.get(SeenAddress, self._address_digest(memo.refund_address)) is not None:
+        # Within this event only. Checking against other events would answer, to
+        # anyone who creates an event and pays into it with someone else's address,
+        # whether that address paid for an RSVP here before.
+        reused = db.scalar(select(Rsvp.id).where(Rsvp.event_id == ev.id,
+                                                 Rsvp.refund_address == memo.refund_address))
+        if reused is not None:
             return "address_reused"
         if ev.rsvp_count >= ev.capacity:
             return "full"
@@ -461,8 +485,7 @@ class Engine:
                 # The wallet keeps operations on disk, so this means its data
                 # was lost or replaced. It may already have paid: stop and let
                 # a person check before anything is sent again.
-                return {"status": "failed", "error": "The wallet has no record of this payout. Check the event "
-                        "wallet's history before retrying, or it could be paid twice."}
+                return {"status": "failed", "error": UNKNOWN_TO_WALLET}
             attempts = self._attempts(snap) + 1
             return {"status": "failed" if attempts >= MAX_ATTEMPTS else "queued",
                     "error": st.error, "attempts": attempts}
@@ -530,6 +553,8 @@ class Engine:
             ev = self._get_event(db, event_id)
             if ev.status != "settling" or ev.forfeit_address != fund:
                 return False
+            if ev.sweep_not_before is not None and _aware(ev.sweep_not_before) > datetime.now(timezone.utc):
+                return False  # door devices may still be uploading check-ins
             if db.scalar(select(Payout.id).where(Payout.event_id == ev.id,
                                                  Payout.status.in_(IN_FLIGHT + ("failed",)))) is not None:
                 return False
@@ -549,16 +574,14 @@ class Engine:
             return False
 
     # ---- organiser actions ----------------------------------------------
-    def close(self, db: Session, ev: Event) -> None:
+    def close(self, db: Session, ev: Event, tip: int | None = None) -> None:
+        """`tip` is fetched by the caller before taking the lock (wallet calls can be slow)."""
         if ev.status != "open":
             raise EngineError("bad_state", "RSVPs are already closed.")
         ev.status = "closed"
         self._publish(db, ev, now=True)
-        if ev.close_height is None:
-            try:
-                ev.close_height = self.chain.tip_height()
-            except ChainError:
-                pass  # payments are then judged without the grace
+        if ev.close_height is None and tip is not None:
+            ev.close_height = tip  # without it, payments are judged without the grace
 
     def reopen(self, db: Session, ev: Event) -> None:
         if ev.status != "closed":
@@ -570,6 +593,7 @@ class Engine:
         if ev.status not in DOOR_OPEN:
             raise EngineError("bad_state", "This event is already settling or settled.")
         ev.status = "settling"
+        ev.sweep_not_before = datetime.now(timezone.utc) + timedelta(minutes=max(0, self.settings.door_sync_grace_min))
         self._publish(db, ev, now=True)
         refunds = []
         for r in db.scalars(select(Rsvp).where(Rsvp.event_id == ev.id,
@@ -590,8 +614,8 @@ class Engine:
             db.add(Payout(event_id=ev.id, kind="refund", recipients=refunds[i:i + size], not_before=start + delay))
 
     def retry_failed(self, db: Session, ev: Event) -> int:
-        failed = db.scalars(select(Payout).where(Payout.event_id == ev.id,
-                                                 Payout.status == "failed")).all()
+        failed = db.scalars(select(Payout).where(Payout.event_id == ev.id, Payout.status == "failed",
+                                                 Payout.error != UNKNOWN_TO_WALLET)).all()
         for p in failed:
             # Same key: if a transaction for it could still be mined, the
             # wallet rebroadcasts it instead of paying again.
@@ -604,6 +628,8 @@ class Engine:
             raise EngineError("bad_state", "This event has been purged.")
         if not is_orchard_address(address, self.settings.network):
             raise EngineError("bad_address", "The no-show fund address must be a Unified Address with an Orchard receiver.")
+        if ev.address and orchard_only(address, self.settings.network) == orchard_only(ev.address, self.settings.network):
+            raise EngineError("bad_address", "That is this event's own address. Use one from your own wallet.")
         sweeping = db.scalar(select(Payout.id).where(Payout.event_id == ev.id, Payout.kind == "forfeit",
                                                      Payout.status.in_(IN_FLIGHT)))
         if sweeping is not None:
@@ -619,26 +645,52 @@ class Engine:
         Refuses while money is still in the event wallet: deleting the keys
         would destroy it.
         """
-        # Checked once without the lock for a quick answer, then again under it:
-        # a late payment can land in between, and deleting the keys would destroy it.
+        # Wallet calls are made without the engine lock (they can be slow, and door
+        # check-ins for every event would wait). The wallet checks the balance again
+        # under its own lock before deleting anything, and refuses if money arrived.
         with self.sessions() as db:
-            self._check_purgeable(db, self._get_event(db, ev_id))
-        with self.lock, self.sessions() as db:
             ev = self._get_event(db, ev_id)
             self._check_purgeable(db, ev)
             account_ref = ev.account_ref
-            # Keys first: if the wallet refuses, nothing is deleted here either.
-            self.chain.delete_account(account_ref)
-            self._wipe(db, ev)
-            db.commit()
-        self._balances.pop(ev_id, None)
+        self._check_balance_purgeable(ev)
+        # Keys first: if the wallet refuses, nothing is deleted here either.
         try:
-            compact_sqlite(self.sessions.kw["bind"])
-        except Exception:  # the purge stands; the rewrite is retried at the next purge
-            log.exception("could not rewrite the database after a purge")
+            self.chain.delete_account(account_ref)
+        except ChainError as e:
+            if "holds" in str(e).lower() or "funds" in str(e).lower():
+                raise EngineError("funds_left", "Money arrived in the event wallet just now. Let it confirm "
+                                  "and be swept, then purge.", 409) from e
+            raise
+        with self.lock, self.sessions() as db:
+            ev = self._get_event(db, ev_id)
+            if ev.status != "purged":
+                self._wipe(db, ev)
+                db.commit()
+        self._balances.pop(ev_id, None)
+        self.compact_if_owed()
+
+    def compact_if_owed(self) -> None:
+        """Finish the database rewrite a purge or retirement owes.
+
+        Under the lock, so the scanner doesn't write meanwhile; reads from API
+        requests are waited out. If it can't finish, the flag stays and the
+        scanner's next slow turn (or the next start) tries again.
+        """
+        with self.sessions() as db:
+            if db.get(Flag, COMPACT_FLAG) is None:
+                return
+        with self.lock:
+            bind = self.sessions.kw["bind"]
+            if not compact_sqlite(bind):
+                log.warning("could not rewrite the database after a purge yet; retrying shortly")
+                return
+            with self.sessions() as db:
+                db.query(Flag).filter(Flag.name == COMPACT_FLAG).delete()
+                db.commit()
 
     @staticmethod
     def _wipe(db: Session, ev: Event) -> None:
+        db.merge(Flag(name=COMPACT_FLAG))
         for model in (Rsvp, Deposit, Payout):
             db.query(model).filter(model.event_id == ev.id).delete()
         # Attendees' wallets keep the event id from their deposit memo, so
@@ -655,6 +707,7 @@ class Engine:
         ev.scan_height = 0
         ev.close_height = None
         ev.list_publish_at = None
+        ev.sweep_not_before = None
         ev.status = "purged"
 
     def retire_idle_events(self) -> None:
@@ -665,11 +718,12 @@ class Engine:
         limit of live events. The wallet refuses the delete if anything arrived
         after all.
         """
-        cutoff = datetime.now(timezone.utc) - IDLE_RETIRE_AFTER
+        now = datetime.now(timezone.utc)
+        cutoff, created_cutoff = now - IDLE_RETIRE_AFTER, now - EMPTY_RETIRE_AFTER
         with self.sessions() as db:
             candidates = [
                 ev.id for ev in db.scalars(select(Event).where(Event.status.in_(DOOR_OPEN), Event.rsvp_count == 0))
-                if _starts_before(ev.starts_at, cutoff)
+                if (_starts_before(ev.starts_at, cutoff) or _aware(ev.created_at) < created_cutoff)
                 and db.scalar(select(Deposit.id).where(Deposit.event_id == ev.id)) is None
             ]
         for event_id in candidates:
@@ -689,13 +743,22 @@ class Engine:
                     self._wipe(db, ev)
                     db.commit()
             self._balances.pop(event_id, None)
+        if candidates:
+            self.compact_if_owed()
 
     def _check_purgeable(self, db: Session, ev: Event) -> None:
+        """The database's side of whether a purge may go ahead."""
         if ev.status != "settled":
             raise EngineError("bad_state", "Settle the event before purging it.")
         if db.scalar(select(Payout.id).where(Payout.event_id == ev.id, Payout.status.in_(IN_FLIGHT))) is not None:
             raise EngineError("payouts_pending", "A payout (such as a returned late payment) is still in progress. "
                               "Purge once it has confirmed.", 409)
+        if db.scalar(select(Payout.id).where(Payout.event_id == ev.id, Payout.status == "failed")) is not None:
+            raise EngineError("payouts_failed", "A payout failed and hasn't been sent. Retry it before purging, "
+                              "or its money is destroyed with the wallet keys.", 409)
+
+    def _check_balance_purgeable(self, ev: Event) -> None:
+        """The wallet's side: nothing worth keeping is left in the event wallet."""
         try:
             bal = self.balance(ev, fresh=True)
         except ChainError as e:
@@ -713,6 +776,31 @@ class Engine:
             )
 
     # ---- door -----------------------------------------------------------
+    def late_check_in(self, db: Session, ev: Event, ticket_hash: str) -> tuple[str, int | None]:
+        """A check-in a door device recorded offline, uploaded after settling began.
+
+        Until the leftover deposits are swept, the attendee still gets their refund
+        rather than forfeiting a deposit for a door phone that was out of signal.
+        """
+        if ev.status in DOOR_OPEN:
+            return self.check_in(db, ev, ticket_hash)
+        swept = db.scalar(select(Payout.id).where(Payout.event_id == ev.id, Payout.kind == "forfeit"))
+        if ev.status != "settling" or swept is not None:
+            return "event_closed", None
+        r = db.scalar(select(Rsvp).where(Rsvp.event_id == ev.id, Rsvp.ticket_hash == ticket_hash))
+        if r is None:
+            return "unknown", None
+        if r.status != "forfeited":
+            return "already", r.seat
+        r.checked_in, r.status = True, "refunding"
+        ev.checked_in_count += 1
+        ev.forfeited_zat -= ev.deposit_zat
+        spread_s = max(0, self.settings.refund_spread_min) * 60
+        delay = timedelta(seconds=secrets.randbelow(spread_s + 1)) if spread_s else timedelta(0)
+        db.add(Payout(event_id=ev.id, kind="refund", not_before=datetime.now(timezone.utc) + delay, recipients=[{
+            "address": r.refund_address, "amount_zat": ev.deposit_zat, "memo": REFUND_MEMO, "rsvp_id": r.id}]))
+        return "ok", r.seat
+
     def check_in(self, db: Session, ev: Event, ticket_hash: str) -> tuple[str, int | None]:
         if ev.status not in DOOR_OPEN:
             return "event_closed", None

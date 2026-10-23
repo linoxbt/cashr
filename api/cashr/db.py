@@ -6,7 +6,9 @@ shielded refund address, and it is deleted when the event is purged.
 
 from __future__ import annotations
 
+import logging
 import secrets
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -50,11 +52,13 @@ class Event(Base):
 
     # open → closed → settling → settled → purged
     status: Mapped[str] = mapped_column(String(12), default="open")
-    # Highest block whose deposits are ingested; scans start a little below it.
+    # The chain height when the event was created; scans start a little below it.
     scan_height: Mapped[int] = mapped_column(Integer, default=0)
     # Chain height when RSVPs closed (deadline or organiser), so a payment sent
     # just before is judged by when it was mined, not when it was processed.
     close_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Settling waits until then for offline door devices (see Engine.late_check_in).
+    sweep_not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # The next moment the public list is updated (see Engine._publish).
     list_publish_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Tickets on the public list: the public counts come from this, not from rsvp_count.
@@ -87,12 +91,15 @@ class Deposit(Base):
     pool: Mapped[str] = mapped_column(String(10))
     out_index: Mapped[int] = mapped_column(Integer)
     amount_zat: Mapped[int] = mapped_column(BigInteger)
-    height: Mapped[int] = mapped_column(Integer)
+    # Always 0: a stored block height would date the payment. Kept for old databases.
+    height: Mapped[int] = mapped_column(Integer, default=0)
     # rsvp | rejected | float (top-ups, payments without our memo, unrefundable)
     kind: Mapped[str] = mapped_column(String(10))
     reason: Mapped[str] = mapped_column(String(40), default="")
     # A returned payment appears on the public list only at its next update.
     listed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Returned and unrefundable payments only (the public list shows them); an
+    # accepted deposit's ticket is on its RSVP row, so its txid matches no ticket.
     ticket_hash: Mapped[str] = mapped_column(String(43), default="")
 
 
@@ -100,7 +107,8 @@ class Rsvp(Base):
     __tablename__ = "rsvps"
     __table_args__ = (UniqueConstraint("event_id", "ticket_hash"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Random (set by the engine), so ids don't record the order people paid in.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     event_id: Mapped[str] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
     ticket_hash: Mapped[str] = mapped_column(String(43))
     refund_address: Mapped[str] = mapped_column(String(600))
@@ -140,45 +148,62 @@ class Payout(Base):
     not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class SeenAddress(Base):
-    """Keyed hashes of refund addresses already used, to refuse reuse.
+class Flag(Base):
+    """Server housekeeping that must survive a restart (see Engine.compact_if_owed)."""
 
-    Reusing a refund address across events would let anyone holding two
-    events' data link the same attendee, so a reused address is refused.
-    """
+    __tablename__ = "flags"
 
-    __tablename__ = "seen_addresses"
-
-    digest: Mapped[str] = mapped_column(String(64), primary_key=True)
-    # Which address-memory period it was used in (see Engine.forget_old_addresses).
-    period: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    name: Mapped[str] = mapped_column(String(40), primary_key=True)
 
 
 def make_engine(url: str):
-    kwargs = {}
-    if url.startswith("sqlite"):
-        kwargs["connect_args"] = {"check_same_thread": False}
-    engine = create_engine(url, **kwargs)
-    if url.startswith("sqlite"):
-        # Overwrite deleted rows with zeros, so purged refund addresses and memos
-        # don't linger in free pages of the database file.
-        @event.listens_for(engine, "connect")
-        def _secure_delete(dbapi_conn, _record):
-            dbapi_conn.execute("PRAGMA secure_delete = ON")
-            # WAL, so purged pages never sit in a rollback journal that is unlinked
-            # without being overwritten; purges then truncate the log (compact_sqlite).
-            dbapi_conn.execute("PRAGMA journal_mode = WAL")
+    # A purge's promise rests on rewriting the database file (compact_sqlite);
+    # other databases keep deleted rows in their own logs and dead tuples.
+    if not url.startswith("sqlite"):
+        raise ValueError("cashr stores its data in SQLite only (CASHR_DATABASE_URL=sqlite:///...)")
+    # hide_parameters: an error's text (which can reach logs) never carries the
+    # values of a query, such as ticket hashes or refund addresses.
+    engine = create_engine(url, connect_args={"check_same_thread": False}, hide_parameters=True)
+
+    # Overwrite deleted rows with zeros, so purged refund addresses and memos
+    # don't linger in free pages of the database file.
+    @event.listens_for(engine, "connect")
+    def _secure_delete(dbapi_conn, _record):
+        dbapi_conn.execute("PRAGMA secure_delete = ON")
+        # WAL, so purged pages never sit in a rollback journal that is unlinked
+        # without being overwritten; purges then truncate the log (compact_sqlite).
+        dbapi_conn.execute("PRAGMA journal_mode = WAL")
+
     return engine
 
 
-def compact_sqlite(engine) -> None:
-    """Rewrite the file and empty the WAL, so a purge leaves nothing on disk."""
-    if engine.dialect.name != "sqlite":
-        return
-    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-        conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
-        conn.exec_driver_sql("VACUUM")
-        conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+# How long a rewrite waits for other connections' reads to finish, per attempt.
+COMPACT_BUSY_MS = 10_000
+COMPACT_ATTEMPTS = 3
+
+log = logging.getLogger("cashr.db")
+
+
+def compact_sqlite(engine) -> bool:
+    """Rewrite the file and empty the WAL, so a purge leaves nothing on disk.
+
+    A checkpoint can't empty the WAL while another connection is reading from
+    it, so this waits for reads to finish, checks the result rather than
+    assuming it, and says whether it got there.
+    """
+    for attempt in range(COMPACT_ATTEMPTS):
+        try:
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                conn.exec_driver_sql(f"PRAGMA busy_timeout = {COMPACT_BUSY_MS}")
+                conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.exec_driver_sql("VACUUM")
+                busy, wal_frames, _ = conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)").one()
+                if not busy and wal_frames == 0:
+                    return True
+        except Exception as e:  # "database is locked": a reader outlasted the wait
+            log.warning("database rewrite attempt failed: %s", e)
+        time.sleep(0.2 * (attempt + 1))
+    return False
 
 
 def make_sessionmaker(engine):
@@ -188,6 +213,12 @@ def make_sessionmaker(engine):
 def init_db(engine) -> None:
     Base.metadata.create_all(engine)
     _add_missing_columns(engine)
+    with engine.begin() as conn:
+        # Data older servers kept and this one doesn't: reuse digests (the reuse
+        # check is per event now), payment heights, and accepted deposits' tickets.
+        conn.execute(text("DROP TABLE IF EXISTS seen_addresses"))
+        conn.execute(text("UPDATE deposits SET height = 0 WHERE height != 0"))
+        conn.execute(text("UPDATE deposits SET ticket_hash = '' WHERE kind = 'rsvp' AND ticket_hash != ''"))
 
 
 def _add_missing_columns(engine) -> None:

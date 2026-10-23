@@ -2,6 +2,8 @@
 #   cp .env.example .env   # set secrets
 #   docker compose up -d                       # API on 127.0.0.1:8000 only
 #   docker compose --profile https up -d       # plus Caddy serving https://$API_DOMAIN
+# Update: docker compose pull wallet api && docker compose up -d --no-build
+#   (CASHR_TAG=<commit> in .env pins both images to the same commit.)
 # On a fresh server, deploy/install.sh does all of this for you.
 # The web app (web/) deploys separately (Netlify) with NEXT_PUBLIC_API_URL.
 
@@ -26,6 +28,7 @@ services:
     image: cashr-tor:local
     restart: unless-stopped
     logging: *logging
+    networks: [backend]
     # Not published: only the wallet uses it.
 
   wallet:
@@ -33,8 +36,10 @@ services:
     image: ghcr.io/linoxbt/cashr-wallet:${CASHR_TAG:-main}
     build: ./wallet
     restart: unless-stopped
-    depends_on: [tor]
+    depends_on:
+      tor: { condition: service_healthy }
     logging: *logging
+    networks: [backend]
     environment:
       CASHR_WALLET_NETWORK: ${CASHR_NETWORK:-main}
       # Or your own lightwalletd/Zaino, e.g. http://lightwalletd:9067, for no third party at all.
@@ -52,12 +57,17 @@ services:
     image: ghcr.io/linoxbt/cashr-api:${CASHR_TAG:-main}
     build: ./api
     restart: unless-stopped
-    depends_on: [wallet]
+    depends_on:
+      wallet: { condition: service_healthy }
     logging: *logging
+    networks: [backend, edge]
     environment:
       CASHR_CHAIN: rpc
       CASHR_NETWORK: ${CASHR_NETWORK:-main}
-      CASHR_SECRET: ${CASHR_SECRET:?set CASHR_SECRET}
+      # Privacy timing (docs/DEPLOY.md): public list updates, refund spread, door-sync grace.
+      CASHR_LIST_DELAY_MIN: ${CASHR_LIST_DELAY_MIN:-120}
+      CASHR_REFUND_SPREAD_MIN: ${CASHR_REFUND_SPREAD_MIN:-180}
+      CASHR_DOOR_SYNC_GRACE_MIN: ${CASHR_DOOR_SYNC_GRACE_MIN:-30}
       CASHR_RPC_URL: http://wallet:8232
       CASHR_RPC_USER: cashr
       CASHR_RPC_PASSWORD: ${CASHR_WALLET_RPC_PASSWORD}
@@ -69,11 +79,12 @@ services:
       - "127.0.0.1:${CASHR_API_PORT:-8000}:8000"
 
   caddy:
-    image: caddy:2.8.4
+    image: caddy:2.8.4@sha256:226d1f059b75399fe19182893c7184591c07b97afc8dfcf44eeb80c9a77a530f
     profiles: ["https"]
     restart: unless-stopped
     logging: *logging
     depends_on: [api]
+    networks: [edge]
     environment:
       API_DOMAIN: ${API_DOMAIN:?set API_DOMAIN}
     ports:
@@ -92,21 +103,29 @@ services:
     profiles: ["demo"]
     restart: unless-stopped
     logging: *logging
+    # Its own network: the public demo can't reach the mainnet wallet or Tor.
+    networks: [demo]
     environment:
       CASHR_CHAIN: sim
       CASHR_NETWORK: test
       CASHR_SCAN_INTERVAL: "5"
       CASHR_LIST_DELAY_MIN: "0"
       CASHR_REFUND_SPREAD_MIN: "0"
+      CASHR_DOOR_SYNC_GRACE_MIN: "0"
       # Keep the simulated wallets with the database, so a restart doesn't strand demo events.
       CASHR_SIM_STATE: /data/sim-state.pickle
-      # Simulated data only, so a default is safe; set it anyway for a public demo.
-      CASHR_SECRET: ${CASHR_DEMO_SECRET:-demo-only-secret}
       CASHR_CORS_ORIGINS: ${CASHR_DEMO_CORS_ORIGINS:-https://demo.cashr.site}
     volumes:
       - demo-data:/data
     ports:
       - "127.0.0.1:${CASHR_DEMO_PORT:-8768}:8000"
+
+networks:
+  # Tor, the wallet and the API. Tor needs the internet; nothing else joins.
+  backend:
+  # The API and the bundled HTTPS proxy.
+  edge:
+  demo:
 
 volumes:
   wallet-data:

@@ -4,7 +4,7 @@ use std::{
     collections::BTreeSet,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -69,6 +69,14 @@ const ENHANCE_DELAY_MAX_S: u32 = 300;
 const EXPIRY_DEPTH: u32 = 10;
 /// Set while a delete's file rewrite is owed.
 const COMPACT_FLAG: &str = "compact_after_delete";
+/// A delete needs a sync this recent: an older one may have missed a payment.
+const DELETE_SYNC_FRESH_S: u64 = 300;
+/// Account creation gives up rather than finish after the API's own 180 s timeout,
+/// which would leave an account (and seed) nobody knows about.
+const CREATE_NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CREATE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(100);
+/// `scan_queue` priority codes (zcash_client_sqlite): above this, a range still needs scanning.
+const PRIORITY_SCANNED: i64 = 10;
 
 pub type Db = WalletDb<rusqlite::Connection, Network, SystemClock, OsRng>;
 
@@ -144,11 +152,15 @@ pub struct Wallet {
     client: Mutex<Option<Client>>,
     tip: AtomicU32,
     scanned: AtomicU32,
+    /// Unix time of the last sync that reached lightwalletd's tip.
+    last_sync: AtomicU64,
     prover: LocalTxProver,
     /// How many syncs in a row lightwalletd answered "not found" for a received transaction.
     misses: Mutex<std::collections::HashMap<TxId, u32>>,
-    /// When each received transaction may be fetched (see `due`).
+    /// When each received transaction may be fetched, and when each sent one's
+    /// status may be asked for next (see `due`).
     deferred: Mutex<std::collections::HashMap<TxId, std::time::Instant>>,
+    status_due: Mutex<std::collections::HashMap<TxId, std::time::Instant>>,
 }
 
 impl Wallet {
@@ -158,7 +170,7 @@ impl Wallet {
         zcash_client_sqlite::wallet::init::init_wallet_db(&mut db, None)
             .map_err(|e| anyhow!("wallet database migration failed: {e:?}"))?;
         let tip = db.chain_height()?.map(u32::from).unwrap_or(0);
-        let scanned = db.block_fully_scanned()?.map(|m| u32::from(m.block_height())).unwrap_or(0);
+        let scanned = scanned_through(&rusqlite::Connection::open(&db_path)?, tip)?;
         let seeds = SeedStore::open(&data_dir.join("seeds"), seed_key_hex)?;
         recover_staged_seeds(&params, &db, &seeds)?;
         let ops = OpStore::open(&data_dir.join("ops.sqlite"))?;
@@ -176,9 +188,11 @@ impl Wallet {
             client: Mutex::new(None),
             tip: AtomicU32::new(tip),
             scanned: AtomicU32::new(scanned),
+            last_sync: AtomicU64::new(0),
             prover: LocalTxProver::bundled(),
             misses: Default::default(),
             deferred: Default::default(),
+            status_due: Default::default(),
         });
         if owes_compaction {
             // A delete's rewrite was interrupted by a restart: finish it before serving.
@@ -231,6 +245,14 @@ impl Wallet {
         self.scanned.load(Ordering::Relaxed)
     }
 
+    /// Seconds since the last sync that reached lightwalletd's tip (None before the first).
+    pub fn last_sync_age(&self) -> Option<u64> {
+        match self.last_sync.load(Ordering::Relaxed) {
+            0 => None,
+            t => Some(unix_now().saturating_sub(t)),
+        }
+    }
+
     // ---- sync -------------------------------------------------------------
 
     /// Bring the wallet up to the chain tip, then fetch the full transactions
@@ -251,6 +273,7 @@ impl Wallet {
                 // Nothing to scan for yet; just track the tip.
                 let latest = client.get_latest_block(ChainSpec::default()).await?.into_inner();
                 self.tip.store(latest.height as u32, Ordering::Relaxed);
+                self.last_sync.store(unix_now(), Ordering::Relaxed);
                 return Ok(());
             }
             // Bounded, so a stalled block stream can't hold the writer forever.
@@ -262,9 +285,8 @@ impl Wallet {
             // Stored before fetching memos, so confirmations and expiry keep
             // moving even while a transaction can't be fetched.
             self.tip.store(u32::from(tip), Ordering::Relaxed);
-            if let Some(h) = db.block_fully_scanned()?.map(|m| u32::from(m.block_height())) {
-                self.scanned.store(h, Ordering::Relaxed);
-            }
+            self.scanned.store(scanned_through(&self.read_conn()?, u32::from(tip))?, Ordering::Relaxed);
+            self.last_sync.store(unix_now(), Ordering::Relaxed);
             tip
         };
         self.enhance(client, tip).await;
@@ -282,6 +304,10 @@ impl Wallet {
                 Ok(r) => r.into_iter().filter(|r| !done.contains(r)).collect::<Vec<_>>(),
                 Err(e) => return warn!(error = %e, "could not list the transactions to fetch"),
             };
+            if done.is_empty() {
+                // The first pass sees every request the wallet still has.
+                self.forget_settled(&requests).await;
+            }
             if requests.is_empty() {
                 return;
             }
@@ -303,6 +329,18 @@ impl Wallet {
     /// (even over Tor) don't follow each broadcast closely enough for a sync
     /// server to pick out which transactions are RSVPs by timing.
     async fn due(&self, request: &TransactionDataRequest) -> bool {
+        if let TransactionDataRequest::GetStatus(txid) = request {
+            // A sent transaction's status, asked for every 1–3 minutes rather than at
+            // every sync: each ask is a fresh Tor circuit and a request lightwalletd sees.
+            let mut next = self.status_due.lock().await;
+            let now = std::time::Instant::now();
+            if next.get(txid).is_some_and(|at| now < *at) {
+                return false;
+            }
+            let jitter = (OsRng.next_u32() % 121) as u64;
+            next.insert(*txid, now + std::time::Duration::from_secs(60 + jitter));
+            return true;
+        }
         let TransactionDataRequest::Enhancement(txid) = request else { return true };
         let mut deferred = self.deferred.lock().await;
         let at = *deferred.entry(*txid).or_insert_with(|| {
@@ -314,6 +352,22 @@ impl Wallet {
         }
         deferred.remove(txid);
         true
+    }
+
+    /// Drops timers and miss counts for transactions the wallet no longer asks
+    /// about (fetched, or their account deleted), so they don't pile up.
+    async fn forget_settled(&self, requests: &[TransactionDataRequest]) {
+        let wanted = |txid: &TxId, status: bool| {
+            requests.iter().any(|r| match r {
+                TransactionDataRequest::GetStatus(t) => status && t == txid,
+                TransactionDataRequest::Enhancement(t) => !status && t == txid,
+                #[allow(unreachable_patterns)]
+                _ => false,
+            })
+        };
+        self.deferred.lock().await.retain(|t, _| wanted(t, false));
+        self.misses.lock().await.retain(|t, _| wanted(t, false));
+        self.status_due.lock().await.retain(|t, _| wanted(t, true));
     }
 
     async fn serve(&self, client: &mut Client, tip: BlockHeight, request: &TransactionDataRequest) -> anyhow::Result<()> {
@@ -399,18 +453,27 @@ impl Wallet {
     /// current tip so it never scans history. Returns the account's UUID.
     pub async fn new_account(&self) -> anyhow::Result<String> {
         let mut client = self.client().await?;
-        let latest = client.get_latest_block(ChainSpec::default()).await?.into_inner();
-        let treestate = client
-            .get_tree_state(BlockId { height: latest.height.saturating_sub(1), ..Default::default() })
-            .await?
+        let latest = tokio::time::timeout(CREATE_NETWORK_TIMEOUT, client.get_latest_block(ChainSpec::default()))
+            .await
+            .map_err(|_| anyhow!("lightwalletd did not answer in time"))??
             .into_inner();
+        let treestate = tokio::time::timeout(
+            CREATE_NETWORK_TIMEOUT,
+            client.get_tree_state(BlockId { height: latest.height.saturating_sub(1), ..Default::default() }),
+        )
+        .await
+        .map_err(|_| anyhow!("lightwalletd did not answer in time"))??
+        .into_inner();
         let birthday = AccountBirthday::from_treestate(treestate, None)
             .map_err(|e| anyhow!("bad tree state from lightwalletd: {e:?}"))?;
         let seed = SeedStore::generate();
         // The seed is on disk before the account exists, so funds sent to the
         // account can always be spent.
         let staged = self.seeds.stage(&seed)?;
-        let mut db = self.db.lock().await;
+        let Ok(mut db) = tokio::time::timeout(CREATE_LOCK_TIMEOUT, self.db.lock()).await else {
+            self.seeds.discard(&staged);
+            bail!("the wallet is busy syncing; try again shortly");
+        };
         let created = db.create_account("cashr-event", &seed, &birthday, None);
         let (uuid, _) = match created {
             Ok(v) => v,
@@ -421,8 +484,8 @@ impl Wallet {
         };
         let account = uuid.expose_uuid().to_string();
         self.seeds.commit(&staged, &account)?;
-        debug!(%account, birthday = latest.height, "created account");
-        info!("created an event account");
+        // Debug only: a timestamped line per account would date each event past its purge.
+        debug!(%account, birthday = latest.height, "created an event account");
         Ok(account)
     }
 
@@ -460,13 +523,12 @@ impl Wallet {
             .account_balances()
             .get(&uuid)
             .map(|b| {
-                let pools = [b.orchard_balance(), b.sapling_balance()];
-                let spendable = pools.iter().map(|p| p.spendable_value().into_u64()).sum();
-                let pending = pools
-                    .iter()
-                    .map(|p| p.change_pending_confirmation().into_u64() + p.value_pending_spendability().into_u64())
-                    .sum();
-                (spendable, pending)
+                let pools = [b.orchard_balance(), b.sapling_balance(), b.ironwood_balance()];
+                let spendable: u64 = pools.iter().map(|p| p.spendable_value().into_u64()).sum();
+                // Everything else the account holds: unconfirmed, locked, and notes too
+                // small to be worth spending, which still count before a delete.
+                let held: u64 = pools.iter().map(|p| p.total().into_u64() + p.uneconomic_value().into_u64()).sum();
+                (spendable, held.saturating_sub(spendable))
             })
             .unwrap_or((0, 0)))
     }
@@ -519,10 +581,19 @@ impl Wallet {
         Ok(uuid::Uuid::from_slice(&uuid)?.to_string())
     }
 
-    /// The highest scanned block whose time is at or before `unix_time`, if any.
+    /// The last block at or before `unix_time`, if the wallet holds it and the
+    /// block right after it (so a gap in the stored blocks can't pass off an older
+    /// block as the last one before that time). None leaves the caller to estimate.
     pub fn height_at(&self, unix_time: i64) -> anyhow::Result<Option<u32>> {
         let conn = self.read_conn()?;
-        Ok(conn.query_row("SELECT MAX(height) FROM blocks WHERE time <= ?1", [unix_time], |r| r.get(0))?)
+        Ok(conn
+            .query_row(
+                "SELECT b.height FROM blocks b JOIN blocks n ON n.height = b.height + 1
+                  WHERE b.time <= ?1 AND n.time > ?1 ORDER BY b.height DESC LIMIT 1",
+                [unix_time],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// Where a transaction this wallet built stands on chain.
@@ -570,8 +641,7 @@ impl Wallet {
         }
         self.seeds.delete(account)?;
         self.ops.delete_account(account)?;
-        debug!(%account, "deleted account and its seed");
-        info!("deleted an event account and its seed");
+        debug!(%account, "deleted an event account and its seed");
         if deleted {
             // Freed pages and the WAL still hold the deleted keys and memos until the
             // file is rewritten. That can take a while, so it runs after replying.
@@ -598,6 +668,7 @@ impl Wallet {
     /// and built transactions that could still be mined (their inputs show in
     /// no balance until they expire).
     fn ensure_deletable(&self, account: &str, uuid: AccountUuid) -> anyhow::Result<()> {
+        sync_allows_delete(self.last_sync.load(Ordering::Relaxed), unix_now(), self.scanned(), self.tip())?;
         let (spendable, pending) = self.balance(account)?;
         if spendable + pending > DELETE_MAX_ZAT {
             bail!("account still holds {} zatoshis; sweep it before deleting", spendable + pending);
@@ -781,7 +852,7 @@ impl Wallet {
     /// FullPrivacy only an Orchard receiver is acceptable, so funds never
     /// leave the Orchard pool and no amount is revealed.
     fn shielded_target(&self, address: &str, policy: PrivacyPolicy) -> anyhow::Result<ZcashAddress> {
-        let decoded = Address::decode(&self.params, address).ok_or_else(|| anyhow!("Invalid address {address}"))?;
+        let decoded = Address::decode(&self.params, address).ok_or_else(|| anyhow!("invalid recipient address"))?;
         match decoded {
             Address::Unified(ua) => {
                 if let Some(o) = ua.orchard() {
@@ -808,6 +879,12 @@ impl Wallet {
             .map_err(|e| anyhow!("key derivation failed: {e:?}"))?;
         let (txid, amount, raw) = {
             let mut db = self.db.lock().await;
+            // A seed file renamed or restored under the wrong account must never
+            // be used to sign for it.
+            match db.get_account_for_ufvk(&usk.to_unified_full_viewing_key())? {
+                Some(a) if a.id() == uuid => {}
+                _ => bail!("the seed stored for this account does not match it; refusing to sign"),
+            }
             let proposal = match kind {
                 SendKind::Transfer(request) => {
                     let change = SingleOutputChangeStrategy::new(
@@ -885,22 +962,6 @@ impl Wallet {
         Ok(txid.to_string())
     }
 
-    pub fn parse_ua_receivers(&self, address: &str) -> anyhow::Result<serde_json::Value> {
-        let decoded = Address::decode(&self.params, address).ok_or_else(|| anyhow!("Invalid address"))?;
-        let Address::Unified(ua) = decoded else { bail!("not a unified address") };
-        let mut out = serde_json::Map::new();
-        if let Some(o) = ua.orchard() {
-            let only = UnifiedAddress::from_receivers(Some(*o), None, None).unwrap();
-            out.insert("orchard".into(), only.encode(&self.params).into());
-        }
-        if let Some(s) = ua.sapling() {
-            out.insert("sapling".into(), Address::from(*s).encode(&self.params).into());
-        }
-        if let Some(t) = ua.transparent() {
-            out.insert("p2pkh".into(), Address::from(*t).encode(&self.params).into());
-        }
-        Ok(out.into())
-    }
 
     pub fn network_name(&self) -> &'static str {
         match self.params.network_type() {
@@ -909,6 +970,42 @@ impl Wallet {
             zcash_protocol::consensus::NetworkType::Regtest => "regtest",
         }
     }
+}
+
+/// A balance only covers the blocks scanned so far: after downtime, or while
+/// syncs fail, a payment can sit in blocks the wallet hasn't seen yet.
+fn sync_allows_delete(last_sync: u64, now: u64, scanned: u32, tip: u32) -> anyhow::Result<()> {
+    if last_sync == 0 || now.saturating_sub(last_sync) > DELETE_SYNC_FRESH_S {
+        bail!("the wallet hasn't synced recently, so it can't be sure this account is empty; try again shortly");
+    }
+    if scanned < tip {
+        bail!("the wallet is still scanning blocks that may hold this account's funds; try again shortly");
+    }
+    Ok(())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// The height up to which every block that can hold this wallet's funds has been
+/// scanned: the block before the lowest range still waiting to be scanned, or the
+/// tip when none is. librustzcash's `block_fully_scanned` stops at the first gap
+/// after the oldest scanned range, and a deleted account's history (marked
+/// Ignored, never scanned) leaves exactly such a gap, so it stops moving for good
+/// and an expired send could never be seen as expired.
+fn scanned_through(conn: &rusqlite::Connection, tip: u32) -> anyhow::Result<u32> {
+    let unscanned: Option<u32> = conn.query_row(
+        "SELECT MIN(block_range_start) FROM scan_queue
+          WHERE priority > ?1
+            AND block_range_end > (SELECT IFNULL(MIN(birthday_height), 0) FROM accounts)",
+        [PRIORITY_SCANNED],
+        |r| r.get(0),
+    )?;
+    Ok(match unscanned {
+        Some(start) => start.saturating_sub(1).min(tip),
+        None => tip,
+    })
 }
 
 /// A create interrupted between creating the account and committing its seed
@@ -965,6 +1062,49 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("uw-wallet-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn scan_queue(ranges: &[(u32, u32, i64)], birthdays: &[u32]) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scan_queue (block_range_start INTEGER, block_range_end INTEGER, priority INTEGER);
+             CREATE TABLE accounts (birthday_height INTEGER);",
+        )
+        .unwrap();
+        for (a, b, p) in ranges {
+            conn.execute("INSERT INTO scan_queue VALUES (?1, ?2, ?3)", rusqlite::params![a, b, p]).unwrap();
+        }
+        for b in birthdays {
+            conn.execute("INSERT INTO accounts VALUES (?1)", [b]).unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn a_deleted_accounts_history_does_not_pin_the_scanned_height() {
+        // The live wallet's queue: a deleted account left a Scanned range, then an
+        // Ignored gap below the live accounts' birthdays. librustzcash reported
+        // 3526965 here forever, so no send could ever be seen as expired.
+        let live = scan_queue(
+            &[(419_200, 3_526_928, 0), (3_526_928, 3_526_966, 10), (3_526_966, 3_527_083, 0), (3_527_083, 3_527_291, 10)],
+            &[3_527_167, 3_527_243],
+        );
+        assert_eq!(scanned_through(&live, 3_527_290).unwrap(), 3_527_290);
+        // New blocks waiting to be scanned stop it just below them.
+        let behind = scan_queue(&[(3_527_083, 3_527_291, 10), (3_527_291, 3_527_300, 50)], &[3_527_167]);
+        assert_eq!(scanned_through(&behind, 3_527_299).unwrap(), 3_527_290);
+        // An unscanned gap after downtime does too, even with later blocks scanned.
+        let gap = scan_queue(&[(3_527_100, 3_527_150, 10), (3_527_150, 3_527_200, 20), (3_527_200, 3_527_300, 10)], &[3_527_100]);
+        assert_eq!(scanned_through(&gap, 3_527_299).unwrap(), 3_527_149);
+    }
+
+    #[test]
+    fn a_seed_is_deleted_only_after_a_recent_complete_sync() {
+        let now = 1_800_000_000;
+        assert!(sync_allows_delete(0, now, 100, 100).is_err(), "never synced");
+        assert!(sync_allows_delete(now - DELETE_SYNC_FRESH_S - 1, now, 100, 100).is_err(), "stale sync");
+        assert!(sync_allows_delete(now - 5, now, 99, 100).is_err(), "blocks still unscanned");
+        assert!(sync_allows_delete(now - 5, now, 100, 100).is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread")]

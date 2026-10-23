@@ -59,6 +59,10 @@ class ChainError(RuntimeError):
 class Chain(Protocol):
     def tip_height(self) -> int: ...
 
+    def sync_age(self) -> int | None:
+        """Seconds since the wallet last caught up with the chain (None: never yet)."""
+        ...
+
     def height_at(self, unix_time: int) -> int | None:
         """The highest known block mined at or before `unix_time`, or None if unknown."""
         ...

@@ -8,11 +8,18 @@
 #             Omit it to use <ip>.sslip.io, which needs no DNS setup.
 # web-origin  Where the web app lives (default https://cashr.site).
 #
-# Re-running it updates to the latest images and restarts the services; secrets are kept.
+# Re-running it updates to the latest images and restarts the services; secrets and
+# settings in .env are kept (a web-origin given again replaces the CORS setting).
+#
+# CASHR_PROXY=none  Skip the bundled Caddy (ports 80/443) and the firewall changes, for a
+#                   server whose own HTTPS proxy forwards to 127.0.0.1:$CASHR_API_PORT.
 set -euo pipefail
 
 DOMAIN="${1:-}"
 WEB_ORIGIN="${2:-https://cashr.site}"
+WEB_ORIGIN_GIVEN="${2:+yes}"
+PROXY="${CASHR_PROXY:-caddy}"
+ALPINE="alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
 REPO="${CASHR_REPO:-https://github.com/linoxbt/cashr.git}"
 BRANCH="${CASHR_BRANCH:-main}"
 DIR="${CASHR_DIR:-/opt/cashr}"
@@ -69,13 +76,13 @@ for v in wallet-data api-data caddy-data; do
   docker volume inspect "unlisted_$v" >/dev/null 2>&1 || continue
   OLD_VOLUMES="$OLD_VOLUMES unlisted_$v"
   if docker volume inspect "cashr_$v" >/dev/null 2>&1 &&
-     docker run --rm -v "cashr_$v:/to:ro" alpine:3.20 test -f /to/.migrated-from-unlisted; then
+     docker run --rm -v "cashr_$v:/to:ro" "$ALPINE" test -f /to/.migrated-from-unlisted; then
     continue
   fi
   say "Copying volume unlisted_$v to cashr_$v"
   docker compose -p unlisted --profile https down >/dev/null 2>&1 || true
   docker volume create "cashr_$v" >/dev/null
-  docker run --rm -v "unlisted_$v:/from:ro" -v "cashr_$v:/to" alpine:3.20 sh -c \
+  docker run --rm -v "unlisted_$v:/from:ro" -v "cashr_$v:/to" "$ALPINE" sh -c \
     'set -e; cp -a /from/. /to/; cd /to
      for f in unlisted.db unlisted.db.lock unlisted.db-wal unlisted.db-shm; do
        if [ -e "$f" ]; then mv "$f" "cashr${f#unlisted}"; fi
@@ -91,35 +98,51 @@ if [ -z "$DOMAIN" ]; then
   DOMAIN="$(echo "$ip" | tr . -).sslip.io"
 fi
 
-NEW=0
 if [ ! -f .env ]; then
   say "Generating secrets"
   umask 077
   cat > .env <<EOF
 CASHR_NETWORK=main
-CASHR_SECRET=$(openssl rand -hex 32)
 CASHR_WALLET_RPC_PASSWORD=$(openssl rand -hex 24)
 CASHR_WALLET_SEED_KEY=$(openssl rand -hex 32)
 CASHR_CORS_ORIGINS=$WEB_ORIGIN
 API_DOMAIN=$DOMAIN
+CASHR_BACKUP_PASSPHRASE=$(openssl rand -hex 32)
 EOF
-  NEW=1
 else
-  sed -i "s|^API_DOMAIN=.*|API_DOMAIN=$DOMAIN|; s|^CASHR_CORS_ORIGINS=.*|CASHR_CORS_ORIGINS=$WEB_ORIGIN|" .env
+  sed -i "s|^API_DOMAIN=.*|API_DOMAIN=$DOMAIN|" .env
+  if [ -n "$WEB_ORIGIN_GIVEN" ]; then
+    sed -i "s|^CASHR_CORS_ORIGINS=.*|CASHR_CORS_ORIGINS=$WEB_ORIGIN|" .env
+  fi
+  grep -q '^CASHR_BACKUP_PASSPHRASE=' .env || echo "CASHR_BACKUP_PASSPHRASE=$(openssl rand -hex 32)" >> .env
 fi
 chmod 600 .env
 
-say "Firewall: SSH, HTTP and HTTPS only"
-ufw allow OpenSSH >/dev/null
-ufw allow 80/tcp >/dev/null
-ufw allow 443/tcp >/dev/null
-ufw --force enable >/dev/null
+say "Nightly encrypted backup"
+cat > /etc/cron.d/cashr-backup <<EOF
+# cashr: encrypted backup of the data volumes (see $DIR/deploy/backup.sh)
+40 3 * * * root CASHR_DIR=$DIR $DIR/deploy/backup.sh >>/var/log/cashr-backup.log 2>&1
+EOF
+
+PROFILES=(--profile https)
+PULL=(wallet api caddy)
+if [ "$PROXY" = none ]; then
+  PROFILES=()
+  PULL=(wallet api)
+else
+  say "Firewall: SSH, HTTP and HTTPS only"
+  ufw allow OpenSSH >/dev/null
+  ufw allow 80/tcp >/dev/null
+  ufw allow 443/tcp >/dev/null
+  ufw --force enable >/dev/null
+fi
+if grep -q '^COMPOSE_PROFILES=.*demo' .env; then PROFILES+=(--profile demo); PULL+=(demo-api); fi
 
 say "Downloading and starting"
-if docker compose --profile https pull --quiet wallet api caddy; then
+if docker compose "${PROFILES[@]}" pull --quiet "${PULL[@]}"; then
   # Tor is a small local build from Alpine's package.
   docker compose build --quiet tor
-  docker compose --profile https up -d --no-build
+  docker compose "${PROFILES[@]}" up -d --no-build
 else
   # No prebuilt image (fork, or registry unreachable): build from source.
   # That needs about 8 GB of free disk and 4 GB of memory, so add swap if short.
@@ -134,10 +157,11 @@ else
     grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
   fi
   say "Building from source (10-20 minutes)"
-  docker compose --profile https up -d --build
+  docker compose "${PROFILES[@]}" up -d --build
 fi
-# Old images from previous runs are no longer needed.
-docker image prune -f >/dev/null
+# Old cashr images from previous runs are no longer needed (only cashr's: the
+# server may run other things).
+docker image prune -f --filter "label=org.opencontainers.image.source=https://github.com/linoxbt/cashr" >/dev/null
 
 say "Waiting for https://$DOMAIN/meta"
 if [ -n "$OLD_VOLUMES" ]; then
@@ -160,17 +184,10 @@ cashr backend is running.
   API URL:   https://$DOMAIN
   Next step: set NEXT_PUBLIC_API_URL=https://$DOMAIN on the web app and redeploy it.
 
-Back up, separately and offline:
-  1. The wallet volume, encrypted (you choose a passphrase):
-       docker run --rm -v cashr_wallet-data:/d alpine tar cz -C /d . | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -out wallet-backup.tgz.enc
-     Restore:
-       openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in wallet-backup.tgz.enc | docker run --rm -i -v cashr_wallet-data:/d alpine tar xz -C /d
-  2. CASHR_WALLET_SEED_KEY from $DIR/.env
-Spending needs both. Privacy doesn't: the volume alone holds every live event's ticket hashes and refund
-addresses, so never keep it unencrypted. A backup also keeps events purged after it was taken: replace old
-backups after a purge.
+Backups: every night at 03:40 UTC, encrypted, into /var/backups/cashr (the last 7).
+  - Copy them off this machine: set CASHR_BACKUP_REMOTE=user@host:/path in $DIR/.env.
+  - Keep CASHR_WALLET_SEED_KEY and CASHR_BACKUP_PASSPHRASE from $DIR/.env somewhere offline,
+    apart from the backups: restoring needs the passphrase, spending needs the seed key.
+    (Read them with: grep -E '^CASHR_(WALLET_SEED_KEY|BACKUP_PASSPHRASE)=' $DIR/.env)
+  - Restore: see docs/DEPLOY.md.
 EOF
-if [ "$NEW" = 1 ]; then
-  echo
-  echo "CASHR_WALLET_SEED_KEY (shown once here; it is also in $DIR/.env): $(grep '^CASHR_WALLET_SEED_KEY=' .env | cut -d= -f2)"
-fi

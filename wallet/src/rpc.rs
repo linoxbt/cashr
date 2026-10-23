@@ -42,7 +42,7 @@ fn param_err(msg: impl Into<String>) -> RpcError {
     RpcError(-8, msg.into())
 }
 
-pub async fn handle(State(state): State<Arc<RpcState>>, headers: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse {
+pub async fn handle(State(state): State<Arc<RpcState>>, headers: HeaderMap, body: axum::body::Bytes) -> impl IntoResponse {
     if let Some(expected) = &state.auth {
         let given = headers.get("authorization").map(|v| v.as_bytes()).unwrap_or_default();
         // Constant time, so the password can't be recovered by timing guesses.
@@ -50,6 +50,10 @@ pub async fn handle(State(state): State<Arc<RpcState>>, headers: HeaderMap, Json
             return (StatusCode::UNAUTHORIZED, Json(json!({"result": null, "error": {"code": -32600, "message": "unauthorized"}, "id": null})));
         }
     }
+    // Parsed only once authenticated.
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"result": null, "error": {"code": -32700, "message": "parse error"}, "id": null})));
+    };
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let method = body.get("method").and_then(Value::as_str).unwrap_or_default().to_string();
     let params = body.get("params").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -91,6 +95,12 @@ fn parse_zec(v: &Value) -> Result<Zatoshis, RpcError> {
     Zatoshis::from_u64(zat).map_err(|_| param_err("amount out of range"))
 }
 
+/// Runs a call that does blocking work (SQLite, seed files, proving) without
+/// stalling the async workers that serve other requests and the sync.
+fn blocking<T>(f: impl FnOnce() -> T) -> T {
+    tokio::task::block_in_place(f)
+}
+
 async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Value, RpcError> {
     let w = &state.wallet;
     match method {
@@ -100,13 +110,14 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
         // mined at or before it), so a deadline can be judged in blocks.
         "z_heightattime" => {
             let t = params.first().and_then(Value::as_i64).ok_or_else(|| param_err("unix time required"))?;
-            Ok(json!(w.height_at(t)?))
+            Ok(json!(blocking(|| w.height_at(t))?))
         }
 
         "getwalletinfo" => Ok(json!({
             "network": w.network_name(),
             "chain_tip": w.tip(),
             "fully_scanned_height": w.scanned(),
+            "last_sync_age_s": w.last_sync_age(),
             "lightwalletd": state.lightwalletd,
         })),
 
@@ -132,8 +143,7 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
             let address = str_param(params, 0, "address")?;
             let minconf = params.get(1).and_then(Value::as_u64).unwrap_or(1) as u32;
             let since = params.get(2).and_then(Value::as_u64).unwrap_or(0) as u32;
-            let rows = w
-                .received_at(address, since)?
+            let rows = blocking(|| w.received_at(address, since))?
                 .into_iter()
                 .map(|o| {
                     let conf = w.confirmations(o.mined_height);
@@ -158,7 +168,8 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
         }
 
         "z_getbalanceforaccount" => {
-            let (spendable, pending) = w.balance(str_param(params, 0, "account")?)?;
+            let account = str_param(params, 0, "account")?;
+            let (spendable, pending) = blocking(|| w.balance(account))?;
             Ok(json!({"spendableZat": spendable, "pendingZat": pending}))
         }
 
@@ -176,9 +187,11 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
                 let amount = parse_zec(a.get("amount").ok_or_else(|| param_err("amount missing"))?)?;
                 recipients.push(Recipient { address: address.to_string(), amount, memo: memo_param(a.get("memo"))? });
             }
-            let account = w.account_for_address(from)?;
-            let kind = w.transfer_request(recipients, policy)?;
-            Ok(json!(w.submit(key, &account, kind)?))
+            blocking(|| {
+                let account = w.account_for_address(from)?;
+                let kind = w.transfer_request(recipients, policy)?;
+                Ok(json!(w.submit(key, &account, kind)?))
+            })
         }
 
         "z_sweep" => {
@@ -186,9 +199,11 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
             let to = str_param(params, 1, "toaddress")?;
             let memo = memo_param(params.get(2))?;
             let key = str_param(params, 3, "idempotency key")?;
-            let account = w.account_for_address(from)?;
-            let kind = w.sweep_request(to, memo)?;
-            Ok(json!(w.submit(key, &account, kind)?))
+            blocking(|| {
+                let account = w.account_for_address(from)?;
+                let kind = w.sweep_request(to, memo)?;
+                Ok(json!(w.submit(key, &account, kind)?))
+            })
         }
 
         "z_getoperationstatus" => {
@@ -199,7 +214,7 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
                 .unwrap_or_default();
             let mut out = vec![];
             for id in &ids {
-                if let Some(s) = w.op_status(id)? {
+                if let Some(s) = blocking(|| w.op_status(id))? {
                     out.push(match s {
                         OpState::Executing => json!({"id": id, "status": "executing"}),
                         OpState::Success { txid, amount } => {
@@ -214,7 +229,7 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
 
         "gettransaction" => {
             let txid = str_param(params, 0, "txid")?;
-            match w.tx_state(txid)? {
+            match blocking(|| w.tx_state(txid))? {
                 Some(TxState::Mined { confirmations }) => Ok(json!({"txid": txid, "status": "mined", "confirmations": confirmations})),
                 Some(TxState::Pending) => Ok(json!({"txid": txid, "status": "pending", "confirmations": 0})),
                 Some(TxState::Expired) => Ok(json!({"txid": txid, "status": "expired", "confirmations": 0})),
@@ -226,8 +241,6 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
             w.delete_account(str_param(params, 0, "account")?).await?;
             Ok(json!(true))
         }
-
-        "z_listunifiedreceivers" => Ok(w.parse_ua_receivers(str_param(params, 0, "unified_address")?)?),
 
         _ => Err(RpcError(-32601, format!("Method not found: {method}"))),
     }

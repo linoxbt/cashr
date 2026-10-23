@@ -14,8 +14,8 @@ from __future__ import annotations
 import base64
 import logging
 import threading
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,13 +27,20 @@ from .chain import ChainError, make_chain
 from .codec import is_ticket_hash
 from .config import Settings, get_settings
 from .db import Deposit, Event, Payout, Rsvp, init_db, make_engine, make_sessionmaker
-from .engine import DOOR_OPEN, Engine, EngineError, accepting_rsvps
+from .engine import DOOR_OPEN, Engine, EngineError, _aware, accepting_rsvps
 from .locks import acquire_writer_lock
 
 log = logging.getLogger("cashr")
 
 MAX_DEPOSIT_ZAT = 100 * 100_000_000
 MIN_DEPOSIT_ZAT = 100_000  # 0.001 ZEC
+# Events can be created at most this far ahead, so empty future events can't
+# hold the server's live-event limit indefinitely (see Engine.retire_idle_events).
+MAX_AHEAD = timedelta(days=366)
+# Every request body here is small; anything bigger is refused before parsing.
+MAX_BODY_BYTES = 64 * 1024
+# /health fails once the wallet's last catch-up with the chain is older than this.
+SYNC_STALE_S = 300
 
 
 # ---- schemas -----------------------------------------------------------
@@ -62,6 +69,8 @@ class CreateEvent(BaseModel):
             raise ValueError("starts_at must be an ISO 8601 date and time") from e
         if t.tzinfo is None:
             raise ValueError("starts_at needs a UTC offset, e.g. 2026-10-30T18:00:00Z")
+        if t > datetime.now(timezone.utc) + MAX_AHEAD:
+            raise ValueError("starts_at can be at most a year ahead")
         return t.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
     @field_validator("rsvp_closes_at")
@@ -110,7 +119,9 @@ def public_event(ev: Event) -> dict:
         "details": ev.details,
         "capacity": ev.capacity,
         "deposit_zat": ev.deposit_zat,
-        "rsvp_closes_at": ev.rsvp_closes_at.isoformat() if ev.rsvp_closes_at else None,
+        # With its offset: SQLite hands the time back without one, and a browser
+        # would read a bare time as its own local time.
+        "rsvp_closes_at": _aware(ev.rsvp_closes_at).isoformat().replace("+00:00", "Z") if ev.rsvp_closes_at else None,
         "status": ev.status,
         "address": ev.address,
         # Public counts follow the public list, which fills in batches; a live count
@@ -154,8 +165,6 @@ def admin_event(ev: Event) -> dict:
 
 def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     settings = settings or get_settings()
-    if not settings.is_sim and settings.secret == "dev-only-secret":
-        raise RuntimeError("Set CASHR_SECRET before running against a real wallet.")
     chain = chain or make_chain(settings)
     # One process owns the database and the wallet's payouts: a second one
     # would race on them. Refuse to start rather than risk paying twice.
@@ -179,6 +188,8 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         t = None
+        # A rewrite a purge owed when the server stopped is finished before serving.
+        engine.compact_if_owed()
         if settings.run_scanner:
             t = threading.Thread(target=scanner, name="cashr-scanner", daemon=True)
             t.start()
@@ -208,11 +219,29 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
 
     @app.exception_handler(ChainError)
     async def _chain_error(_: Request, e: ChainError):
-        return JSONResponse({"error": "wallet", "message": str(e)}, status_code=502)
+        # The wallet's own words can name internal hosts or addresses: logged, not shown.
+        log.warning("wallet error: %s", e)
+        return JSONResponse({"error": "wallet", "message": "The wallet is unavailable right now. Try again shortly."},
+                            status_code=502)
+
+    @app.middleware("http")
+    async def _limit_body(request: Request, call_next):
+        length = request.headers.get("content-length")
+        if length is not None and (not length.isdigit() or int(length) > MAX_BODY_BYTES):
+            return JSONResponse({"error": "too_large", "message": "Request too large."}, status_code=413)
+        return await call_next(request)
 
     def db_session():
         with sessions() as db:
             yield db
+
+    @contextmanager
+    def wallet_errors_shown():
+        """For the organiser's own actions: say why the wallet refused."""
+        try:
+            yield
+        except ChainError as e:
+            raise EngineError("wallet", f"The wallet couldn't do that: {e}", 502) from e
 
     def bearer(authorization: str = Header(default="")) -> str:
         scheme, _, token = authorization.partition(" ")
@@ -223,7 +252,14 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
     # ---- public -----------------------------------------------------------
     @app.get("/health")
     def health():
-        return {"ok": True}
+        """Healthy only while the wallet is keeping up with the chain: a stalled sync
+        (Tor or lightwalletd down) would otherwise go unnoticed while payments wait."""
+        try:
+            age = chain.sync_age()
+        except ChainError:
+            age = None
+        ok = age is not None and age <= SYNC_STALE_S
+        return JSONResponse({"ok": ok, "sync_age_s": age}, status_code=200 if ok else 503)
 
     @app.get("/meta")
     def meta():
@@ -328,7 +364,8 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             ev = engine.authorize(db, event_id, token, "admin")
             engine.set_fund_address(db, ev, body.address)
             db.commit()
-        engine.scan_event(event_id)
+        with wallet_errors_shown():
+            engine.scan_event(event_id)
         with sessions() as db:
             return admin_event(db.get(Event, event_id))
 
@@ -338,15 +375,23 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
                    "retry": engine.retry_failed}
         if action not in actions and action not in ("scan", "purge"):
             raise EngineError("bad_action", "Unknown action.", 404)
+        extra = {}
+        if action == "close":
+            # Asked before taking the lock: wallet calls can be slow.
+            try:
+                extra["tip"] = chain.tip_height()
+            except ChainError:
+                pass
         with engine.lock, sessions() as db:
             ev = engine.authorize(db, event_id, token, "admin")
             if action in actions:
-                actions[action](db, ev)
+                actions[action](db, ev, **extra)
                 db.commit()
-        if action == "purge":
-            engine.purge(event_id)
-        elif action in ("scan", "settle", "retry"):
-            engine.scan_event(event_id)
+        with wallet_errors_shown():
+            if action == "purge":
+                engine.purge(event_id)
+            elif action in ("scan", "settle", "retry"):
+                engine.scan_event(event_id)
         with sessions() as db:
             return admin_event(db.get(Event, event_id))
 
@@ -364,10 +409,10 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
 
     @app.post("/events/{event_id}/door/checkin")
     def door_checkin(event_id: str, body: CheckIn, token: str = Depends(bearer)):
-        if not is_ticket_hash(body.ticket_hash):
-            return {"result": "unknown", "seat": None}
         with engine.lock, sessions() as db:
             ev = engine.authorize(db, event_id, token, "door")
+            if not is_ticket_hash(body.ticket_hash):
+                return {"result": "unknown", "seat": None, "checked_in_count": ev.checked_in_count}
             result, seat = engine.check_in(db, ev, body.ticket_hash)
             db.commit()
             return {"result": result, "seat": seat, "checked_in_count": ev.checked_in_count}
@@ -377,8 +422,9 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         """Upload check-ins a door device recorded while offline."""
         with engine.lock, sessions() as db:
             ev = engine.authorize(db, event_id, token, "door")
+            # Settling may have started while the device was offline: those arrivals still count.
             results = [
-                {"h": h, "result": engine.check_in(db, ev, h)[0] if is_ticket_hash(h) else "unknown"}
+                {"h": h, "result": engine.late_check_in(db, ev, h)[0] if is_ticket_hash(h) else "unknown"}
                 for h in body.ticket_hashes
             ]
             db.commit()
