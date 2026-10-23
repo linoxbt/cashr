@@ -160,6 +160,8 @@ def admin_event(ev: Event) -> dict:
         "forfeited_zat": ev.forfeited_zat,
         "float_zat": ev.float_zat,
         "swept_zat": ev.swept_zat,
+        # Until then a settling event waits for offline door phones' check-ins.
+        "sweep_after": _aware(ev.sweep_not_before).isoformat().replace("+00:00", "Z") if ev.sweep_not_before else None,
     }
 
 
@@ -272,6 +274,8 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             "network": settings.network,
             "min_conf": settings.min_conf,
             "reject_fee_zat": settings.reject_fee_zat,
+            # Minutes a settling event waits for offline door phones before sweeping.
+            "door_sync_grace_min": settings.door_sync_grace_min,
             # None when the wallet is unreachable, so the UI can say so.
             "tip": tip,
         }

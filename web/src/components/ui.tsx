@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { api, type Meta } from "@/lib/api";
+import { IS_DEMO_BUILD } from "@/lib/site";
 
 export function Pill({ tone = "neutral", children }: { tone?: "neutral" | "ok" | "warn" | "bad" | "gold"; children: ReactNode }) {
   const tones = {
@@ -98,17 +99,22 @@ export function PageState({ title, children }: { title: string; children?: React
 
 let metaPromise: Promise<Meta> | null = null;
 
+/** The page's one /meta request, shared by everything that needs it. */
+export function sharedMeta(): Promise<Meta> {
+  metaPromise ??= api.meta().catch((e) => {
+    metaPromise = null;
+    throw e;
+  });
+  return metaPromise;
+}
+
 export function useMeta(): Meta | null {
   const [meta, setMeta] = useState<Meta | null>(null);
   useEffect(() => {
     let alive = true;
     let retry: ReturnType<typeof setTimeout>;
     const load = () => {
-      metaPromise ??= api.meta().catch((e) => {
-        metaPromise = null;
-        throw e;
-      });
-      metaPromise.then(
+      sharedMeta().then(
         (m) => alive && setMeta(m),
         () => {
           if (alive) retry = setTimeout(load, 10_000);
@@ -122,6 +128,12 @@ export function useMeta(): Meta | null {
     };
   }, []);
   return meta;
+}
+
+/** The demo site: known at build time there, and from the server everywhere else (local dev). */
+export function useIsDemo(): boolean {
+  const meta = useMeta();
+  return IS_DEMO_BUILD || meta?.chain === "sim";
 }
 
 /**

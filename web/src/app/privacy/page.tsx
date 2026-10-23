@@ -8,18 +8,18 @@ const STORED = [
   ["Refund address", "Only its Orchard (shielded) receiver, even if your wallet's address also carries a transparent one. Unlinkable to your other addresses. Deleted on purge."],
   ["Checked in", "A yes/no per ticket, never a time. Neither the ticket's state nor the check-in count is public while the event runs; every outcome appears at once when it settles."],
   ["Seat", "A random number, so it says nothing about the order people paid in."],
-  ["Deposit notes", "Transaction id, amount, block height. The sender is never visible, even to the wallet. Deleted on purge."],
+  ["Deposit notes", "Transaction id and amount, so no payment is counted twice. No block height, and an accepted deposit doesn't keep its ticket hash, so its transaction can't be matched to a ticket; a returned payment keeps its ticket hash, for the public list. The sender is never visible, even to the wallet. Deleted on purge."],
   ["Payouts", "Each refund, return and sweep: its recipient's refund address, amount, memo and transaction id. Deleted on purge."],
   ["Link hashes", "SHA-256 hashes of the manage and door links, so the server can check them without storing them."],
-  ["Reused-address digests", "Keyed hashes of refund addresses, only to refuse reuse. Never the address itself. Forgotten after one to two years; until then, someone holding the server's secret could confirm that a known address once paid for an RSVP here."],
-  ["The event's wallet account", "Its own seed (encrypted at rest) and the deposits' memos. Purging deletes the account and the seed and rewrites the wallet file, so the memos can't be decrypted again, even from the chain."],
+  ["The event's wallet account", "Its own seed (encrypted at rest) and the deposits' memos. Purging deletes the account and the seed and rewrites the wallet file, so the memos can't be decrypted again, even from the chain. The wallet keeps the chain blocks it has scanned (heights and times, shared by all events), which name no event."],
+  ["Backups", "An encrypted copy of the above, taken nightly and kept for seven days, so an event purged today stays in the backups for up to a week. The key is kept apart from the backups."],
 ];
 
 const LEAKS = [
   {
     risk: "Timing on the public ticket list",
     detail: "Anyone with the invite link can read the list of ticket hashes. If each ticket appeared the moment its payment confirmed, polling the list would time every payment.",
-    fix: "The public list changes only at random moments about two hours apart, scheduled from the event's creation and never triggered by a payment, plus when RSVPs close. New tickets and returned payments appear together at those moments; the public RSVP count, seats left and the full flag follow the list; and no check-in count is public until the event settles.",
+    fix: "The public list changes only at random moments one to three hours apart, scheduled from the event's creation and never triggered by a payment, plus when RSVPs close. New tickets and returned payments appear together at those moments; the public RSVP count, seats left and the full flag follow the list; and no check-in count is public until the event settles.",
   },
   {
     risk: "Who came together",
@@ -34,12 +34,12 @@ const LEAKS = [
   {
     risk: "Reusing a refund address",
     detail: "The same address at two events would link one person's attendance across both.",
-    fix: "The server refuses any address it has seen before and returns the deposit.",
+    fix: "Within an event, a reused address is refused and the deposit returned. Across events the server doesn't check: refusing would tell anyone who pays into their own event with someone else's address whether that address paid for an RSVP here. Use a fresh address for each RSVP (wallets show a new one on every Receive); the RSVP page asks you to confirm it.",
   },
   {
     risk: "Network metadata",
     detail: "Loading a page reveals an IP address to the web host and the API host, and their providers may log it.",
-    fix: "The API keeps no access logs. Confirmation downloads every ticket hash, so no request points at one ticket; every visitor of an event page polls at the same jittered pace whatever their ticket's state, even while the tab is in the background; and your ticket list never asks about all your events at once. For high-risk groups, open the pages over Tor.",
+    fix: "The API and the HTTPS proxy in front of it keep no access logs. Confirmation downloads every ticket hash, so no request points at one ticket; every visitor of an event page polls at the same jittered pace whatever their ticket's state, even while the tab is in the background; and your ticket list never asks about all your events at once. For high-risk groups, open the pages over Tor.",
   },
   {
     risk: "What stays in your wallet",
@@ -66,9 +66,9 @@ const LEAKS = [
 const TRUST = [
   "The server's wallet holds deposits until the event is settled. A dishonest operator could keep them, so deposits should stay small (the price of a coffee).",
   "The organiser's links are bearer secrets. Anyone with the manage link can settle or purge the event.",
-  "The door device sees ticket hashes, seats and the live check-in count, and keeps the hashes to work offline until the event is settled. It never sees refund addresses.",
+  "The door device sees ticket hashes, seats and the live check-in count, and keeps the hashes to work offline until the event is settled. It never sees refund addresses. Whoever holds the door link can check in any listed ticket, and a checked-in ticket is refunded: give it only to people you'd trust with the deposits.",
   "The organiser's dashboard is live: it shows each ticket's hash and seat as soon as its payment confirms, check-ins as they happen, and refund transaction ids. It never shows refund addresses or deposit transaction ids. Treat the manage link like the guest list it replaces.",
-  "After a purge, the event's id still answers with its counts (RSVPs, check-ins, deposit and capacity) and nothing else; its database row and the reused-address digests keep their storage order.",
+  "After a purge, the event's id still answers with its counts (RSVPs, check-ins, deposit and capacity) and nothing else; its database row keeps its storage position among other events.",
   "This public instance runs on a shared server. A server is only as private as its operator and its host: high-risk groups should run their own (one command, see the docs).",
   "cashr can't hide that an event exists, or protect against someone photographing the room.",
 ];

@@ -10,10 +10,11 @@
   with `api/cashr/codec.py`. Change both, plus `docs/PROTOCOL.md`, together.
 
 ## Privacy invariants (do not break)
-1. The server never stores names, emails, IPs, check-in timestamps, or ticket secrets.
+1. The server never stores names, emails, IPs, check-in timestamps, or ticket secrets (nor does any proxy in front of it log them).
 2. Attendees never send a request that identifies their ticket. Confirmation reads the whole ticket list.
 3. Tokens travel only in URL fragments and `Authorization` headers.
-4. Every RSVP pays exactly the deposit. Refund addresses are never reused. Event addresses are Orchard-only.
+4. Every RSVP pays exactly the deposit. A refund address is never reused within an event (not checked across events:
+   that check is an oracle). Event addresses are Orchard-only.
 5. Purge deletes RSVP, deposit and payout rows, the event's wallet account and seed, and anything that names or
    dates the event (title, times, place, address). Server-written memos never name the event.
 6. A payout is sent under its idempotency key only. Never build a second transaction for a payout that could still be mined.

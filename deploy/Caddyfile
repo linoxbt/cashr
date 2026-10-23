@@ -1,6 +1,13 @@
 # HTTPS in front of the cashr API. Certificates come from Let's Encrypt.
-# Caddy writes no access logs unless told to, and this file never does:
-# visitor IP addresses are not recorded anywhere on this server.
+# No access log, and Caddy's error log is dropped too: it records the client IP
+# and path of every request that fails (say, while the API restarts). Nothing
+# here records a visitor's IP address.
+{
+	log default {
+		exclude http.log.error
+	}
+}
+
 {$API_DOMAIN} {
 	encode gzip
 	reverse_proxy api:8000

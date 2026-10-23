@@ -73,8 +73,8 @@ function EventFor({ id }: { id: string }) {
           forgetTicket(id);
           setTicket(null);
           setForgotten(true);
-        } else if (held?.refundAddress && l.tickets.some((t) => t.h === held.hash)) {
-          // The payment is in: the refund address was only needed for its memo.
+        } else if (held?.refundAddress && [...l.tickets, ...l.rejected].some((t) => t.h === held.hash)) {
+          // The payment is in (or returned): the refund address was only needed for its memo.
           const kept = { ...held, refundAddress: "" };
           saveTicket(kept);
           setTicket(kept);
@@ -372,7 +372,15 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onPaid, onFo
   // Sanity check: the stored secret must still hash to the stored hash.
   const [intact, setIntact] = useState(true);
   useEffect(() => {
-    ticketHash(fromB64url(ticket.secret)).then((h) => setIntact(h === ticket.hash));
+    // A stored secret that isn't even base64 is as damaged as one with the wrong hash.
+    let secret: Uint8Array;
+    try {
+      secret = fromB64url(ticket.secret);
+    } catch {
+      setIntact(false);
+      return;
+    }
+    ticketHash(secret).then((h) => setIntact(h === ticket.hash), () => setIntact(false));
   }, [ticket]);
 
   if (!event.accepting_rsvps || event.full) {
@@ -452,8 +460,8 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onPaid, onFo
         {!loaded
           ? "Connecting…"
           : sim
-            ? "On the real app, tickets join the public list at random moments about two hours apart, so nobody watching can tell when yours was paid. This demo lists them at once."
-            : "After you pay, your ticket shows here within about two hours. The public list updates at random moments, so nobody watching can tell when yours was paid."}
+            ? "On the real app, tickets join the public list at random moments up to about three hours apart, so nobody watching can tell when yours was paid. This demo lists them at once."
+            : "After you pay, your ticket shows here within about three hours, often sooner. The public list updates at random moments, so nobody watching can tell when yours was paid."}
       </div>
 
       {meta && !sim && (

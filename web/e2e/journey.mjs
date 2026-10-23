@@ -94,8 +94,11 @@ try {
   step("two attendees RSVP'd and paid");
 
   // 5. /tickets lists the ticket from this device alone, and asks the server only when told to.
+  // Neither the API's ticket lists nor the site's own event pages (Next prefetches
+  // links it renders): either would tell the server every event this browser holds.
   const listFetches = [];
-  const onRequest = (r) => /\/events\/[a-z0-9]{10}\/tickets$/.test(r.url()) && listFetches.push(r.url());
+  const onRequest = (r) =>
+    (/\/events\/[a-z0-9]{10}\/tickets$/.test(r.url()) || /\/e\/[a-z0-9]{10}(\?|$)/.test(r.url())) && listFetches.push(r.url());
   p.on("request", onRequest);
   await p.goto(BASE + "/tickets");
   await p.getByText("Friday tenants").first().waitFor();

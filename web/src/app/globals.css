@@ -194,7 +194,9 @@ h2 {
 
 /* Power-on: the picture opens from a bright line, like a tube warming up. */
 .crt-boot {
-  animation: boot 900ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  /* backwards, not both: a filling animation would hold filter: none and
+     override the B&W toggle on the same element for good. */
+  animation: boot 900ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 @keyframes boot {

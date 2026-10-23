@@ -134,8 +134,8 @@ jobs:
     strategy:
       matrix:
         site:
-          - { id: "5f3959f2-910d-4de2-8081-4aadbde86be7", api: MAINNET_API_URL }  # cashr-zec (mainnet)
-          - { id: "586dc4d7-fa6a-4eb5-b380-4a421ffed9f3", api: SIM_API_URL }      # cashr-zec-sim (demo)
+          - { id: "5f3959f2-910d-4de2-8081-4aadbde86be7", api: MAINNET_API_URL, demo: "" }  # cashr.site (mainnet)
+          - { id: "586dc4d7-fa6a-4eb5-b380-4a421ffed9f3", api: SIM_API_URL, demo: "1" }    # demo.cashr.site (simulated)
     steps:
       - if: env.NETLIFY_AUTH_TOKEN == ''
         run: echo "::warning::No NETLIFY_AUTH_TOKEN secret, so the web was NOT deployed. Deploy it manually."
@@ -148,6 +148,7 @@ jobs:
         working-directory: web
         env:
           NEXT_PUBLIC_API_URL: ${{ vars[matrix.site.api] }}
+          NEXT_PUBLIC_DEMO: ${{ matrix.site.demo }}
         run: |
           test -n "$NEXT_PUBLIC_API_URL" || { echo "Set the ${{ matrix.site.api }} repository variable"; exit 1; }
           npm ci

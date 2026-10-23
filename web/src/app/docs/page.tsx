@@ -130,21 +130,21 @@ export default function Docs() {
             <p>You need a Zcash wallet that holds shielded ZEC and can pay a payment link with a memo, such as ZODL.</p>
             <Steps
               items={[
-                ["Open the invite", "Paste the link on the home screen, or open it directly."],
-                ["Give a refund address", <>In your wallet, open <em>Receive</em> and copy the shielded address (it starts with <C>u1</C>). It must be fresh: never one you used for another cashr RSVP. The page checks it can receive a private (Orchard) refund before you pay.</>],
-                ["Pay the deposit", "Scan the QR code or tap Open in wallet app. The amount and memo are filled in; don't change them. Your ticket shows as confirmed within about two hours: tickets join the public list in batches, so nobody can time yours."],
+                ["Open the invite", "Open the link, or paste it on the Join page."],
+                ["Give a refund address", <>In your wallet, open <em>Receive</em> and copy the shielded address (it starts with <C>u1</C>). Use a fresh one: an address used for another RSVP would link the two. The page checks it can receive a private (Orchard) refund before you pay.</>],
+                ["Pay the deposit", "Scan the QR code or tap Open in wallet app. The amount and memo are filled in; don't change them. Your ticket shows as confirmed within about three hours (often sooner): the public list updates at random moments, so nobody can time yours."],
                 ["Keep your ticket", "Your ticket appears as a QR code. Save the image: it is stored only in this browser, and it is the only way in and the only way to get your deposit back."],
                 ["Show it at the door, get refunded", "After the event, the deposit returns to your refund address."],
               ]}
             />
-            <p>Your tickets are listed on the home screen under <em>Your tickets</em>, on this device only.</p>
+            <p>Your tickets are listed on the <em>Tickets</em> page, on this device only.</p>
             <Table
               head={["If your payment is returned", "Why"]}
               rows={[
                 ["The event was full", "Seats go in block order. Returned minus 0.0001 ZEC."],
                 ["The amount didn't match", "Every RSVP must pay exactly the deposit, so payments look identical on chain."],
                 ["RSVPs had closed", "The organiser closed RSVPs or the deadline passed."],
-                ["The refund address was used before", "Reusing an address would link your attendance across events."],
+                ["The refund address was already used for this event", "Each ticket needs its own refund address."],
                 ["The memo was changed", "Without the memo there is no ticket. A payment with no readable refund address can't be returned."],
               ]}
             />
@@ -250,7 +250,7 @@ curl -fsSL https://raw.githubusercontent.com/linoxbt/cashr/main/deploy/install.s
               ["What if I lose my ticket?", "It can't be recovered: no one else has the secret. Save the ticket image when you RSVP."],
               ["What if the organiser loses their links?", "The event keeps working for attendees, but no one can settle it. Funds stay in the event's wallet account, which only the server operator can move."],
               ["Can I use a transparent (t-address) balance?", "Paying from a transparent balance exposes your address. Pay from your shielded balance; refunds always go to a shielded address."],
-              ["Why does my ticket say Awaiting payment?", "Your payment needs one block (about 75 seconds) to confirm. If it never confirms, check the amount and memo were unchanged."],
+              ["Why does my ticket say Not listed yet?", "The public list updates at random moments, up to about three hours apart, so nobody can tell when your payment arrived. If it still isn't listed after that, check the amount and memo were unchanged."],
               ["Can a seized server be used to get in?", "No. It holds only hashes of tickets, and the door needs the secret behind the hash."],
             ].map(([q, a]) => (
               <div key={q} className="card p-5">

@@ -144,6 +144,6 @@ export const REJECTION_TEXT: Record<string, string> = {
   wrong_event: "The payment was for a different event.",
   rsvps_closed: "RSVPs had already closed.",
   duplicate_ticket: "That ticket was already used.",
-  address_reused: "That refund address was already used for an cashr RSVP.",
+  address_reused: "That refund address was already used for another RSVP to this event.",
   bad_refund_address: "The refund address in the memo can't receive a private (Orchard) refund, so this payment can't be returned automatically. Ask the organiser.",
 };
