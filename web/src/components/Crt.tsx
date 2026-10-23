@@ -4,10 +4,10 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-import { useIsDemo, useMeta } from "@/components/ui";
+import { useIsDemo, useIsTestnet, useMeta } from "@/components/ui";
 import { API_CONFIGURED } from "@/lib/api";
 import { Wordmark } from "@/components/Logo";
-import { DEMO_URL, SITE_URL } from "@/lib/site";
+import { DEMO_URL, FAUCET_URL, SITE_URL } from "@/lib/site";
 import { THEME_KEY, readJson, writeJson, type Theme } from "@/lib/storage";
 
 const NAV = [
@@ -187,6 +187,17 @@ function DemoBanner({ className = "" }: { className?: string }) {
   );
 }
 
+function TestnetBanner({ className = "" }: { className?: string }) {
+  if (!useIsTestnet()) return null;
+  return (
+    <div className={`bg-gold px-4 py-1.5 text-center font-mono text-[12px] font-medium uppercase tracking-[-0.02em] text-gold-on ${className}`}>
+      Testnet · real Zcash test network, test coins with no value ·{" "}
+      <a href={FAUCET_URL} className="underline underline-offset-2">Get test ZEC</a> ·{" "}
+      <a href={SITE_URL} className="underline underline-offset-2">Real app at {SITE_URL.replace(/^https?:\/\//, "")}</a>
+    </div>
+  );
+}
+
 function NavLink({ href, label, active }: { href: string; label: string; active: boolean }) {
   return (
     <Link href={href} className={`glitch inline-block ${active ? "text-ink" : "text-ink-2 hover:text-ink"}`} aria-current={active ? "page" : undefined}>
@@ -205,6 +216,8 @@ export function Crt({ children }: { children: ReactNode }) {
   const [canGoBack, setCanGoBack] = useState(false);
   useEffect(() => setCanGoBack(stepTrail(pathname ?? "/").length > 1), [pathname]);
   const demo = useIsDemo();
+  const testnet = useIsTestnet();
+  const banner = demo || testnet;
   const firstMenuLink = useRef<HTMLAnchorElement>(null);
   useEffect(() => {
     if (!menu) return;
@@ -248,13 +261,14 @@ export function Crt({ children }: { children: ReactNode }) {
     <div className="crt">
       <div className={`crt-screen crt-boot ${bw ? "bw" : ""}`}>
         <div ref={scroller} className="crt-scroll">
-          <main className={`min-h-full px-1 pb-24 ${demo ? "pt-32 sm:pt-44" : "pt-24 sm:pt-36"}`}>{children}</main>
+          <main className={`min-h-full px-1 pb-24 ${banner ? "pt-32 sm:pt-44" : "pt-24 sm:pt-36"}`}>{children}</main>
         </div>
 
         {/* On-screen display: top */}
         <header className="osd absolute inset-x-0 top-0 z-20 bg-gradient-to-b from-screen-2 via-screen-2/90 to-transparent px-5 pb-6 pt-5 sm:px-12 sm:pt-9">
           {/* Part of the header, not over it: it must never cover the logo, Back or Menu. */}
           <DemoBanner className="-mx-5 -mt-5 mb-4 sm:-mx-12 sm:-mt-9 sm:mb-5" />
+          <TestnetBanner className="-mx-5 -mt-5 mb-4 sm:-mx-12 sm:-mt-9 sm:mb-5" />
           <div className="hidden grid-cols-[1fr_auto_1fr] items-start sm:grid">
             <div className="flex items-center gap-8 pt-1.5 lg:gap-16">
               <BackButton canGoBack={canGoBack} />

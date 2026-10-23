@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
-import { DEMO_URL } from "@/lib/site";
+import { DEMO_URL, FAUCET_URL, TESTNET_URL } from "@/lib/site";
 
 
 export const metadata: Metadata = { title: "Docs" };
@@ -79,7 +79,10 @@ export default function Docs() {
         <p className="mt-3 text-ink-2">
           To try every step without ZEC, use the demo at{" "}
           <a href={DEMO_URL} className="underline decoration-ink-4 underline-offset-4 hover:text-ink">{DEMO_URL.replace(/^https?:\/\//, "")}</a>:
-          the same app on a simulated chain.
+          the same app on a simulated chain. To try it on a real chain with free test coins, use{" "}
+          <a href={TESTNET_URL} className="underline decoration-ink-4 underline-offset-4 hover:text-ink">{TESTNET_URL.replace(/^https?:\/\//, "")}</a>{" "}
+          with a testnet wallet and ZEC from the{" "}
+          <a href={FAUCET_URL} className="underline decoration-ink-4 underline-offset-4 hover:text-ink">faucet</a>.
         </p>
       </div>
 

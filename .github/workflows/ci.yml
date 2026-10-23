@@ -140,8 +140,9 @@ jobs:
     strategy:
       matrix:
         site:
-          - { id: "5f3959f2-910d-4de2-8081-4aadbde86be7", api: MAINNET_API_URL, demo: "" }  # cashr.site (mainnet)
-          - { id: "586dc4d7-fa6a-4eb5-b380-4a421ffed9f3", api: SIM_API_URL, demo: "1" }    # demo.cashr.site (simulated)
+          - { id: "5f3959f2-910d-4de2-8081-4aadbde86be7", api: MAINNET_API_URL, demo: "", testnet: "" }  # cashr.site (mainnet)
+          - { id: "586dc4d7-fa6a-4eb5-b380-4a421ffed9f3", api: SIM_API_URL, demo: "1", testnet: "" }    # demo.cashr.site (simulated)
+          - { id: "c6e140da-b193-4616-96b7-f07dfc998360", api: TESTNET_API_URL, demo: "", testnet: "1" }        # testnet.cashr.site (real testnet)
     steps:
       - if: env.NETLIFY_AUTH_TOKEN == ''
         run: echo "::warning::No NETLIFY_AUTH_TOKEN secret, so the web was NOT deployed. Deploy it manually."
@@ -155,6 +156,7 @@ jobs:
         env:
           NEXT_PUBLIC_API_URL: ${{ vars[matrix.site.api] }}
           NEXT_PUBLIC_DEMO: ${{ matrix.site.demo }}
+          NEXT_PUBLIC_TESTNET: ${{ matrix.site.testnet }}
         run: |
           test -n "$NEXT_PUBLIC_API_URL" || { echo "Set the ${{ matrix.site.api }} repository variable"; exit 1; }
           npm ci

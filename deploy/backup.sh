@@ -12,6 +12,8 @@
 # CASHR_BACKUP_REMOTE in .env (an rsync target such as user@host:/srv/cashr-backups) to
 # copy each one off this machine too; a backup on the same disk doesn't survive it.
 #
+# The testnet instance's volumes (profile testnet) are left out: test coins have no value.
+#
 # Privacy: a backup keeps events that are purged after it was taken, until it is rotated
 # out ($KEEP days). Restore: see docs/DEPLOY.md.
 set -euo pipefail

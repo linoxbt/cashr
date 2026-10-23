@@ -69,6 +69,8 @@ export interface Meta {
   reject_fee_zat: number;
   /** Minutes a settling event waits for offline door phones before sweeping (absent on older servers). */
   door_sync_grace_min?: number;
+  /** The public list updates 0.5 to 1.5 times this many minutes apart (absent on older servers). */
+  list_delay_min?: number;
   tip: number | null;
 }
 
