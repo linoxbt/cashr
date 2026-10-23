@@ -617,7 +617,7 @@ impl Wallet {
             let txid = TxId::from_bytes(txid.try_into().map_err(|_| anyhow!("bad txid length"))?);
             out.push(ReceivedOutput {
                 txid: txid.to_string(),
-                pool: match pool { 2 => "sapling", 3 => "orchard", _ => "other" },
+                pool: pool_name(pool),
                 index,
                 value: value as u64,
                 memo,
@@ -754,6 +754,13 @@ impl Wallet {
                UNION
                SELECT t.id_tx FROM sapling_received_note_spends s
                  JOIN sapling_received_notes n ON n.id = s.sapling_received_note_id
+                 JOIN accounts a ON a.id = n.account_id
+                 JOIN transactions t ON t.id_tx = s.transaction_id
+                WHERE a.uuid = ?1 AND t.mined_height IS NULL
+                  AND (t.expiry_height IS NULL OR t.expiry_height = 0 OR t.expiry_height + ?3 >= ?2)
+               UNION
+               SELECT t.id_tx FROM ironwood_received_note_spends s
+                 JOIN ironwood_received_notes n ON n.id = s.ironwood_received_note_id
                  JOIN accounts a ON a.id = n.account_id
                  JOIN transactions t ON t.id_tx = s.transaction_id
                 WHERE a.uuid = ?1 AND t.mined_height IS NULL
@@ -970,7 +977,10 @@ impl Wallet {
                     &mut *db,
                     &self.params,
                     uuid,
-                    &[ShieldedPool::Orchard],
+                    // The pools to empty. Since NU6.3 every payment to an Orchard receiver
+                    // lands in the Ironwood pool (Orchard takes no new value), so an event's
+                    // deposits are Ironwood notes; a sweep of Orchard alone found nothing.
+                    &[sweep_pool(&self.params, self.tip())],
                     &StandardFeeRule::Zip317,
                     to,
                     Some(memo),
@@ -1028,6 +1038,25 @@ impl Wallet {
             zcash_protocol::consensus::NetworkType::Test => "test",
             zcash_protocol::consensus::NetworkType::Regtest => "regtest",
         }
+    }
+}
+
+/// The shielded pool an event's money sits in at `tip`: Ironwood once NU6.3 is active
+/// (it took over new Orchard-receiver payments), Orchard before.
+fn sweep_pool(params: &Network, tip: u32) -> ShieldedPool {
+    match params.activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3) {
+        Some(h) if BlockHeight::from_u32(tip) >= h => ShieldedPool::Ironwood,
+        _ => ShieldedPool::Orchard,
+    }
+}
+
+/// zcash_client_sqlite's pool codes, as named in the RPC.
+fn pool_name(code: i64) -> &'static str {
+    match code {
+        2 => "sapling",
+        3 => "orchard",
+        4 => "ironwood",
+        _ => "other",
     }
 }
 
@@ -1169,6 +1198,16 @@ mod tests {
         let secure: i64 = conn.query_row("PRAGMA secure_delete", [], |r| r.get(0)).unwrap();
         assert_eq!(secure, 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sweeps_and_labels_follow_the_ironwood_upgrade() {
+        // NU6.3 moved new Orchard-receiver payments into the Ironwood pool.
+        assert_eq!(sweep_pool(&Network::MainNetwork, 3_527_900), ShieldedPool::Ironwood);
+        assert_eq!(sweep_pool(&Network::MainNetwork, 3_000_000), ShieldedPool::Orchard);
+        assert_eq!(sweep_pool(&Network::TestNetwork, 4_532_700), ShieldedPool::Ironwood);
+        assert_eq!(pool_name(4), "ironwood");
+        assert_eq!(pool_name(3), "orchard");
     }
 
     #[test]

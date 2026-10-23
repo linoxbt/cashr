@@ -54,7 +54,7 @@ const LEAKS = [
   {
     risk: "Transparent funds",
     detail: "Paying from a transparent (t-address) balance shows the payer's address and the exact deposit amount on the public chain, which can tie them to the event.",
-    fix: "Event addresses are Orchard-only, refunds go Orchard-to-Orchard with the wallet's FullPrivacy policy, and only the Orchard part of a refund address is kept. Attendees should pay from a shielded balance.",
+    fix: "Event addresses are Orchard-only, refunds go to Orchard receivers with the wallet's FullPrivacy policy (since the NU6.3 upgrade that value moves in the shielded Ironwood pool), and only the Orchard part of a refund address is kept. Attendees should pay from a shielded balance.",
   },
   {
     risk: "Your phone",

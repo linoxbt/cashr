@@ -151,7 +151,7 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
                 })
                 .filter(|(_, conf)| *conf >= minconf)
                 .map(|(o, conf)| {
-                    let index_key = if o.pool == "orchard" { "actionIndex" } else { "outindex" };
+                    let index_key = if o.pool == "orchard" || o.pool == "ironwood" { "actionIndex" } else { "outindex" };
                     json!({
                         "pool": o.pool,
                         "txid": o.txid,

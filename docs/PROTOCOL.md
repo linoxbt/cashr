@@ -20,8 +20,11 @@ ASCII, single spaces, ≤ 512 bytes (on chain it is zero-padded to 512):
 CSH1 <event_id> <ticket_hash> <refund_address>
 ```
 
-`refund_address` must be a **Unified Address containing an Orchard receiver** (`u1…` on mainnet). Refunds are
-Orchard-to-Orchard, so nothing about them (amount, recipient) is revealed on chain. The browser and the API both
+`refund_address` must be a **Unified Address containing an Orchard receiver** (`u1…` on mainnet). Refunds go to
+that Orchard receiver and stay fully shielded, so nothing about them (amount, recipient) is revealed on chain. Since
+the NU6.3 network upgrade, value sent to an Orchard receiver moves in the new Ironwood shielded pool (the Orchard pool
+takes no new value), so deposits, refunds, returns and sweeps are Ironwood notes; the wallet spends and sweeps that
+pool. The browser and the API both
 fully decode the address (bech32m → F4Jumble⁻¹ → receiver list, ZIP 316) to check it before any money moves.
 Implementations: `web/src/lib/ua.ts`, `api/cashr/ua.py`. Both are tested against real addresses from librustzcash.
 

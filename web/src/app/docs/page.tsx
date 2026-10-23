@@ -175,7 +175,7 @@ export default function Docs() {
                 ["The memo", <>The payment carries one encrypted line: <C>CSH1 &lt;event&gt; &lt;ticket hash&gt; &lt;refund address&gt;</C>. Only the event&rsquo;s wallet can read it.</>],
                 ["The wallet reads it", "A light-client wallet syncs from lightwalletd, fetches the full transaction over Tor (after a random delay) to decrypt the memo, and the API records the hash and the refund address's Orchard receiver."],
                 ["The door checks a hash", "The ticket QR holds the secret; the door hashes it and looks the hash up."],
-                ["Refunds stay in Orchard", "Each refund is its own Orchard-to-Orchard send with the FullPrivacy policy, at a random time within about three hours, so no amount, recipient or group of attendees is revealed."],
+                ["Refunds stay shielded", "Each refund is its own fully shielded send to the attendee's Orchard receiver (through the Ironwood pool since the NU6.3 upgrade) with the FullPrivacy policy, at a random time within about three hours, so no amount, recipient or group of attendees is revealed."],
               ]}
             />
             <p>
