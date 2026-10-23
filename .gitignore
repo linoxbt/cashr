@@ -5,3 +5,6 @@
 deploy-*.zip
 e2e-failure.png
 cashr-demo.mp4
+
+# Rendered demo videos (too large for git; GitHub rejects files over 100 MB)
+*.mp4
