@@ -126,7 +126,7 @@ jobs:
           - { id: "586dc4d7-fa6a-4eb5-b380-4a421ffed9f3", api: SIM_API_URL }      # cashr-zec-sim (demo)
     steps:
       - if: env.NETLIFY_AUTH_TOKEN == ''
-        run: echo "No NETLIFY_AUTH_TOKEN secret; skipping the web deploy."
+        run: echo "::warning::No NETLIFY_AUTH_TOKEN secret, so the web was NOT deployed. Deploy it manually."
       - if: env.NETLIFY_AUTH_TOKEN != ''
         uses: actions/checkout@v4
       - if: env.NETLIFY_AUTH_TOKEN != ''
