@@ -49,10 +49,9 @@ class Settings:
     # Refunds go out at random times within this many minutes of settling, so
     # they don't line up with the event's end or with each other.
     refund_spread_min: int = field(default_factory=lambda: _int("CASHR_REFUND_SPREAD_MIN", 180))
-    # New tickets join the public list in batches: once this many are waiting, or
-    # at a random time around this many minutes after the first one, so polling
-    # the list doesn't reveal when each ticket was paid.
-    list_batch: int = field(default_factory=lambda: _int("CASHR_LIST_BATCH", 3))
+    # The public list (new tickets and returned payments) is updated only at random
+    # moments, about this many minutes apart, scheduled independently of payments,
+    # so polling it can't time any payment. 0 updates it on every scan (demo).
     list_delay_min: int = field(default_factory=lambda: _int("CASHR_LIST_DELAY_MIN", 120))
     # Left in an event wallet after the sweep (less than a fee): destroyed on purge.
     # Capped at the wallet's own delete limit (DELETE_MAX_ZAT), above which it refuses every purge.

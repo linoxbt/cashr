@@ -524,3 +524,9 @@ def test_rsvps_must_close_before_the_start(client):
     r = client.post("/events", json=body | {"rsvp_closes_at": "2026-12-01T18:00:00Z"})
     assert r.status_code == 422 and "close before" in r.text
     assert client.post("/events", json=body | {"rsvp_closes_at": "2026-11-29T18:00:00Z"}).status_code == 201
+
+
+def test_minimum_deposit_is_0_001_zec(client):
+    body = {"title": "x", "starts_at": "2026-12-01T18:00:00Z", "capacity": 5}
+    assert client.post("/events", json=body | {"deposit_zat": 99_999}).status_code == 422
+    assert client.post("/events", json=body | {"deposit_zat": 100_000}).status_code == 201

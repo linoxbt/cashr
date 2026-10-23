@@ -187,7 +187,7 @@ def test_deadline_uses_block_times_when_known(client, make_event, attendee):
 
 
 
-def test_tickets_join_the_public_list_in_batches(tmp_path, attendee):
+def test_the_public_list_changes_only_on_its_own_schedule(tmp_path, attendee):
     from datetime import timedelta
 
     from fastapi.testclient import TestClient
@@ -198,37 +198,59 @@ def test_tickets_join_the_public_list_in_batches(tmp_path, attendee):
 
     chain = SimChain("main", received_conf=1, change_conf=1)
     settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/b.db", run_scanner=False,
-                        secret="s", list_batch=3, list_delay_min=120, refund_spread_min=0)
+                        secret="s", list_delay_min=120, refund_spread_min=0)
     with TestClient(create_app(settings, chain)) as c:
         c.chain, c.engine = chain, c.app.state.engine
-        created = c.post("/events", json={"title": "x", "starts_at": "2026-12-01T18:00:00Z", "capacity": 9,
+        created = c.post("/events", json={"title": "x", "starts_at": "2026-12-01T18:00:00Z", "capacity": 2,
                                           "deposit_zat": 500_000}).json()
         ev, admin, door = created["event"], created["admin_token"], created["door_token"]
-        people = [attendee(ev["id"]) for _ in range(4)]
-        for p in people[:2]:
-            pay(c, ev, p.memo())
-        # Paid, but not yet on the public list or in the public counts: polling can't time them.
-        assert tickets(c, ev["id"])["tickets"] == []
-        public = c.get(f"/events/{ev['id']}").json()
-        assert public["rsvp_count"] == 0 and public["checked_in_count"] is None
+        with c.engine.sessions() as db:
+            first_update = db.get(Event, ev["id"]).list_publish_at
+        # Scheduled from creation, not from any payment.
+        assert timedelta(minutes=59) < (first_update.replace(tzinfo=None) - datetime_now()) < timedelta(minutes=181)
+        before = (c.get(f"/events/{ev['id']}").json(), tickets(c, ev["id"]))
+        a, b, late = attendee(ev["id"]), attendee(ev["id"]), attendee(ev["id"])
+        pay(c, ev, a.memo())
+        pay(c, ev, b.memo())          # fills the event
+        pay(c, ev, late.memo())       # returned: full
+        # Nothing public changed: not the list, the counts, the full flag, or the returned payments.
+        assert (c.get(f"/events/{ev['id']}").json(), tickets(c, ev["id"])) == before
         assert admin_view(c, ev, admin)["event"]["rsvp_count"] == 2  # the organiser sees the truth
-        # The door can already admit them.
-        assert checkin(c, ev, door, people[0]) == "ok"
-        assert c.get(f"/events/{ev['id']}").json()["checked_in_count"] is None
-        # A third joins: all three are published together.
-        pay(c, ev, people[2].memo())
-        assert {t["h"] for t in tickets(c, ev["id"])["tickets"]} == {p.hash for p in people[:3]}
-        # A lone fourth waits for its random publish time...
-        pay(c, ev, people[3].memo())
-        assert len(tickets(c, ev["id"])["tickets"]) == 3
+        assert checkin(c, ev, door, a) == "ok"                         # and the door can admit them
+        # At the scheduled moment, everything waiting appears together, and the next update is scheduled.
         with c.engine.sessions() as db:
             e = db.get(Event, ev["id"])
-            assert timedelta(minutes=59) < (e.list_publish_at.replace(tzinfo=None) - datetime_now()) < timedelta(minutes=181)
             e.list_publish_at = e.list_publish_at - timedelta(hours=4)
             db.commit()
         c.engine.scan_once(full=True)
-        assert len(tickets(c, ev["id"])["tickets"]) == 4
-        assert c.get(f"/events/{ev['id']}").json()["rsvp_count"] == 4
+        after = c.get(f"/events/{ev['id']}").json()
+        assert {t["h"] for t in tickets(c, ev["id"])["tickets"]} == {a.hash, b.hash}
+        assert tickets(c, ev["id"])["rejected"] == [{"h": late.hash, "reason": "returned"}]
+        assert after["rsvp_count"] == 2 and after["full"] is True and after["checked_in_count"] is None
+        with c.engine.sessions() as db:
+            assert db.get(Event, ev["id"]).list_publish_at.replace(tzinfo=None) > datetime_now()
+
+
+def test_refund_progress_stays_hidden_until_settled(client, make_event, attendee):
+    created = make_event(forfeit_address=random_unified_address())
+    ev, admin, door = created["event"], created["admin_token"], created["door_token"]
+    people = [attendee(ev["id"]) for _ in range(2)]
+    for p in people:
+        pay(client, ev, p.memo())
+        checkin(client, ev, door, p)
+    pay(client, ev, b"", 100_000)
+    client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
+    seen = set()
+    for _ in range(20):
+        t = tickets(client, ev["id"])
+        if t["status"] == "settled":
+            break
+        seen.add(tuple(sorted(x["status"] for x in t["tickets"])))
+        client.chain.mine()
+        client.engine.scan_once(full=True)
+    # While settling, everyone who came reads "refunding"; outcomes appear together at the end.
+    assert seen <= {("refunding", "refunding")}
+    assert [x["status"] for x in tickets(client, ev["id"])["tickets"]] == ["refunded", "refunded"]
 
 
 def datetime_now():
