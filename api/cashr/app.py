@@ -33,6 +33,7 @@ from .locks import acquire_writer_lock
 log = logging.getLogger("cashr")
 
 MAX_DEPOSIT_ZAT = 100 * 100_000_000
+MIN_DEPOSIT_ZAT = 100_000  # 0.001 ZEC
 
 
 # ---- schemas -----------------------------------------------------------
@@ -43,7 +44,7 @@ class CreateEvent(BaseModel):
     location: str = Field(default="", max_length=200)
     details: str = Field(default="", max_length=4000)
     capacity: int = Field(ge=1, le=5000)
-    deposit_zat: int = Field(ge=50_000, le=MAX_DEPOSIT_ZAT)
+    deposit_zat: int = Field(ge=MIN_DEPOSIT_ZAT, le=MAX_DEPOSIT_ZAT)
     rsvp_closes_at: datetime | None = None
     forfeit_address: str = Field(default="", max_length=600)
 
@@ -118,10 +119,22 @@ def public_event(ev: Event) -> dict:
         "rsvp_count": ev.listed_count,
         "checked_in_count": None if ev.status in DOOR_OPEN else ev.checked_in_count,
         "seats_left": max(0, ev.capacity - ev.listed_count),
-        "full": ev.rsvp_count >= ev.capacity,
+        # From the list too: a flag that flipped when the last seat was paid would time that payment.
+        "full": ev.listed_count >= ev.capacity,
         # Open, and before the RSVP deadline. Payments sent when this is false are returned.
         "accepting_rsvps": accepting_rsvps(ev),
     }
+
+
+def public_status(ev: Event, r: Rsvp) -> str:
+    """A ticket's outcome as the public list shows it.
+
+    Refunds go out one by one at random times; showing each as it confirmed would
+    time that refund. Everyone who came reads "refunding" until all are done.
+    """
+    if ev.status == "settling" and r.status == "refunded":
+        return "refunding"
+    return r.status
 
 
 def admin_event(ev: Event) -> dict:
@@ -255,7 +268,7 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         # Returned payments, and ones that can't be returned privately.
         rejected = db.scalars(select(Deposit).where(
             Deposit.event_id == event_id,
-            (Deposit.kind == "rejected") | (Deposit.reason == "bad_refund_address"))
+            (Deposit.kind == "rejected") | (Deposit.reason == "bad_refund_address"), Deposit.listed.is_(True))
             .order_by(Deposit.ticket_hash)).all()
         # Anyone can read this list. Showing check-ins as they happen would let
         # someone polling it note when each ticket came through the door, so a
@@ -263,7 +276,7 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         settled = ev.status not in DOOR_OPEN
         return {
             "status": ev.status,
-            "tickets": [{"h": r.ticket_hash} | ({"status": r.status} if settled else {}) for r in rsvps],
+            "tickets": [{"h": r.ticket_hash} | ({"status": public_status(ev, r)} if settled else {}) for r in rsvps],
             # Only whether the money comes back: a specific reason such as a reused
             # address would tell everyone something about that ticket's holder.
             "rejected": [{"h": d.ticket_hash, "reason": "kept" if d.reason == "bad_refund_address" else "returned"}
@@ -298,7 +311,8 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             "rsvps": [{"seat": r.seat, "ticket_hash": r.ticket_hash,
                        "refund_address": "stored until purge", "status": r.status,
                        "checked_in": r.checked_in} for r in rsvps],
-            "deposits": [{"txid": d.txid, "pool": d.pool, "index": d.out_index,
+            # No txids: matched with a ticket's arrival, one would date that ticket's payment.
+            "deposits": [{"pool": d.pool, "index": d.out_index,
                           "amount_zat": d.amount_zat, "kind": d.kind,
                           "reason": d.reason} for d in deposits],
             "payouts": [{"id": p.id, "kind": p.kind, "status": p.status,

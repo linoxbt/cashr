@@ -106,12 +106,17 @@ Refunds, returns and sweeps are payouts: `queued → submitted → broadcast →
 
 * Attendees never POST anything. Confirmation polling fetches `GET /events/{id}/tickets` (every hash) and matches
   locally, at one jittered pace (15–25 s) whatever the ticket's state, so request timing says nothing about it.
-* The public list is a snapshot, not a feed: new tickets join it in batches (`Rsvp.listed`), once
-  `CASHR_LIST_BATCH` (3) are waiting, at a random time around `CASHR_LIST_DELAY_MIN` (120) minutes after the first,
-  or when RSVPs close or the event settles. It is sorted by hash and holds hashes only (`{"h": …}`) while the event
-  runs; at settlement every ticket's `status` appears at once. Rejections say only `returned` or `kept`.
-* `GET /events/{id}` shows `rsvp_count` and `seats_left` from listed tickets, a `full` flag from the real count, and
-  `checked_in_count` only once the event settles. The organiser's dashboard and the door see the real, live state.
+* The public list is a snapshot, not a feed: it changes only at random moments (`Event.list_publish_at`, half to
+  one and a half `CASHR_LIST_DELAY_MIN` (120) minutes apart), scheduled from the event's creation and never
+  triggered by a payment, plus at close and settle. New tickets (`Rsvp.listed`) and returned payments
+  (`Deposit.listed`) appear together then. It is sorted by hash and holds hashes only (`{"h": …}`) while the event
+  runs. Once settling, everyone who came reads `refunding` until the event is `settled`, so refunds can't be timed
+  one by one. Rejections say only `returned` or `kept`.
+* `GET /events/{id}` shows `rsvp_count`, `seats_left` and `full` from listed tickets, and `checked_in_count` only once
+  the event settles. A payment into an event that is really full is returned. The organiser's dashboard and the
+  door see the real, live state.
+* The wallet's broadcasts, like its transaction fetches, each use a fresh Tor connection, so lightwalletd can't
+  group the server's transactions by connection. Logs never carry event ids.
 * The ticket list page (`/tickets`) never fetches all held events together, which would link them; each is checked
   only when its holder asks.
 * The door phone keeps the event's ticket hashes and check-in flags (to work offline) and its unsynced queue, and

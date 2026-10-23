@@ -55,7 +55,7 @@ class Event(Base):
     # Chain height when RSVPs closed (deadline or organiser), so a payment sent
     # just before is judged by when it was mined, not when it was processed.
     close_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # When the tickets waiting to join the public list are published (see Engine._publish).
+    # The next moment the public list is updated (see Engine._publish).
     list_publish_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Tickets on the public list: the public counts come from this, not from rsvp_count.
     listed_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -91,6 +91,8 @@ class Deposit(Base):
     # rsvp | rejected | float (top-ups, payments without our memo, unrefundable)
     kind: Mapped[str] = mapped_column(String(10))
     reason: Mapped[str] = mapped_column(String(40), default="")
+    # A returned payment appears on the public list only at its next update.
+    listed: Mapped[bool] = mapped_column(Boolean, default=False)
     ticket_hash: Mapped[str] = mapped_column(String(43), default="")
 
 

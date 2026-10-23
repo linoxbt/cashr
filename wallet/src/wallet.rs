@@ -759,7 +759,10 @@ impl Wallet {
     }
 
     async fn broadcast(&self, raw: RawTransaction) -> anyhow::Result<()> {
-        let mut client = self.client().await?;
+        // Through Tor, every broadcast (and rebroadcast) gets its own connection and
+        // circuit: on the long-lived sync connection, lightwalletd could group every
+        // transaction this server sends.
+        let mut client = if self.endpoint.isolated() { self.endpoint.connect().await? } else { self.client().await? };
         let resp = client.send_transaction(raw).await?.into_inner();
         let msg = resp.error_message.to_lowercase();
         // Already known to the node: that is what a rebroadcast hopes for.

@@ -56,7 +56,7 @@ export interface AdminView {
   pending_zat: number | null;
   wallet_error: string;
   rsvps: { seat: number; ticket_hash: string; refund_address: string; status: RsvpStatus; checked_in: boolean }[];
-  deposits: { txid: string; pool: string; index: number; amount_zat: number; kind: string; reason: string }[];
+  deposits: { pool: string; index: number; amount_zat: number; kind: string; reason: string }[];
   payouts: { id: number; kind: string; status: PayoutStatus; recipients: number; amount_zat: number; txid: string; error: string }[];
 }
 

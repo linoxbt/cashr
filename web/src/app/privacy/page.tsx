@@ -19,17 +19,17 @@ const LEAKS = [
   {
     risk: "Timing on the public ticket list",
     detail: "Anyone with the invite link can read the list of ticket hashes. If each ticket appeared the moment its payment confirmed, polling the list would time every payment.",
-    fix: "New tickets join the list in batches: once three are waiting, or at a random time around two hours after the first, and all at once when RSVPs close. The public RSVP count follows the list, and no check-in count is public until the event settles.",
+    fix: "The public list changes only at random moments about two hours apart, scheduled from the event's creation and never triggered by a payment, plus when RSVPs close. New tickets and returned payments appear together at those moments; the public RSVP count, seats left and the full flag follow the list; and no check-in count is public until the event settles.",
   },
   {
     risk: "Who came together",
     detail: "One refund paying many attendees would be fetched by each of their wallets from a sync server, showing its operator a group of people who attended together.",
-    fix: "Every refund is its own transaction, sent at a random time within about three hours of the event ending.",
+    fix: "Every refund is its own transaction, sent at a random time within about three hours of the event ending, and the public list shows everyone who came as \"refunding\" until all refunds are done, so it can't time any one of them.",
   },
   {
     risk: "The sync servers (lightwalletd)",
     detail: "Light wallets, including attendees' own and the server's, fetch transactions from a sync server, which sees the requesting IP address and which transactions it asks about.",
-    fix: "The server's wallet asks over Tor, with a fresh circuit for each transaction and a random delay of one to five minutes, so its requests don't single out RSVPs by timing. Your own wallet is outside cashr's control: for high-risk events, use a wallet that connects over Tor or to a server you trust, and pay from a shielded balance.",
+    fix: "The server's wallet talks to its sync server over Tor: each transaction it fetches (a random one to five minutes after first seeing it) and each one it broadcasts gets a fresh circuit, and nothing public changes in step with those requests. Your own wallet is outside cashr's control: for high-risk events, use a wallet that connects over Tor or to a server you trust, and pay from a shielded balance.",
   },
   {
     risk: "Reusing a refund address",
@@ -39,7 +39,7 @@ const LEAKS = [
   {
     risk: "Network metadata",
     detail: "Loading a page reveals an IP address to the web host and the API host, and their providers may log it.",
-    fix: "The API keeps no access logs. Confirmation downloads every ticket hash, so no request points at one ticket; every visitor polls at the same jittered pace whatever their ticket's state; and your ticket list never asks about all your events at once. For high-risk groups, open the pages over Tor.",
+    fix: "The API keeps no access logs. Confirmation downloads every ticket hash, so no request points at one ticket; every visitor of an event page polls at the same jittered pace whatever their ticket's state, even while the tab is in the background; and your ticket list never asks about all your events at once. For high-risk groups, open the pages over Tor.",
   },
   {
     risk: "What stays in your wallet",
@@ -59,7 +59,7 @@ const LEAKS = [
   {
     risk: "Your phone",
     detail: "Whoever holds the ticket QR can use it once, and your browser keeps your tickets, with each event's name and date, so they can be listed without asking the server.",
-    fix: "The refund address is dropped from your browser once your payment is in, the saved ticket image doesn't name the event, and a ticket is removed automatically when its event is purged. Remove tickets for past events from your ticket list, or all of them at once.",
+    fix: "The refund address is dropped from your browser once your payment is in, the saved ticket image doesn't print the event's name (its code carries the event id, which the door needs), and a ticket is removed automatically when its event is purged. Remove tickets for past events from your ticket list, or all of them at once.",
   },
 ];
 
@@ -67,7 +67,8 @@ const TRUST = [
   "The server's wallet holds deposits until the event is settled. A dishonest operator could keep them, so deposits should stay small (the price of a coffee).",
   "The organiser's links are bearer secrets. Anyone with the manage link can settle or purge the event.",
   "The door device sees ticket hashes, seats and the live check-in count, and keeps the hashes to work offline until the event is settled. It never sees refund addresses.",
-  "The organiser's dashboard shows each ticket's hash, seat and whether it was checked in. It never shows refund addresses.",
+  "The organiser's dashboard is live: it shows each ticket's hash and seat as soon as its payment confirms, check-ins as they happen, and refund transaction ids. It never shows refund addresses or deposit transaction ids. Treat the manage link like the guest list it replaces.",
+  "After a purge, the event's id still answers with its counts (RSVPs, check-ins, deposit and capacity) and nothing else; its database row and the reused-address digests keep their storage order.",
   "This public instance runs on a shared server. A server is only as private as its operator and its host: high-risk groups should run their own (one command, see the docs).",
   "cashr can't hide that an event exists, or protect against someone photographing the room.",
 ];

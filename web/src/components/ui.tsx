@@ -129,7 +129,14 @@ export function useMeta(): Meta | null {
  * the tab is hidden and catches up as soon as it is visible again, so a
  * background tab never keeps downloading.
  */
-export function usePoll(fn: () => void | Promise<void>, interval: number | (() => number | null), deps: unknown[]) {
+export function usePoll(
+  fn: () => void | Promise<void>,
+  interval: number | (() => number | null),
+  deps: unknown[],
+  // Keep the schedule while the tab is hidden: for a page whose request timing must
+  // say nothing (pausing and catching up on return would show when you switched apps).
+  { whileHidden = false }: { whileHidden?: boolean } = {},
+) {
   const latest = useRef({ fn, interval });
   latest.current = { fn, interval };
   useEffect(() => {
@@ -148,11 +155,11 @@ export function usePoll(fn: () => void | Promise<void>, interval: number | (() =
       } finally {
         running = false;
         const d = delay();
-        if (alive && d !== null && !document.hidden) timer = setTimeout(tick, d);
+        if (alive && d !== null && (whileHidden || !document.hidden)) timer = setTimeout(tick, d);
       }
     };
     const onVisibility = () => {
-      if (document.hidden || !alive) return;
+      if (whileHidden || document.hidden || !alive) return;
       clearTimeout(timer);
       tick();
     };

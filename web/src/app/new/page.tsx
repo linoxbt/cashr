@@ -16,6 +16,7 @@ interface Created {
 
 // Matches the API's limit (api/cashr/app.py MAX_DEPOSIT_ZAT).
 const MAX_DEPOSIT_ZAT = 100 * 100_000_000;
+const MIN_DEPOSIT_ZAT = 100_000; // 0.001 ZEC, as the API requires
 
 export default function NewEvent() {
   const meta = useMeta();
@@ -40,7 +41,7 @@ export default function NewEvent() {
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null);
-    if (depositZat === null || depositZat < 50_000) return setError("Deposit must be at least 0.0005 ZEC.");
+    if (depositZat === null || depositZat < MIN_DEPOSIT_ZAT) return setError("Deposit must be at least 0.001 ZEC.");
     if (depositZat > MAX_DEPOSIT_ZAT) return setError("Deposit can be at most 100 ZEC.");
     const capacity = Number(form.capacity);
     if (!Number.isInteger(capacity) || capacity < 1 || capacity > 5000) return setError("Capacity must be a whole number from 1 to 5000.");

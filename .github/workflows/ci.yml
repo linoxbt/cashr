@@ -60,7 +60,7 @@ jobs:
         run: |
           pip install -e 'api[dev]'
           (cd api && CASHR_CHAIN=sim CASHR_SECRET=ci CASHR_SCAN_INTERVAL=1 \
-            CASHR_LIST_DELAY_MIN=0 CASHR_LIST_BATCH=1 CASHR_REFUND_SPREAD_MIN=0 \
+            CASHR_LIST_DELAY_MIN=0 CASHR_REFUND_SPREAD_MIN=0 \
             CASHR_DATABASE_URL=sqlite:///$RUNNER_TEMP/e2e.db uvicorn cashr.main:app --port 8000 &)
           (cd web && npm start &)
           npx --prefix web playwright install --with-deps chromium

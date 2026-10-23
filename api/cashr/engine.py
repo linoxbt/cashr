@@ -216,6 +216,8 @@ class Engine:
                 admin_token_hash=token_hash(admin), door_token_hash=token_hash(door),
                 scan_height=self.chain.tip_height(),
             )
+            # The public list's update schedule starts now, independent of payments.
+            ev.list_publish_at = self._publish_time()
             db.add(ev)
             db.commit()
             return CreatedEvent(ev, admin, door)
@@ -237,9 +239,9 @@ class Engine:
             try:
                 self.scan_event(event_id)
             except ChainError as e:
-                log.warning("scan %s: %s", event_id, e)
+                log.warning("scan failed: %s", e)  # no event ids: logs outlive a purge
             except Exception:
-                log.exception("scan %s failed", event_id)
+                log.exception("scan failed")
 
     def scan_event(self, event_id: str) -> None:
         with self.sessions() as db:
@@ -327,8 +329,6 @@ class Engine:
         ev.rsvp_count += 1
         db.add(Rsvp(event_id=ev.id, ticket_hash=memo.ticket_hash,
                     refund_address=memo.refund_address, seat=self._free_seat(db, ev)))
-        if ev.list_publish_at is None:
-            ev.list_publish_at = self._publish_time()
         db.add(SeenAddress(digest=self._address_digest(memo.refund_address), period=self._period()))
         db.flush()
 
@@ -345,29 +345,31 @@ class Engine:
         return secrets.choice([n for n in range(1, ev.capacity + 1) if n not in taken])
 
     def _publish_time(self) -> datetime:
-        """A random moment between half and one and a half list delays from now."""
+        """The next update of the public list: half to one and a half list delays away."""
         delay_s = max(0, self.settings.list_delay_min) * 60
         jitter = secrets.randbelow(delay_s + 1) if delay_s else 0
         return datetime.now(timezone.utc) + timedelta(seconds=delay_s // 2 + jitter)
 
     def _publish(self, db: Session, ev: Event, now: bool = False) -> None:
-        """Move waiting tickets onto the public list, all together.
+        """Update the public list: new tickets and returned payments, all at once.
 
-        Listing each ticket as its payment confirmed would let anyone polling the
-        list note when each ticket was paid, and match it to the chain. Tickets
-        join in batches instead: once enough are waiting, at a random time after
-        the first one arrived, or when RSVPs close or the event settles.
+        Updates happen only at random moments scheduled from the event's creation,
+        never because a payment arrived: a list that changed when a payment came in
+        (or when enough had) would let anyone polling it time that payment, and
+        match it to the chain. Closing RSVPs and settling also update it.
         """
-        waiting = db.scalars(select(Rsvp).where(Rsvp.event_id == ev.id, Rsvp.listed.is_(False))).all()
-        if not waiting:
-            ev.list_publish_at = None
+        if ev.list_publish_at is None:
+            ev.list_publish_at = self._publish_time()
+        if not now and _aware(ev.list_publish_at) > datetime.now(timezone.utc):
             return
-        due = ev.list_publish_at is None or _aware(ev.list_publish_at) <= datetime.now(timezone.utc)
-        if now or due or len(waiting) >= max(1, self.settings.list_batch):
-            for r in waiting:
-                r.listed = True
-            ev.listed_count += len(waiting)
-            ev.list_publish_at = None
+        waiting = db.scalars(select(Rsvp).where(Rsvp.event_id == ev.id, Rsvp.listed.is_(False))).all()
+        for r in waiting:
+            r.listed = True
+        ev.listed_count += len(waiting)
+        for d in db.scalars(select(Deposit).where(Deposit.event_id == ev.id, Deposit.listed.is_(False))):
+            d.listed = True
+        if not now:
+            ev.list_publish_at = self._publish_time()
 
     def _rejection(self, db: Session, ev: Event, memo, amount_zat: int, height: int = 0) -> str:
         if memo.event_id != ev.id:
@@ -522,7 +524,7 @@ class Engine:
             try:
                 bal = self.balance(ev, fresh=True) if fund else None
             except ChainError as e:
-                log.warning("settle %s: %s", ev.id, e)
+                log.warning("settle failed: %s", e)
                 return False
         with self.lock, self.sessions() as db:
             ev = self._get_event(db, event_id)
@@ -679,7 +681,7 @@ class Engine:
             try:
                 self.chain.delete_account(account_ref)
             except ChainError as e:
-                log.warning("retire %s: %s", event_id, e)
+                log.warning("retiring an idle event failed: %s", e)
                 continue
             with self.lock, self.sessions() as db:
                 ev = self._get_event(db, event_id)

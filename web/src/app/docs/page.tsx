@@ -111,7 +111,7 @@ export default function Docs() {
           <Section id="organisers" title="Hosting an event">
             <Steps
               items={[
-                ["Create the event", <>On <Link href="/new" className="text-ink underline underline-offset-4">Create event</Link>, set a name, time, capacity and refundable deposit (minimum 0.0005 ZEC). The place is public: for sensitive venues, write something like &ldquo;sent on Signal after you RSVP&rdquo;.</>],
+                ["Create the event", <>On <Link href="/new" className="text-ink underline underline-offset-4">Create event</Link>, set a name, time, capacity and refundable deposit (minimum 0.001 ZEC). The place is public: for sensitive venues, write something like &ldquo;sent on Signal after you RSVP&rdquo;.</>],
                 ["Save your two private links", "You get a manage link and a door link, shown once. cashr stores only a hash of them, so it can't recover them. Keep them in a password manager. You can also choose to remember them on this device."],
                 ["Share the public RSVP link", "Send it however your group already talks. Anyone with it can RSVP until the event is full or you close RSVPs."],
                 ["Check people in", "Open the door link on the phone at the entrance and scan tickets. It works offline and syncs when the connection returns."],
@@ -185,7 +185,7 @@ export default function Docs() {
             <Table
               head={["", ""]}
               rows={[
-                ["Deposit", "Set by the organiser, minimum 0.0005 ZEC. Refunded in full to everyone who checks in."],
+                ["Deposit", "Set by the organiser, minimum 0.001 ZEC. Refunded in full to everyone who checks in."],
                 ["Returned payments", "Refunded minus 0.0001 ZEC, so junk payments can't drain the event's fees."],
                 ["Network fees for refunds", "Paid from forfeited deposits and organiser top-ups, never from refunds."],
                 ["When a refund counts as paid", "Once its transaction is mined with 3 confirmations. One that expires unmined is sent again automatically; it is never paid twice."],

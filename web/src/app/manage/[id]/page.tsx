@@ -321,9 +321,9 @@ function MoneyTab({ view, token, onChange }: { view: AdminView; token: string; o
           ) : (
             <table className="w-full min-w-[36rem] text-left text-sm">
               <tbody className="divide-y divide-ink/5">
-                {view.deposits.map((d) => (
-                  <tr key={`${d.txid}-${d.index}`}>
-                    <td className="px-5 py-3 font-mono text-xs text-ink-3">{d.txid.slice(0, 10)}…</td>
+                {view.deposits.map((d, i) => (
+                  <tr key={i}>
+                    <td className="px-5 py-3 font-mono text-xs text-ink-3">Payment {i + 1}</td>
                     <td className="px-5 py-3 tabular-nums">{zatToZec(d.amount_zat)} ZEC</td>
                     <td className="px-5 py-3">
                       {d.kind === "rsvp" ? (
@@ -392,7 +392,7 @@ function SeizedTab({ view }: { view: AdminView }) {
     },
     fund_address: view.event.forfeit_address || null,
     rsvps: view.rsvps.map((r) => ({ seat: r.seat, ticket_hash: r.ticket_hash, refund_address: r.refund_address, checked_in: r.checked_in, status: r.status })),
-    deposits: view.deposits.map((d) => ({ txid: d.txid, amount_zat: d.amount_zat, kind: d.kind, reason: d.reason || undefined })),
+    deposits: view.deposits.map((d) => ({ amount_zat: d.amount_zat, kind: d.kind, reason: d.reason || undefined })),
     payouts: view.payouts.map((p) => ({ kind: p.kind, status: p.status, recipients: p.recipients, amount_zat: p.amount_zat, txid: p.txid || undefined })),
   };
   return (

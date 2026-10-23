@@ -84,8 +84,10 @@ function EventFor({ id }: { id: string }) {
       }
     },
     interval,
-    // A new (or removed) ticket should show its state at once.
-    [id, ticket?.hash, refreshes],
+    // Not the ticket: fetching off-schedule when one is created would time it.
+    // `refreshes` only moves after a simulated payment on the demo.
+    [id, refreshes],
+    { whileHidden: true },
   );
 
   if (error?.status === 404) return <PageState title="Event not found">Check the link you were given.</PageState>;
@@ -313,7 +315,7 @@ function TicketCard({ event, ticket, list, persisted, onPaid, onForget }: {
       </div>
       <p className="mt-5 text-center text-sm text-ink-2">{state.text}</p>
       <div className="mt-5 grid gap-2">
-        <button className="btn-secondary" onClick={() => downloadQrPng(qr, `cashr-${event.id}.png`)}>
+        <button className="btn-secondary" onClick={() => downloadQrPng(qr, "cashr-ticket.png")}>
           Save ticket image
         </button>
         <ForgetButton onForget={onForget} warn={mine.status === undefined || mine.status === "confirmed"} />
@@ -392,7 +394,7 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onPaid, onFo
 
   const qr = ticketQr(event.id, ticket.secret);
   const saveImage = (
-    <button className="btn-secondary w-full" onClick={() => downloadQrPng(qr, `cashr-${event.id}.png`)}>
+    <button className="btn-secondary w-full" onClick={() => downloadQrPng(qr, "cashr-ticket.png")}>
       Save ticket image
     </button>
   );
@@ -447,9 +449,11 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onPaid, onFo
 
       <div className="mt-5 flex items-center gap-2 rounded-lg bg-paper-2/60 px-3 py-2.5 text-sm text-ink-2">
         <Spinner className="text-ink-4" />
-        {loaded
-          ? "After you pay, your ticket shows here within about two hours. Tickets are published in batches, so nobody watching can tell when yours was paid."
-          : "Connecting…"}
+        {!loaded
+          ? "Connecting…"
+          : sim
+            ? "On the real app, tickets join the public list at random moments about two hours apart, so nobody watching can tell when yours was paid. This demo lists them at once."
+            : "After you pay, your ticket shows here within about two hours. The public list updates at random moments, so nobody watching can tell when yours was paid."}
       </div>
 
       {meta && !sim && (
