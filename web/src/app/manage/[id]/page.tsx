@@ -11,6 +11,7 @@ import { REJECTION_TEXT, addressProblem, zatToZec, zip321 } from "@/lib/codec";
 import { forgetEvent, takeLinkToken } from "@/lib/storage";
 
 type Tab = "overview" | "money" | "seized";
+const TABS: [Tab, string][] = [["overview", "Tickets"], ["money", "Money"], ["seized", "What a seizure reveals"]];
 
 // A one-recipient Orchard refund's ZIP 317 fee is 0.0001 ZEC; the margin covers change.
 const FEE_PER_REFUND_ZAT = 15_000;
@@ -186,13 +187,26 @@ function ManageFor({ id }: { id: string }) {
       </div>
 
       <div className="mt-10 border-b border-ink/10">
-        <div role="tablist" className="-mb-px flex gap-6 overflow-x-auto text-sm" aria-label="Dashboard sections">
-          {([["overview", "Tickets"], ["money", "Money"], ["seized", "What a seizure reveals"]] as [Tab, string][]).map(([k, label]) => (
+        <div
+          role="tablist"
+          className="-mb-px flex gap-6 overflow-x-auto text-sm"
+          aria-label="Dashboard sections"
+          onKeyDown={(e) => {
+            // Arrow keys move between tabs (the ARIA tabs pattern).
+            if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+            const i = TABS.findIndex(([k]) => k === tab);
+            const next = TABS[(i + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length][0];
+            setTab(next);
+            document.getElementById(`tab-${next}`)?.focus();
+          }}
+        >
+          {TABS.map(([k, label]) => (
             <button
               key={k}
               role="tab"
               id={`tab-${k}`}
               aria-selected={tab === k}
+              tabIndex={tab === k ? 0 : -1}
               aria-controls="tab-panel"
               onClick={() => setTab(k)}
               className={`whitespace-nowrap border-b-2 pb-3 font-medium ${tab === k ? "border-ink text-ink" : "border-transparent text-ink-3 hover:text-ink"}`}

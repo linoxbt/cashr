@@ -22,7 +22,11 @@ const TICKETS = TICKETS_KEY;
 function read<T>(store: Storage | undefined, key: string, fallback: T): T {
   try {
     const raw = store?.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
+    if (!raw) return fallback;
+    const value: unknown = JSON.parse(raw);
+    // A stored value of the wrong shape (null, an array for a map…) counts as absent.
+    const shape = (v: unknown) => (v === null ? "null" : Array.isArray(v) ? "array" : typeof v);
+    return shape(value) === shape(fallback) ? (value as T) : fallback;
   } catch {
     return fallback;
   }
@@ -70,18 +74,26 @@ function storage(kind: "localStorage" | "sessionStorage"): Storage | undefined {
 const local = () => storage("localStorage");
 const session = () => storage("sessionStorage");
 
+/** Stored tickets, skipping any entry that isn't one (a damaged or hand-edited store). */
+function ticketMap(): Record<string, StoredTicket> {
+  const all = read<Record<string, unknown>>(local(), TICKETS, {});
+  const ok = (t: unknown): t is StoredTicket =>
+    !!t && typeof t === "object" && typeof (t as StoredTicket).eventId === "string" && typeof (t as StoredTicket).hash === "string";
+  return Object.fromEntries(Object.entries(all).filter(([, t]) => ok(t))) as Record<string, StoredTicket>;
+}
+
 export function getTicket(eventId: string): StoredTicket | null {
-  return read<Record<string, StoredTicket>>(local(), TICKETS, {})[eventId] ?? null;
+  return ticketMap()[eventId] ?? null;
 }
 
 export function saveTicket(t: StoredTicket): boolean {
-  const all = read<Record<string, StoredTicket>>(local(), TICKETS, {});
+  const all = ticketMap();
   all[t.eventId] = t;
   return write(local(), TICKETS, all);
 }
 
 export function forgetTicket(eventId: string): void {
-  const all = read<Record<string, StoredTicket>>(local(), TICKETS, {});
+  const all = ticketMap();
   delete all[eventId];
   write(local(), TICKETS, all);
 }
@@ -134,7 +146,7 @@ export interface SavedEvent {
 const EVENTS = "cashr.events.v1";
 
 export function listTickets(): StoredTicket[] {
-  return Object.values(read<Record<string, StoredTicket>>(local(), TICKETS, {})).sort((a, b) =>
+  return Object.values(ticketMap()).sort((a, b) =>
     String(b?.createdAt ?? "").localeCompare(String(a?.createdAt ?? "")),
   );
 }

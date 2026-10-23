@@ -8,11 +8,11 @@ const STORED = [
   ["Refund address", "Only its Orchard (shielded) receiver, even if your wallet's address also carries a transparent one. Unlinkable to your other addresses. Deleted on purge."],
   ["Checked in", "A yes/no per ticket, never a time. Neither the ticket's state nor the check-in count is public while the event runs; every outcome appears at once when it settles."],
   ["Seat", "A random number, so it says nothing about the order people paid in."],
-  ["Deposit notes", "Transaction id and amount, so no payment is counted twice. No block height, and an accepted deposit doesn't keep its ticket hash, so its transaction can't be matched to a ticket; a returned payment keeps its ticket hash, for the public list. The sender is never visible, even to the wallet. Deleted on purge."],
+  ["Deposit notes", "Transaction id and amount, so no payment is counted twice. No block height, and an accepted deposit doesn't keep its ticket hash, so these records alone can't match a transaction to a ticket; a returned payment keeps its ticket hash, for the public list. Until the purge, though, the event's wallet (below) still holds each deposit's memo, which names its ticket. The sender is never visible, even to the wallet. Deleted on purge."],
   ["Payouts", "Each refund, return and sweep: its recipient's refund address, amount, memo and transaction id. Deleted on purge."],
   ["Link hashes", "SHA-256 hashes of the manage and door links, so the server can check them without storing them."],
   ["The event's wallet account", "Its own seed (encrypted at rest) and the deposits' memos. Purging deletes the account and the seed and rewrites the wallet file, so the memos can't be decrypted again, even from the chain. The wallet keeps the chain blocks it has scanned (heights and times, shared by all events), which name no event."],
-  ["Backups", "An encrypted copy of the above, taken nightly and kept for seven days, so an event purged today stays in the backups for up to a week. The key is kept apart from the backups."],
+  ["Backups", "An encrypted copy of the above, taken nightly and kept for seven days on the same server. Its key is on that server too, so whoever seizes the server within a week of a purge can still read that event's records."],
 ];
 
 const LEAKS = [
@@ -59,7 +59,7 @@ const LEAKS = [
   {
     risk: "Your phone",
     detail: "Whoever holds the ticket QR can use it once, and your browser keeps your tickets, with each event's name and date, so they can be listed without asking the server.",
-    fix: "The refund address is dropped from your browser once your payment is in, the saved ticket image doesn't print the event's name (its code carries the event id, which the door needs), and a ticket is removed automatically when its event is purged. Remove tickets for past events from your ticket list, or all of them at once.",
+    fix: "The refund address is dropped from your browser the next time the ticket is opened or checked after your payment is in, the saved ticket image doesn't print the event's name (its code carries the event id, which the door needs), and a ticket is removed the next time it is opened or checked after its event is purged. Remove tickets for past events from your ticket list, or all of them at once.",
   },
 ];
 

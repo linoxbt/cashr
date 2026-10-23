@@ -8,7 +8,7 @@
 # touches the disk. Spending still needs CASHR_WALLET_SEED_KEY, which is NOT in the
 # backup: keep both of them somewhere offline, apart from the backups.
 #
-# The last $KEEP backups stay in $CASHR_BACKUP_DIR (default /var/backups/cashr). Set
+# Backups younger than $KEEP days stay in $CASHR_BACKUP_DIR (default /var/backups/cashr). Set
 # CASHR_BACKUP_REMOTE in .env (an rsync target such as user@host:/srv/cashr-backups) to
 # copy each one off this machine too; a backup on the same disk doesn't survive it.
 #
@@ -30,6 +30,10 @@ IMAGE="ghcr.io/linoxbt/cashr-api:$(env_get CASHR_TAG)"
 
 umask 077
 mkdir -p "$OUT"
+# Rotate by age first, so a run that fails below still lets old backups (and the
+# purged events in them) expire, and drop pieces of runs that died midway.
+find "$OUT" -maxdepth 1 -name 'cashr-*.tgz.enc' -mmin +$((KEEP * 1440)) -delete
+find "$OUT" -maxdepth 1 -name 'cashr-*.tgz.enc.part' -mmin +60 -delete
 file="$OUT/cashr-$(date -u +%Y%m%dT%H%M%SZ).tgz.enc"
 
 # Snapshots go to a memory-only directory inside a throwaway container, and leave it
@@ -58,9 +62,6 @@ with tarfile.open(fileobj=sys.stdout.buffer, mode="w|gz") as tar:
 ' | PASS="$PASS" openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -pass env:PASS -out "$file.part"
 mv "$file.part" "$file"
 echo "$(date -u +%FT%TZ) wrote $file ($(du -h "$file" | cut -f1))"
-
-# Rotate: keep the newest $KEEP.
-ls -1t "$OUT"/cashr-*.tgz.enc 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f --
 
 if [ -n "$REMOTE" ]; then
   rsync -a --delete --include 'cashr-*.tgz.enc' --exclude '*' "$OUT"/ "$REMOTE"/ \
