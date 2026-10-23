@@ -389,3 +389,22 @@ def test_a_rewrite_blocked_for_good_is_finished_later(client, make_event, attend
     # Still owed, and finished on the scanner's next slow turn.
     client.engine.scan_once(full=True)
     assert _db_files_mention(tmp_path, "SecretTitleRR", a.hash) == []
+
+
+def test_scrubbing_old_rows_schedules_a_rewrite(tmp_path):
+    # A database from before heights and accepted tickets were dropped: the scrub
+    # rewrites the rows, and the old values must then leave the file too.
+    from sqlalchemy import text
+
+    from cashr.db import Flag, init_db, make_engine, make_sessionmaker
+
+    eng = make_engine(f"sqlite:///{tmp_path}/old.db")
+    init_db(eng)
+    with eng.begin() as conn:
+        conn.execute(text("INSERT INTO deposits (event_id, txid, pool, out_index, amount_zat, height, kind, reason, listed, ticket_hash) "
+                          "VALUES ('e', 't', 'orchard', 0, 1, 3100000, 'rsvp', '', 0, 'h')"))
+    init_db(eng)
+    with make_sessionmaker(eng)() as db:
+        assert db.get(Flag, "compact_owed") is not None
+        d = db.get(Deposit, 1)
+        assert d.height == 0 and d.ticket_hash == ""

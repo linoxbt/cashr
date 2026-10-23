@@ -216,9 +216,13 @@ def init_db(engine) -> None:
     with engine.begin() as conn:
         # Data older servers kept and this one doesn't: reuse digests (the reuse
         # check is per event now), payment heights, and accepted deposits' tickets.
+        had = conn.execute(text("SELECT name FROM sqlite_master WHERE name = 'seen_addresses'")).first() is not None
         conn.execute(text("DROP TABLE IF EXISTS seen_addresses"))
-        conn.execute(text("UPDATE deposits SET height = 0 WHERE height != 0"))
-        conn.execute(text("UPDATE deposits SET ticket_hash = '' WHERE kind = 'rsvp' AND ticket_hash != ''"))
+        changed = conn.execute(text("UPDATE deposits SET height = 0 WHERE height != 0")).rowcount
+        changed += conn.execute(text("UPDATE deposits SET ticket_hash = '' WHERE kind = 'rsvp' AND ticket_hash != ''")).rowcount
+        if had or changed:
+            # The old values are still in free pages and the WAL until the file is rewritten.
+            conn.execute(text("INSERT OR IGNORE INTO flags (name) VALUES ('compact_owed')"))
 
 
 def _add_missing_columns(engine) -> None:

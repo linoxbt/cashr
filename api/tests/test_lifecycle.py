@@ -575,21 +575,22 @@ def test_events_can_be_made_at_most_a_year_ahead(client, make_event):
     assert r.status_code == 422
 
 
-def test_empty_events_are_retired_a_month_after_creation(client, make_event):
-    from cashr.engine import EMPTY_RETIRE_AFTER
-
+def test_an_empty_event_planned_far_ahead_is_kept(client, make_event):
+    # Retiring empty events by age destroyed real events planned months ahead
+    # whose RSVPs simply hadn't started yet.
     soon = (datetime.now(timezone.utc) + timedelta(days=200)).isoformat()
     ev = make_event(starts_at=soon)["event"]
-    client.engine.retire_idle_events()
-    assert status(client, ev["id"]) == "open"
     with client.engine.sessions() as db:
-        db.get(Event, ev["id"]).created_at = datetime.now(timezone.utc) - EMPTY_RETIRE_AFTER - timedelta(hours=1)
+        db.get(Event, ev["id"]).created_at = datetime.now(timezone.utc) - timedelta(days=60)
         db.commit()
     client.engine.retire_idle_events()
-    assert status(client, ev["id"]) == "purged"
+    assert status(client, ev["id"]) == "open"
 
 
-def test_settled_events_dont_hold_the_live_event_limit(tmp_path, chain):
+def test_empty_settled_events_hold_a_slot_until_retired(tmp_path, chain):
+    # Settled events still hold a wallet account, so they count against the live
+    # limit (settling at once used to dodge it for free); an empty one is retired
+    # a day after it was created, which frees its slot.
     from fastapi.testclient import TestClient
 
     from cashr.app import create_app
@@ -600,9 +601,71 @@ def test_settled_events_dont_hold_the_live_event_limit(tmp_path, chain):
     with TestClient(create_app(settings, chain)) as c:
         body = {"title": "t", "starts_at": "2026-12-01T19:00:00Z", "capacity": 2, "deposit_zat": 500_000}
         first = c.post("/events", json=body).json()
+        eid = first["event"]["id"]
+        c.post(f"/events/{eid}/admin/settle", headers=auth(first["admin_token"]))
+        c.app.state.engine.scan_once(full=True)
+        assert c.get(f"/events/{eid}").json()["status"] == "settled"
         assert c.post("/events", json=body).status_code == 429
-        c.post(f"/events/{first['event']['id']}/admin/settle", headers=auth(first["admin_token"]))
+        with c.app.state.engine.sessions() as db:
+            db.get(Event, eid).created_at = datetime.now(timezone.utc) - timedelta(days=2)
+            db.commit()
+        c.app.state.engine.retire_idle_events()
+        assert c.get(f"/events/{eid}").json()["status"] == "purged"
         assert c.post("/events", json=body).status_code == 201
+
+
+def test_no_sweep_while_a_payments_memo_is_unread(client, make_event, monkeypatch):
+    # A payment whose memo the wallet hasn't read may be one to return: sweeping it
+    # as no-show money left its return stuck for good.
+    from cashr.chain.base import Balance
+
+    created = make_event(forfeit_address=random_unified_address())
+    ev, admin = created["event"], created["admin_token"]
+    client.chain.pay(ev["address"], 300_000, b"")
+    client.chain.mine(20)
+    monkeypatch.setattr(client.chain, "balance", lambda ref: Balance(300_000, 0, awaiting_memo_zat=50_000))
+    client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
+    for _ in range(5):
+        advance(client)
+    assert status(client, ev["id"]) == "settling"
+    assert [p["kind"] for p in admin_view(client, ev, admin)["payouts"]] == []
+
+
+def test_a_wallet_refusal_that_isnt_about_money_isnt_reported_as_money(client, make_event, monkeypatch):
+    from cashr.chain import ChainError
+
+    created = make_event(forfeit_address=random_unified_address())
+    ev, admin = created["event"], created["admin_token"]
+    settle(client, ev, admin)
+
+    def busy(ref):
+        raise ChainError("a transaction spending this account's funds could still be mined; try again once it expires")
+
+    monkeypatch.setattr(client.chain, "delete_account", busy)
+    r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
+    assert r.status_code == 502 and "could still be mined" in r.json()["message"]
+
+
+def test_online_and_offline_check_ins_agree_while_settling(client, make_event, attendee):
+    from dataclasses import replace
+
+    client.engine.settings = replace(client.engine.settings, door_sync_grace_min=30)
+    created = make_event(forfeit_address=random_unified_address())
+    ev, admin, door = created["event"], created["admin_token"], created["door_token"]
+    a = attendee(ev["id"])
+    pay(client, ev, a.memo())
+    client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
+    r = client.post(f"/events/{ev['id']}/door/checkin", json={"ticket_hash": a.hash}, headers=auth(door))
+    assert r.json()["result"] == "ok"
+
+
+def test_chunked_bodies_are_capped_too(client):
+    def chunks():
+        for _ in range(100):
+            yield b"x" * 4096
+
+    r = client.post("/events", content=chunks(), headers={"Content-Type": "application/json"})
+    assert r.status_code in (400, 413) and len(r.content) < 2000
 
 
 def test_an_event_that_fails_to_save_leaves_no_wallet_account(client, monkeypatch):

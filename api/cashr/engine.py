@@ -57,12 +57,6 @@ BLOCK_SECONDS = 75
 # An event that never received anything is retired this long after it started,
 # so abandoned events don't keep wallet accounts (and capacity) forever.
 IDLE_RETIRE_AFTER = timedelta(days=1)
-# ...or this long after it was created, whatever its start: otherwise events
-# created far ahead of time could hold the live-event limit for good.
-EMPTY_RETIRE_AFTER = timedelta(days=30)
-# Statuses that count against the server's limit of live events. Settled events
-# only wait to be purged; they don't take a slot.
-COUNTED = ("open", "closed", "settling")
 # Set (with the wipe, in one transaction) until the database file has been
 # rewritten, so purged data can't survive in the WAL past a failed rewrite or a restart.
 COMPACT_FLAG = "compact_owed"
@@ -195,7 +189,9 @@ class Engine:
         if len(self._created) >= self.settings.create_per_hour:
             raise EngineError("busy", "This server is creating too many events right now. Try again in a while.", 429)
         with self.sessions() as db:
-            live = db.scalar(select(func.count()).select_from(Event).where(Event.status.in_(COUNTED)))
+            # Settled events still hold a wallet account until they're purged (an empty
+            # one is retired a day after creation), so they count too.
+            live = db.scalar(select(func.count()).select_from(Event).where(Event.status != "purged"))
         if live >= self.settings.max_live_events:
             raise EngineError("busy", "This server is at its limit of live events. Try again after some are purged.", 429)
 
@@ -559,9 +555,10 @@ class Engine:
                                                  Payout.status.in_(IN_FLIGHT + ("failed",)))) is not None:
                 return False
             if fund and bal is not None:
-                if bal.pending_zat > 0:
-                    # Change from refunds (or a late payment) is still confirming.
-                    return False
+                if bal.pending_zat > 0 or bal.awaiting_memo_zat > 0:
+                    # Also while a payment's memo is unread: it may be one to return,
+                    # not no-show money to sweep.
+                        return False
                 if bal.spendable_zat > self.settings.dust_zat:
                     db.add(Payout(event_id=ev.id, kind="forfeit", recipients=[{
                         "address": fund, "amount_zat": bal.spendable_zat,
@@ -657,7 +654,7 @@ class Engine:
         try:
             self.chain.delete_account(account_ref)
         except ChainError as e:
-            if "holds" in str(e).lower() or "funds" in str(e).lower():
+            if "still holds" in str(e).lower():
                 raise EngineError("funds_left", "Money arrived in the event wallet just now. Let it confirm "
                                   "and be swept, then purge.", 409) from e
             raise
@@ -718,13 +715,16 @@ class Engine:
         limit of live events. The wallet refuses the delete if anything arrived
         after all.
         """
-        now = datetime.now(timezone.utc)
-        cutoff, created_cutoff = now - IDLE_RETIRE_AFTER, now - EMPTY_RETIRE_AFTER
+        cutoff = datetime.now(timezone.utc) - IDLE_RETIRE_AFTER
         with self.sessions() as db:
             candidates = [
-                ev.id for ev in db.scalars(select(Event).where(Event.status.in_(DOOR_OPEN), Event.rsvp_count == 0))
-                if (_starts_before(ev.starts_at, cutoff) or _aware(ev.created_at) < created_cutoff)
+                ev.id for ev in db.scalars(select(Event).where(Event.status.in_(DOOR_OPEN + ("settled",)),
+                                                               Event.rsvp_count == 0))
+                # An open event only once it's over (one planned months ahead may still
+                # get its RSVPs); a settled empty one a day after it was created.
+                if (_starts_before(ev.starts_at, cutoff) if ev.status in DOOR_OPEN else _aware(ev.created_at) < cutoff)
                 and db.scalar(select(Deposit.id).where(Deposit.event_id == ev.id)) is None
+                and db.scalar(select(Payout.id).where(Payout.event_id == ev.id)) is None
             ]
         for event_id in candidates:
             with self.sessions() as db:
@@ -739,7 +739,7 @@ class Engine:
                 continue
             with self.lock, self.sessions() as db:
                 ev = self._get_event(db, event_id)
-                if ev.status in DOOR_OPEN and not ev.rsvp_count:
+                if ev.status in DOOR_OPEN + ("settled",) and not ev.rsvp_count:
                     self._wipe(db, ev)
                     db.commit()
             self._balances.pop(event_id, None)

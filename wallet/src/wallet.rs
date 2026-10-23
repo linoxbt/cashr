@@ -70,11 +70,13 @@ const EXPIRY_DEPTH: u32 = 10;
 /// Set while a delete's file rewrite is owed.
 const COMPACT_FLAG: &str = "compact_after_delete";
 /// A delete needs a sync this recent: an older one may have missed a payment.
-const DELETE_SYNC_FRESH_S: u64 = 300;
+const DELETE_SYNC_FRESH_S: u64 = 60;
 /// Account creation gives up rather than finish after the API's own 180 s timeout,
 /// which would leave an account (and seed) nobody knows about.
 const CREATE_NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const CREATE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(100);
+/// The whole of account creation, connecting included; well inside the API's 180 s.
+const CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
 /// `scan_queue` priority codes (zcash_client_sqlite): above this, a range still needs scanning.
 const PRIORITY_SCANNED: i64 = 10;
 
@@ -166,6 +168,10 @@ pub struct Wallet {
 impl Wallet {
     pub fn open(params: Network, data_dir: &std::path::Path, seed_key_hex: &str, endpoint: Endpoint) -> anyhow::Result<Arc<Self>> {
         let db_path = data_dir.join("wallet.sqlite");
+        // WAL rather than a rollback journal: a delete's rollback journal holds the
+        // deleted account's keys and memos, and is unlinked without being overwritten.
+        // (The mode is stored in the file; SQLite is built with secure delete on.)
+        rusqlite::Connection::open(&db_path)?.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
         let mut db = WalletDb::for_path(&db_path, params, SystemClock, OsRng)?;
         zcash_client_sqlite::wallet::init::init_wallet_db(&mut db, None)
             .map_err(|e| anyhow!("wallet database migration failed: {e:?}"))?;
@@ -211,7 +217,13 @@ impl Wallet {
     fn compact(&self) -> anyhow::Result<()> {
         let conn = rusqlite::Connection::open(&self.db_path)?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
-        conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        conn.execute_batch("VACUUM;")?;
+        // (busy, frames in the log, frames checkpointed): only an empty log is done.
+        let (busy, frames): (i64, i64) =
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        if busy != 0 || frames > 0 {
+            bail!("the wallet log is still in use by a reader; the rewrite will be retried");
+        }
         Ok(())
     }
 
@@ -452,6 +464,14 @@ impl Wallet {
     /// Create a fresh account, from a fresh seed, whose birthday is the
     /// current tip so it never scans history. Returns the account's UUID.
     pub async fn new_account(&self) -> anyhow::Result<String> {
+        // Only waits are cut short: once the writer is held there is no await left,
+        // so the account and its seed are never split by the timeout.
+        tokio::time::timeout(CREATE_TIMEOUT, self.new_account_inner())
+            .await
+            .map_err(|_| anyhow!("creating the account took too long; try again"))?
+    }
+
+    async fn new_account_inner(&self) -> anyhow::Result<String> {
         let mut client = self.client().await?;
         let latest = tokio::time::timeout(CREATE_NETWORK_TIMEOUT, client.get_latest_block(ChainSpec::default()))
             .await
@@ -525,12 +545,51 @@ impl Wallet {
             .map(|b| {
                 let pools = [b.orchard_balance(), b.sapling_balance(), b.ironwood_balance()];
                 let spendable: u64 = pools.iter().map(|p| p.spendable_value().into_u64()).sum();
-                // Everything else the account holds: unconfirmed, locked, and notes too
-                // small to be worth spending, which still count before a delete.
-                let held: u64 = pools.iter().map(|p| p.total().into_u64() + p.uneconomic_value().into_u64()).sum();
+                // Everything else worth having: unconfirmed and locked value. Notes too
+                // small to pay their own fee are left out: they can never be spent at a
+                // profit, and counting them let anyone block an event's settlement and
+                // purge for good by sending it dust.
+                let held: u64 = pools.iter().map(|p| p.total().into_u64()).sum();
                 (spendable, held.saturating_sub(spendable))
             })
             .unwrap_or((0, 0)))
+    }
+
+    /// Value received by this account whose memo hasn't been read yet: the wallet
+    /// spends it like any other, but nobody knows yet whether it is an RSVP to keep
+    /// or a payment to return. Payments whose memo the wallet gave up on don't count.
+    pub fn awaiting_memo(&self, account: &str) -> anyhow::Result<u64> {
+        let uuid = Self::parse_account(account)?;
+        let waiting: Vec<TxId> = self
+            .reader()?
+            .transaction_data_requests()?
+            .into_iter()
+            .filter_map(|r| match r {
+                TransactionDataRequest::Enhancement(txid) => Some(txid),
+                #[allow(unreachable_patterns)]
+                _ => None,
+            })
+            .collect();
+        if waiting.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.read_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT t.txid, ro.value FROM v_received_outputs ro
+               JOIN transactions t ON t.id_tx = ro.transaction_id
+               JOIN accounts a ON a.id = ro.account_id
+              WHERE a.uuid = ?1 AND ro.is_change = 0 AND ro.memo IS NULL",
+        )?;
+        let rows = stmt.query_map([uuid.expose_uuid().as_bytes().to_vec()], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut total = 0u64;
+        for row in rows {
+            let (txid, value) = row?;
+            let txid = TxId::from_bytes(txid.try_into().map_err(|_| anyhow!("bad txid length"))?);
+            if waiting.contains(&txid) {
+                total += value.max(0) as u64;
+            }
+        }
+        Ok(total)
     }
 
     /// Every non-change output received at `address` whose memo is known.
@@ -1096,6 +1155,20 @@ mod tests {
         // An unscanned gap after downtime does too, even with later blocks scanned.
         let gap = scan_queue(&[(3_527_100, 3_527_150, 10), (3_527_150, 3_527_200, 20), (3_527_200, 3_527_300, 10)], &[3_527_100]);
         assert_eq!(scanned_through(&gap, 3_527_299).unwrap(), 3_527_149);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleted_rows_leave_no_journal_and_are_overwritten() {
+        let dir = temp_dir();
+        let wallet = open_temp(&dir).unwrap();
+        let conn = rusqlite::Connection::open(&wallet.db_path).unwrap();
+        // WAL: no rollback journal holding deleted keys gets unlinked unwritten.
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode, "wal");
+        // Built in (.cargo/config.toml), so it holds for zcash_client_sqlite's own connections too.
+        let secure: i64 = conn.query_row("PRAGMA secure_delete", [], |r| r.get(0)).unwrap();
+        assert_eq!(secure, 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

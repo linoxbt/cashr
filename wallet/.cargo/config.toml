@@ -1,0 +1,5 @@
+# SQLite (bundled by rusqlite) built to overwrite deleted content on every
+# connection, including the ones zcash_client_sqlite opens itself: a purged
+# event's viewing key and memos must not survive in free pages.
+[env]
+LIBSQLITE3_FLAGS = "-DSQLITE_SECURE_DELETE"
