@@ -28,8 +28,8 @@ services:
     image: cashr-tor:local
     restart: unless-stopped
     logging: *logging
-    networks: [backend]
-    # Not published: only the wallet uses it.
+    networks: [backend, testnet]
+    # Not published: only the wallets use it.
 
   wallet:
     # Prebuilt by CI; `docker compose build` builds it from source instead.
@@ -120,15 +120,65 @@ services:
     ports:
       - "127.0.0.1:${CASHR_DEMO_PORT:-8768}:8000"
 
+  # Optional public instance on the real Zcash *testnet* (`--profile testnet`): the
+  # same wallet and API as mainnet with test coins, so the whole money path can be
+  # tried on a live chain for free. Its own keys, volumes and network; shorter
+  # privacy delays so a visitor sees each step the same day.
+  wallet-testnet:
+    image: ghcr.io/linoxbt/cashr-wallet:${CASHR_TAG:-main}
+    build: ./wallet
+    profiles: ["testnet"]
+    restart: unless-stopped
+    depends_on:
+      tor: { condition: service_healthy }
+    logging: *logging
+    networks: [testnet]
+    environment:
+      CASHR_WALLET_NETWORK: test
+      CASHR_WALLET_SOCKS_PROXY: tor:9050
+      CASHR_WALLET_RPC_USER: cashr
+      CASHR_WALLET_RPC_PASSWORD: ${CASHR_TESTNET_WALLET_RPC_PASSWORD:-}
+      CASHR_WALLET_SEED_KEY: ${CASHR_TESTNET_WALLET_SEED_KEY:-}
+    volumes:
+      - testnet-wallet-data:/data
+
+  testnet-api:
+    image: ghcr.io/linoxbt/cashr-api:${CASHR_TAG:-main}
+    build: ./api
+    profiles: ["testnet"]
+    restart: unless-stopped
+    depends_on:
+      wallet-testnet: { condition: service_healthy }
+    logging: *logging
+    networks: [testnet]
+    environment:
+      CASHR_CHAIN: rpc
+      CASHR_NETWORK: test
+      CASHR_LIST_DELAY_MIN: "10"
+      CASHR_REFUND_SPREAD_MIN: "10"
+      CASHR_DOOR_SYNC_GRACE_MIN: "5"
+      CASHR_RPC_URL: http://wallet-testnet:8232
+      CASHR_RPC_USER: cashr
+      CASHR_RPC_PASSWORD: ${CASHR_TESTNET_WALLET_RPC_PASSWORD:-}
+      CASHR_CORS_ORIGINS: ${CASHR_TESTNET_CORS_ORIGINS:-https://testnet.cashr.site}
+    volumes:
+      - testnet-api-data:/data
+    ports:
+      - "127.0.0.1:${CASHR_TESTNET_PORT:-8769}:8000"
+
 networks:
   # Tor, the wallet and the API. Tor needs the internet; nothing else joins.
   backend:
   # The API and the bundled HTTPS proxy.
   edge:
   demo:
+  # The testnet wallet and API, plus Tor.
+  testnet:
 
 volumes:
   wallet-data:
   api-data:
   caddy-data:
   demo-data:
+  testnet-wallet-data:
+  testnet-api-data:

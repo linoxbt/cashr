@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { api, type Meta } from "@/lib/api";
-import { IS_DEMO_BUILD } from "@/lib/site";
+import { IS_DEMO_BUILD, IS_TESTNET_BUILD } from "@/lib/site";
 
 export function Pill({ tone = "neutral", children }: { tone?: "neutral" | "ok" | "warn" | "bad" | "gold"; children: ReactNode }) {
   const tones = {
@@ -134,6 +134,19 @@ export function useMeta(): Meta | null {
 export function useIsDemo(): boolean {
   const meta = useMeta();
   return IS_DEMO_BUILD || meta?.chain === "sim";
+}
+
+/** The real-testnet instance: a real chain, but test coins. Build flag, else the server's word. */
+export function useIsTestnet(): boolean {
+  const meta = useMeta();
+  return IS_TESTNET_BUILD || (meta?.chain === "rpc" && meta.network === "test");
+}
+
+/** "about three hours" / "about 15 minutes": the longest wait for the public list, from the server's setting. */
+export function listingWait(meta: Meta | null): string {
+  const max = Math.round(1.5 * (meta?.list_delay_min ?? 120));
+  if (max >= 90) return `about ${Math.round(max / 60)} hours`;
+  return `about ${Math.max(1, max)} minutes`;
 }
 
 /**

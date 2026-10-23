@@ -308,6 +308,8 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             "reject_fee_zat": settings.reject_fee_zat,
             # Minutes a settling event waits for offline door phones before sweeping.
             "door_sync_grace_min": settings.door_sync_grace_min,
+            # The public list updates 0.5 to 1.5 times this many minutes apart.
+            "list_delay_min": settings.list_delay_min,
             # None when the wallet is unreachable, so the UI can say so.
             "tip": tip,
         }

@@ -4,7 +4,8 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { downloadQrPng, Qr } from "@/components/Qr";
-import { CopyField, Notice, PageState, Pill, Spinner, formatWhen, useMeta, usePoll } from "@/components/ui";
+import { CopyField, Notice, PageState, Pill, Spinner, formatWhen, listingWait, useIsTestnet, useMeta, usePoll } from "@/components/ui";
+import { FAUCET_URL } from "@/lib/site";
 import { api, ApiError, isEventId, type PublicEvent, type TicketList } from "@/lib/api";
 import {
   REJECTION_TEXT,
@@ -351,6 +352,7 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onPaid, onFo
   onPaid: () => void; onForget: () => void;
 }) {
   const sim = meta?.chain === "sim";
+  const testnet = useIsTestnet();
   const uri = zip321(event.address, event.deposit_zat, memo);
   const memoText = new TextDecoder().decode(memo);
   const [simBusy, setSimBusy] = useState(false);
@@ -442,7 +444,11 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onPaid, onFo
       ) : (
         <>
           <p className="mt-5 text-sm text-ink-3">
-            Scan with ZODL or any Zcash wallet. The amount and memo are filled in for you. Don&rsquo;t change them.
+            {testnet ? (
+              <>Scan with a wallet set to <strong className="text-ink-2">testnet</strong> (Zingo or YWallet, for example), paying test ZEC from the <a href={FAUCET_URL} className="underline underline-offset-2">faucet</a>. The amount and memo are filled in for you. Don&rsquo;t change them.</>
+            ) : (
+              <>Scan with ZODL or any Zcash wallet. The amount and memo are filled in for you. Don&rsquo;t change them.</>
+            )}
           </p>
           <div className="mt-5 flex justify-center">
             <Qr value={uri} size={248} label="Payment QR code" />
@@ -461,7 +467,7 @@ function PayCardFor({ event, ticket, loaded, persisted, memo, meta, onPaid, onFo
           ? "Connecting…"
           : sim
             ? "On the real app, tickets join the public list at random moments up to about three hours apart, so nobody watching can tell when yours was paid. This demo lists them at once."
-            : "After you pay, your ticket shows here within about three hours, often sooner. The public list updates at random moments, so nobody watching can tell when yours was paid."}
+            : `After you pay, your ticket shows here within ${listingWait(meta)}, often sooner. The public list updates at random moments, so nobody watching can tell when yours was paid.`}
       </div>
 
       {meta && !sim && (
