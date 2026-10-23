@@ -24,11 +24,6 @@ class Settings:
     database_url: str = field(
         default_factory=lambda: os.environ.get("CASHR_DATABASE_URL", "sqlite:///./cashr.db")
     )
-    # Keys the refund-address reuse check. Must be stable and secret in production.
-    secret: str = field(default_factory=lambda: os.environ.get("CASHR_SECRET", "dev-only-secret"))
-    # Reused refund addresses are remembered (as keyed digests) for one to two
-    # periods of this many days, then forgotten.
-    address_memory_days: int = field(default_factory=lambda: _int("CASHR_ADDRESS_MEMORY_DAYS", 365))
 
     rpc_url: str = field(default_factory=lambda: os.environ.get("CASHR_RPC_URL", "http://127.0.0.1:8232"))
     rpc_user: str = field(default_factory=lambda: os.environ.get("CASHR_RPC_USER", ""))
@@ -56,6 +51,10 @@ class Settings:
     # moments, about this many minutes apart, scheduled independently of payments,
     # so polling it can't time any payment. 0 updates it on every scan (demo).
     list_delay_min: int = field(default_factory=lambda: _int("CASHR_LIST_DELAY_MIN", 120))
+    # After settling, no-show deposits wait this many minutes before they're swept
+    # (and the event counts as settled), so a door phone that was offline can still
+    # upload its check-ins and those attendees get their refunds.
+    door_sync_grace_min: int = field(default_factory=lambda: _int("CASHR_DOOR_SYNC_GRACE_MIN", 30))
     # Left in an event wallet after the sweep (less than a fee): destroyed on purge.
     # Capped at the wallet's own delete limit (DELETE_MAX_ZAT), above which it refuses every purge.
     dust_zat: int = field(default_factory=lambda: min(_int("CASHR_DUST_ZAT", 20_000), 20_000))

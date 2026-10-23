@@ -201,6 +201,9 @@ class SimChain:
     def tip_height(self) -> int:
         return self.height
 
+    def sync_age(self) -> int | None:
+        return 0  # always caught up
+
     def height_at(self, unix_time: int) -> int | None:
         with self._lock:
             known = [h for h, t in self._block_times.items() if t <= unix_time]

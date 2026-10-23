@@ -156,6 +156,9 @@ impl OpStore {
     pub fn delete_account(&self, account: &str) -> anyhow::Result<()> {
         let c = self.conn.lock().unwrap();
         c.execute("DELETE FROM ops WHERE account = ?1", [account])?;
+        // secure_delete scrubs the database pages, not the WAL's old frames, which
+        // would keep the deleted payouts' txids (and so the attendees they paid).
+        c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
         Ok(())
     }
 
@@ -163,7 +166,8 @@ impl OpStore {
     /// is there for any retry.
     pub fn mark_deleted(&self, account: &str) -> anyhow::Result<()> {
         let c = self.conn.lock().unwrap();
-        c.execute("INSERT OR IGNORE INTO deleted_accounts (account, at) VALUES (?1, ?2)", params![account, now()])?;
+        // No time: it would date the event's purge.
+        c.execute("INSERT OR IGNORE INTO deleted_accounts (account, at) VALUES (?1, 0)", params![account])?;
         Ok(())
     }
 
@@ -192,7 +196,13 @@ impl OpStore {
     /// Forget settled operations after `days`; the API stops asking long before.
     pub fn prune(&self, days: i64) -> anyhow::Result<usize> {
         let c = self.conn.lock().unwrap();
-        Ok(c.execute("DELETE FROM ops WHERE state != 'executing' AND updated < ?1", [now() - days * 86_400])?)
+        // Only operations that never produced a transaction: a key with a txid is
+        // kept for as long as its account, or resubmitting it after the prune would
+        // build a second transaction while the first could still be mined.
+        Ok(c.execute(
+            "DELETE FROM ops WHERE state = 'failed' AND txid IS NULL AND updated < ?1",
+            [now() - days * 86_400],
+        )?)
     }
 }
 

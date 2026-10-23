@@ -5,7 +5,7 @@ from conftest import auth
 
 from cashr.chain.sim import EXPIRY_DELTA, random_unified_address
 from cashr.engine import RSVP_GRACE_BLOCKS
-from cashr.db import Deposit, Event, Payout, Rsvp, SeenAddress
+from cashr.db import Deposit, Event, Payout, Rsvp
 
 
 def tickets(client, event_id):
@@ -228,7 +228,7 @@ def test_unknown_operation_stops_for_a_person(client, make_event, attendee):
     client.chain.op_status = lambda opid: OpStatus("failed", error="operation unknown to wallet")
     client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
     (p,) = admin_view(client, ev, admin)["payouts"]
-    assert p["status"] == "failed" and "paid twice" in p["error"]
+    assert p["status"] == "failed" and "may already have been paid" in p["error"]
 
 
 def test_rejections_are_returned(client, make_event, attendee):
@@ -247,19 +247,31 @@ def test_rejections_are_returned(client, make_event, attendee):
     assert refunds_to(client, second.refund_address) == [ev["deposit_zat"] - 10_000]
 
 
-def test_refund_address_reuse_refused_across_events(client, make_event, attendee):
+def test_refund_address_reuse_refused_within_an_event(client, make_event, attendee):
+    ev = make_event()["event"]
+    a = attendee(ev["id"])
+    pay(client, ev, a.memo())
+    again = attendee(ev["id"])
+    again.refund_address = a.refund_address
+    pay(client, ev, again.memo())
+    assert tickets(client, ev["id"])["rejected"] == [{"h": again.hash, "reason": "returned"}]
+    assert reasons(client, ev["id"]) == [{"h": again.hash, "reason": "address_reused"}]
+
+
+def test_other_events_say_nothing_about_an_address(client, make_event, attendee):
+    # Checking reuse across events let anyone create an event, pay into it with
+    # someone else's refund address, and learn from the outcome whether that
+    # address had paid for an RSVP here. Each event only checks its own RSVPs.
     ev1, ev2 = make_event()["event"], make_event()["event"]
     a = attendee(ev1["id"])
     pay(client, ev1, a.memo())
-    again = attendee(ev2["id"])
-    again.refund_address = a.refund_address
-    pay(client, ev2, again.memo())
-    assert tickets(client, ev2["id"])["rejected"] == [{"h": again.hash, "reason": "returned"}]
-    assert reasons(client, ev2["id"]) == [{"h": again.hash, "reason": "address_reused"}]
+    probe = attendee(ev2["id"])
+    probe.refund_address = a.refund_address
+    pay(client, ev2, probe.memo())
+    assert reasons(client, ev2["id"]) == []
     with client.engine.sessions() as db:
-        # Only a keyed digest is stored, never the address itself.
-        digests = [s.digest for s in db.query(SeenAddress)]
-        assert a.refund_address not in digests and len(digests) == 1
+        tables = {r[0] for r in db.execute(__import__("sqlalchemy").text("SELECT name FROM sqlite_master"))}
+    assert "seen_addresses" not in tables
 
 
 def test_unconfirmed_notes_wait(client, make_event, attendee):
@@ -363,8 +375,7 @@ def test_event_creation_is_rate_limited(tmp_path, chain):
     from cashr.app import create_app
     from cashr.config import Settings
 
-    settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/r.db", run_scanner=False,
-                        secret="s", create_per_hour=2)
+    settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/r.db", run_scanner=False, create_per_hour=2)
     with TestClient(create_app(settings, chain)) as c:
         body = {"title": "x", "starts_at": "2026-10-30T18:00:00Z", "capacity": 5, "deposit_zat": 500_000}
         assert [c.post("/events", json=body).status_code for _ in range(3)] == [201, 201, 429]
@@ -382,7 +393,7 @@ def test_one_process_per_database(tmp_path, chain):
     from cashr.app import create_app
     from cashr.config import Settings
 
-    settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/w.db", run_scanner=False, secret="s")
+    settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/w.db", run_scanner=False)
     first = create_app(settings, chain)
     with pytest.raises(RuntimeError, match="Another cashr API process"):
         create_app(settings, chain)
@@ -530,3 +541,174 @@ def test_minimum_deposit_is_0_001_zec(client):
     body = {"title": "x", "starts_at": "2026-12-01T18:00:00Z", "capacity": 5}
     assert client.post("/events", json=body | {"deposit_zat": 99_999}).status_code == 422
     assert client.post("/events", json=body | {"deposit_zat": 100_000}).status_code == 201
+
+
+def test_a_deposit_whose_memo_arrives_late_is_still_ingested(client, make_event, attendee):
+    # The wallet shows a payment only once its memo is fetched, and a fetch can lag
+    # far behind (catching up after downtime, a Tor outage): an older deposit can
+    # turn up after a much newer one was ingested. It used to fall below the scan
+    # floor for good, and its money was swept to the organiser.
+    created = make_event()
+    ev, admin = created["event"], created["admin_token"]
+    a, b = attendee(ev["id"]), attendee(ev["id"])
+    hidden = {client.chain.pay(ev["address"], ev["deposit_zat"], a.memo())}
+    received = client.chain.received
+    client.chain.received = lambda ref, addr, since=0: [n for n in received(ref, addr, since) if n.txid not in hidden]
+    client.chain.mine(150)
+    pay(client, ev, b.memo())
+    assert admin_view(client, ev, admin)["event"]["rsvp_count"] == 1
+    hidden.clear()
+    client.engine.scan_once(full=True)
+    assert admin_view(client, ev, admin)["event"]["rsvp_count"] == 2
+
+
+def test_the_rsvp_deadline_keeps_its_utc_offset(client, make_event):
+    created = make_event(starts_at="2026-11-01T18:00:00Z", rsvp_closes_at="2026-11-01T15:00:00+00:00")
+    assert created["event"]["rsvp_closes_at"] == "2026-11-01T15:00:00Z"
+    # Read back from the database: a bare time would be taken as the viewer's local time.
+    assert client.get(f"/events/{created['event']['id']}").json()["rsvp_closes_at"] == "2026-11-01T15:00:00Z"
+
+
+def test_events_can_be_made_at_most_a_year_ahead(client, make_event):
+    r = client.post("/events", json={"title": "far", "starts_at": "9999-12-31T00:00:00Z",
+                                     "capacity": 2, "deposit_zat": 500_000})
+    assert r.status_code == 422
+
+
+def test_empty_events_are_retired_a_month_after_creation(client, make_event):
+    from cashr.engine import EMPTY_RETIRE_AFTER
+
+    soon = (datetime.now(timezone.utc) + timedelta(days=200)).isoformat()
+    ev = make_event(starts_at=soon)["event"]
+    client.engine.retire_idle_events()
+    assert status(client, ev["id"]) == "open"
+    with client.engine.sessions() as db:
+        db.get(Event, ev["id"]).created_at = datetime.now(timezone.utc) - EMPTY_RETIRE_AFTER - timedelta(hours=1)
+        db.commit()
+    client.engine.retire_idle_events()
+    assert status(client, ev["id"]) == "purged"
+
+
+def test_settled_events_dont_hold_the_live_event_limit(tmp_path, chain):
+    from fastapi.testclient import TestClient
+
+    from cashr.app import create_app
+    from cashr.config import Settings
+
+    settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/c.db", run_scanner=False,
+                        max_live_events=1, list_delay_min=0, refund_spread_min=0, door_sync_grace_min=0)
+    with TestClient(create_app(settings, chain)) as c:
+        body = {"title": "t", "starts_at": "2026-12-01T19:00:00Z", "capacity": 2, "deposit_zat": 500_000}
+        first = c.post("/events", json=body).json()
+        assert c.post("/events", json=body).status_code == 429
+        c.post(f"/events/{first['event']['id']}/admin/settle", headers=auth(first["admin_token"]))
+        assert c.post("/events", json=body).status_code == 201
+
+
+def test_an_event_that_fails_to_save_leaves_no_wallet_account(client, monkeypatch):
+    accounts_before = set(client.chain._accounts)
+
+    def broken_publish_time():
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(client.engine, "_publish_time", broken_publish_time)
+    with pytest.raises(RuntimeError):
+        client.post("/events", json={"title": "t", "starts_at": "2026-12-01T19:00:00Z",
+                                     "capacity": 2, "deposit_zat": 500_000})
+    assert set(client.chain._accounts) == accounts_before
+
+
+def test_offline_check_ins_uploaded_after_settling_still_refund(client, make_event, attendee):
+    from dataclasses import replace
+
+    fast = client.engine.settings
+    client.engine.settings = replace(fast, door_sync_grace_min=30)
+    created = make_event(forfeit_address=random_unified_address())
+    ev, admin, door = created["event"], created["admin_token"], created["door_token"]
+    came = attendee(ev["id"])
+    pay(client, ev, came.memo())
+    # The door phone recorded the check-in offline; the organiser settles before it syncs.
+    client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
+    r = client.post(f"/events/{ev['id']}/door/sync", json={"ticket_hashes": [came.hash]}, headers=auth(door))
+    assert r.json()["results"] == [{"h": came.hash, "result": "ok"}]
+    advance(client, 3)
+    assert status(client, ev["id"]) == "settling", "nothing is swept during the grace"
+    with client.engine.sessions() as db:  # the grace is over
+        db.get(Event, ev["id"]).sweep_not_before = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+    client.engine.settings = fast
+    client.chain.pay(ev["address"], 20_000, b"")  # the refund's fee, as the dashboard asks
+    settle(client, ev, admin, post=False)
+    assert refunds_to(client, came.refund_address) == [ev["deposit_zat"]]
+    assert admin_view(client, ev, admin)["event"]["forfeited_zat"] == 0
+
+
+def test_the_event_wallet_cant_be_its_own_no_show_fund(client, make_event):
+    created = make_event()
+    ev = created["event"]
+    r = client.post(f"/events/{ev['id']}/admin/fund", json={"address": ev["address"]}, headers=auth(created["admin_token"]))
+    assert r.status_code == 400 and r.json()["error"] == "bad_address"
+
+
+def test_a_failed_payout_blocks_purge(client, make_event, attendee):
+    created = make_event(forfeit_address=random_unified_address())
+    ev, admin = created["event"], created["admin_token"]
+    settle(client, ev, admin)
+    with client.engine.sessions() as db:
+        db.add(Payout(event_id=ev["id"], kind="reject", status="failed", recipients=[
+            {"address": random_unified_address(), "amount_zat": 10_000, "memo": "m", "rsvp_id": None}]))
+        db.commit()
+    r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
+    assert r.status_code == 409 and r.json()["error"] == "payouts_failed"
+
+
+def test_a_return_smaller_than_a_fee_is_kept(client, make_event, attendee):
+    ev = make_event()["event"]
+    a = attendee(ev["id"])
+    pay(client, ev, a.memo(), amount=15_000)  # wrong amount; returning 5,000 would cost 10,000
+    assert refunds_to(client, a.refund_address) == []
+    with client.engine.sessions() as db:
+        assert db.query(Payout).filter(Payout.event_id == ev["id"]).count() == 0
+
+
+def test_rsvps_close_when_the_event_starts(client, make_event, attendee):
+    started = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    ev = make_event(starts_at=started)["event"]
+    assert client.get(f"/events/{ev['id']}").json()["accepting_rsvps"] is False
+
+
+def test_public_wallet_errors_say_nothing_about_the_wallet(client, monkeypatch):
+    from cashr.chain import ChainError
+
+    def down():
+        raise ChainError("connection refused: http://wallet:8232")
+
+    monkeypatch.setattr(client.chain, "tip_height", down)
+    r = client.post("/events", json={"title": "t", "starts_at": "2026-12-01T19:00:00Z",
+                                     "capacity": 2, "deposit_zat": 500_000})
+    assert r.status_code == 502 and "wallet:8232" not in r.text
+
+
+def test_oversized_requests_are_refused(client):
+    r = client.post("/events", content=b"x" * 70_000, headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
+
+
+def test_retry_never_resends_a_payout_the_wallet_forgot(client, make_event):
+    from cashr.engine import UNKNOWN_TO_WALLET
+
+    created = make_event()
+    ev, admin = created["event"], created["admin_token"]
+    with client.engine.sessions() as db:
+        db.add(Payout(event_id=ev["id"], kind="reject", status="failed", error=UNKNOWN_TO_WALLET, recipients=[
+            {"address": random_unified_address(), "amount_zat": 10_000, "memo": "m", "rsvp_id": None}]))
+        db.commit()
+    client.post(f"/events/{ev['id']}/admin/retry", headers=auth(admin))
+    assert [p["status"] for p in admin_view(client, ev, admin)["payouts"]] == ["failed"]
+
+
+def test_health_fails_when_the_wallet_stops_keeping_up(client, monkeypatch):
+    assert client.get("/health").status_code == 200
+    monkeypatch.setattr(client.chain, "sync_age", lambda: 3600)
+    r = client.get("/health")
+    assert r.status_code == 503 and r.json()["ok"] is False

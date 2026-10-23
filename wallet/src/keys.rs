@@ -25,6 +25,11 @@ use secrecy::{ExposeSecret, SecretVec};
 const AAD: &[u8] = b"cashr-wallet seed v1";
 /// Seeds written before the rename to cashr were bound to this; they still open.
 const OLD_AAD: &[u8] = b"unlisted-wallet seed v1";
+/// A known value encrypted under the key on first start, so a wrong key is
+/// refused at startup instead of quietly failing to open every seed.
+const CHECK_FILE: &str = "key-check";
+const CHECK_AAD: &[u8] = b"cashr-wallet key check v1";
+const CHECK_PLAINTEXT: &[u8] = b"cashr-wallet";
 
 pub struct SeedStore {
     dir: PathBuf,
@@ -34,12 +39,72 @@ pub struct SeedStore {
 impl SeedStore {
     /// `key_hex` is 64 hex characters (32 bytes).
     pub fn open(dir: &Path, key_hex: &str) -> anyhow::Result<Self> {
-        let key = hex::decode(key_hex.trim()).context("CASHR_WALLET_SEED_KEY must be hex")?;
+        let key = zeroize::Zeroizing::new(hex::decode(key_hex.trim()).context("CASHR_WALLET_SEED_KEY must be hex")?);
         if key.len() != 32 {
             bail!("CASHR_WALLET_SEED_KEY must be 32 bytes (64 hex characters)");
         }
         fs::create_dir_all(dir)?;
-        Ok(Self { dir: dir.to_path_buf(), cipher: ChaCha20Poly1305::new(Key::from_slice(&key)) })
+        let store = Self { dir: dir.to_path_buf(), cipher: ChaCha20Poly1305::new(Key::from_slice(&key)) };
+        store.check_key()?;
+        store.retry_unreadable()?;
+        Ok(store)
+    }
+
+    /// Refuses a key that isn't the one these seeds were written under. A store
+    /// from before the check file existed is checked against its seeds instead.
+    fn check_key(&self) -> anyhow::Result<()> {
+        let path = self.dir.join(CHECK_FILE);
+        let wrong = || anyhow!("CASHR_WALLET_SEED_KEY is not the key this wallet's seeds were written under; refusing to start");
+        if let Ok(data) = fs::read(&path) {
+            if data.len() < 12 {
+                bail!("the seed key check file is damaged");
+            }
+            let (nonce, ct) = data.split_at(12);
+            let pt = self
+                .cipher
+                .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad: CHECK_AAD })
+                .map_err(|_| wrong())?;
+            if pt != CHECK_PLAINTEXT {
+                return Err(wrong());
+            }
+            return Ok(());
+        }
+        let mut seeds = vec![];
+        for entry in fs::read_dir(&self.dir)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            // Committed seeds only: a staged one may be cut short by a crash.
+            if let Some(stem) = name.strip_suffix(".seed").filter(|s| !s.starts_with("staged-")) {
+                seeds.push(stem.to_string());
+            }
+        }
+        if !seeds.is_empty() && !seeds.iter().any(|s| self.load(s).is_ok()) {
+            return Err(wrong());
+        }
+        let mut nonce = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce);
+        let ct = self
+            .cipher
+            .encrypt(Nonce::from_slice(&nonce), Payload { msg: CHECK_PLAINTEXT, aad: CHECK_AAD })
+            .map_err(|_| anyhow!("seed key check encryption failed"))?;
+        let mut data = nonce.to_vec();
+        data.extend_from_slice(&ct);
+        write_private(&path, &data)?;
+        Ok(())
+    }
+
+    /// Staged seeds set aside as unreadable get another try now the key is known
+    /// to be right (they may have been set aside under a wrong one).
+    fn retry_unreadable(&self) -> anyhow::Result<()> {
+        for entry in fs::read_dir(&self.dir)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = name.strip_suffix(".unreadable") {
+                let back = self.path(stem);
+                if !back.exists() {
+                    fs::rename(self.dir.join(&name), back)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -164,6 +229,19 @@ mod tests {
     }
 
     #[test]
+    fn a_wrong_key_is_refused_even_for_a_store_from_before_the_check() {
+        let dir = std::env::temp_dir().join(format!("uw-seeds-{}", uuid::Uuid::new_v4()));
+        let store = SeedStore::open(&dir, &"11".repeat(32)).unwrap();
+        let staged = store.stage(&SeedStore::generate()).unwrap();
+        store.commit(&staged, "acct").unwrap();
+        fs::remove_file(dir.join(CHECK_FILE)).unwrap();
+        assert!(SeedStore::open(&dir, &"22".repeat(32)).is_err());
+        assert!(SeedStore::open(&dir, &"11".repeat(32)).is_ok(), "the right key writes the check file");
+        assert!(dir.join(CHECK_FILE).exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn seeds_round_trip_and_are_encrypted() {
         let dir = std::env::temp_dir().join(format!("uw-seeds-{}", uuid::Uuid::new_v4()));
         let store = SeedStore::open(&dir, &"11".repeat(32)).unwrap();
@@ -173,8 +251,7 @@ mod tests {
         let raw = fs::read(dir.join("acct.seed")).unwrap();
         assert!(!raw.windows(32).any(|w| w == seed.expose_secret().as_slice()));
         assert_eq!(store.load("acct").unwrap().expose_secret(), seed.expose_secret());
-        let wrong = SeedStore::open(&dir, &"22".repeat(32)).unwrap();
-        assert!(wrong.load("acct").is_err());
+        assert!(SeedStore::open(&dir, &"22".repeat(32)).is_err(), "a wrong key is refused at startup");
         store.delete("acct").unwrap();
         assert!(store.load("acct").is_err());
         let _ = fs::remove_dir_all(dir);

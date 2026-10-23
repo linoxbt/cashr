@@ -4,7 +4,7 @@ from conftest import auth
 from test_lifecycle import admin_view, checkin, pay, reasons, refunds_to, settle, tickets
 
 from cashr.chain.sim import random_unified_address
-from cashr.db import Event, Payout, Rsvp, SeenAddress
+from cashr.db import Deposit, Event, Payout, Rsvp
 
 
 def test_public_list_hides_check_ins_until_settlement(client, make_event, attendee):
@@ -68,21 +68,19 @@ def test_seats_are_random_and_refund_addresses_hidden(client, make_event, attend
     assert all("height" not in d for d in admin_view(client, ev, admin)["deposits"])
 
 
-def test_used_address_digests_are_forgotten_after_two_periods(client, make_event, attendee):
-    ev = make_event()["event"]
-    pay(client, ev, attendee(ev["id"]).memo())
-    engine = client.engine
-    now = engine._period()
-    with engine.sessions() as db:
-        db.add(SeenAddress(digest="legacy", period=None))
-        db.add(SeenAddress(digest="old", period=now - 2))
-        db.add(SeenAddress(digest="last", period=now - 1))
-        db.commit()
-    engine.forget_old_addresses()
-    with engine.sessions() as db:
-        kept = {s.digest: s.period for s in db.query(SeenAddress)}
-    assert "old" not in kept
-    assert kept["last"] == now - 1 and kept["legacy"] == now and len(kept) == 3
+def test_stored_rows_dont_date_or_order_payments(client, make_event, attendee):
+    # A seized database: an accepted deposit's txid must not lead to a ticket, no
+    # deposit keeps a block height, and RSVP ids don't count up in payment order.
+    ev = make_event(capacity=10)["event"]
+    people = [attendee(ev["id"]) for _ in range(6)]
+    for p in people:
+        pay(client, ev, p.memo())
+    with client.engine.sessions() as db:
+        deps = db.query(Deposit).filter(Deposit.event_id == ev["id"]).all()
+        assert deps and all(d.height == 0 and d.ticket_hash == "" for d in deps)
+        ids = [r.id for r in db.query(Rsvp).filter(Rsvp.event_id == ev["id"]).order_by(Rsvp.ticket_hash)]
+    by_payment = [ids[sorted(p.hash for p in people).index(p.hash)] for p in people]
+    assert by_payment != sorted(by_payment)
 
 
 def test_deadline_is_judged_by_when_a_payment_was_mined(client, make_event, attendee):
@@ -126,8 +124,7 @@ def test_api_docs_are_off_outside_sim(tmp_path):
     from cashr.chain.sim import SimChain
     from cashr.config import Settings
 
-    app = create_app(Settings(chain_mode="rpc", database_url=f"sqlite:///{tmp_path}/d.db", run_scanner=False,
-                              secret="s"), SimChain("main"))
+    app = create_app(Settings(chain_mode="rpc", database_url=f"sqlite:///{tmp_path}/d.db", run_scanner=False), SimChain("main"))
     with TestClient(app) as c:
         assert c.get("/docs").status_code == 404 and c.get("/openapi.json").status_code == 404
 
@@ -197,8 +194,7 @@ def test_the_public_list_changes_only_on_its_own_schedule(tmp_path, attendee):
     from cashr.config import Settings
 
     chain = SimChain("main", received_conf=1, change_conf=1)
-    settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/b.db", run_scanner=False,
-                        secret="s", list_delay_min=120, refund_spread_min=0)
+    settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/b.db", run_scanner=False, list_delay_min=120, refund_spread_min=0)
     with TestClient(create_app(settings, chain)) as c:
         c.chain, c.engine = chain, c.app.state.engine
         created = c.post("/events", json={"title": "x", "starts_at": "2026-12-01T18:00:00Z", "capacity": 2,
@@ -310,11 +306,10 @@ def test_only_the_orchard_receiver_of_a_refund_address_is_kept(client, make_even
         stored = db.query(Rsvp).filter(Rsvp.event_id == ev["id"]).one().refund_address
     assert decode_unified(stored, "u") == {"orchard": orchard}
     # Reuse is judged on the Orchard receiver, whatever else the address carried.
-    again = attendee(make_event()["event"]["id"])
+    again = attendee(ev["id"])
     again.refund_address = unified_address("main", {0x03: orchard})
-    ev2 = {"id": again.event_id, **client.get(f"/events/{again.event_id}").json()}
-    pay(client, ev2, again.memo())
-    assert reasons(client, again.event_id) == [{"h": again.hash, "reason": "address_reused"}]
+    pay(client, ev, again.memo())
+    assert reasons(client, ev["id"]) == [{"h": again.hash, "reason": "address_reused"}]
 
 
 def test_purge_wipes_what_could_date_the_event(client, make_event, attendee):
@@ -338,3 +333,59 @@ def test_payments_built_before_the_rename_still_count(client, make_event, attend
     assert try_decode_memo(old) is not None
     pay(client, ev, old)
     assert [t["h"] for t in tickets(client, ev["id"])["tickets"]] == [a.hash]
+
+
+def _purged_event_with_ticket(client, make_event, attendee, title):
+    created = make_event(title=title, forfeit_address=random_unified_address())
+    ev, admin = created["event"], created["admin_token"]
+    a = attendee(ev["id"])
+    client.chain.pay(ev["address"], ev["deposit_zat"], a.memo())
+    client.engine.scan_once(full=True)
+    client.post(f"/events/{ev['id']}/admin/settle", headers=auth(admin))
+    for _ in range(10):
+        client.chain.mine()
+        client.engine.scan_once(full=True)
+    return ev, admin, a
+
+
+def _db_files_mention(path, *needles):
+    found = []
+    for f in path.iterdir():
+        data = f.read_bytes()
+        found += [(f.name, n) for n in needles if n.encode() in data]
+    return found
+
+
+def test_purge_leaves_nothing_in_the_wal_even_with_a_reader(client, make_event, attendee, tmp_path):
+    # A read in progress during the purge is waited out, then the WAL is emptied.
+    import sqlite3
+    import threading
+    ev, admin, a = _purged_event_with_ticket(client, make_event, attendee, "SecretTitleQQ")
+    reader = sqlite3.connect(tmp_path / "t.db", check_same_thread=False)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM events").fetchall()
+    threading.Timer(1.0, reader.rollback).start()  # a slow read, finished mid-purge
+    r = client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin))
+    assert r.status_code == 200, r.text
+    reader.close()
+    assert _db_files_mention(tmp_path, "SecretTitleQQ", a.hash) == []
+
+
+def test_a_rewrite_blocked_for_good_is_finished_later(client, make_event, attendee, tmp_path, monkeypatch):
+    # A reader that outlasts the wait used to make the rewrite fail quietly, leaving
+    # the purged title and ticket hash in the WAL until some later purge.
+    import sqlite3
+    from cashr import db as dbmod
+    monkeypatch.setattr(dbmod, "COMPACT_BUSY_MS", 50)
+    monkeypatch.setattr(dbmod, "COMPACT_ATTEMPTS", 1)
+    ev, admin, a = _purged_event_with_ticket(client, make_event, attendee, "SecretTitleRR")
+    reader = sqlite3.connect(tmp_path / "t.db")
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM events").fetchall()
+    assert client.post(f"/events/{ev['id']}/admin/purge", headers=auth(admin)).status_code == 200
+    reader.rollback()
+    reader.close()
+    assert _db_files_mention(tmp_path, "SecretTitleRR"), "the reader really did block the rewrite"
+    # Still owed, and finished on the scanner's next slow turn.
+    client.engine.scan_once(full=True)
+    assert _db_files_mention(tmp_path, "SecretTitleRR", a.hash) == []
