@@ -51,12 +51,16 @@ A note is processed once it has `CASHR_MIN_CONF` confirmations, in `(height, txi
    The RSVP page prevents this before payment.
 3. **Otherwise rejected, and returned minus `CASHR_REJECT_FEE_ZAT`, if any of:** wrong event id, RSVPs closed
    (status not `open`, or past `rsvp_closes_at`; a payment mined within 2 blocks of the close height, recorded when
-   the organiser closed or estimated back from the deadline, still counts), amount ≠ deposit, duplicate ticket hash, refund address used
-   before (checked against an HMAC-SHA256 digest under `CASHR_SECRET`), or event full. A return that would be
-   ≤ 0 is kept as float.
-4. **Otherwise accepted:** a random free seat (counting up would reveal payment order), and a digest of the refund
-   address recorded with its period. Digests are forgotten after one to two periods of
-   `CASHR_ADDRESS_MEMORY_DAYS` (default 365), since they outlive purges.
+   the organiser closed or estimated back from the deadline, still counts), amount ≠ deposit, duplicate ticket hash, refund address
+   already used by another RSVP to this event, or event full. A return smaller than the fee itself is kept as float.
+   Reuse is checked within the event only: checking other events would tell anyone who pays into their own event
+   with someone else's address whether that address had paid for an RSVP here.
+4. **Otherwise accepted:** a random free seat and a random row id (counting up would reveal payment order). The
+   deposit row keeps its transaction id (so it is never counted twice) but neither its block height nor, for an
+   accepted RSVP, its ticket hash.
+
+RSVPs close at `rsvp_closes_at`, and at the latest when the event starts. Every deposit the wallet reports is read
+whatever its height (from the event's creation height), since a payment's memo can arrive long after newer ones.
 
 Events expose `accepting_rsvps` (open and before the deadline); the RSVP page shows payment details only while it
 is true.
@@ -91,6 +95,8 @@ Refunds, returns and sweeps are payouts: `queued → submitted → broadcast →
   the organiser tops up about 0.00015 ZEC per refund. Server-written memos never name the event, because they stay in the recipient's wallet
   for good: refunds say `cashr: deposit refunded.`, returns `cashr: payment returned (<reason>).`, sweeps
   `cashr: no-show deposits.` Fees come from forfeits and float. RSVPs that were not checked in are forfeited.
+* Settling waits `CASHR_DOOR_SYNC_GRACE_MIN` minutes (default 30) before sweeping, so a door phone that was offline
+  can still upload its check-ins (`/door/sync`); each one turns a forfeited deposit back into a refund.
 * When every payout is `done` and nothing in the event wallet is still confirming, the whole spendable balance minus
   the ZIP 317 fee is swept to the no-show fund address (`z_sweep`), repeating until less than `CASHR_DUST_ZAT`
   remains. Then the event is `settled`.

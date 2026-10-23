@@ -6,8 +6,8 @@ export default function Tickets() {
   return (
     <div className="mx-auto max-w-page px-4 sm:px-8">
       <ActionHeader eyebrow="The refund" title="Your tickets">
-        Every ticket on this device, live: awaiting payment, going, checked in, refunded. Open one to show its QR code at
-        the door.
+        Every ticket on this device. Check one to see whether it is listed, refunded or returned; open it to show its QR
+        code at the door.
       </ActionHeader>
       <div className="mt-6 grid gap-5 md:grid-cols-[1.4fr_1fr]">
         <Channel n="03" title="On this device">

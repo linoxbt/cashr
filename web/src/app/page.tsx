@@ -27,7 +27,7 @@ const SEIZED = [
   ["Emails / phone numbers", "Every attendee", "None"],
   ["Wallet or card details", "Every attendee", "None"],
   ["Who paid", "Yes", "Hidden by the shielded pool"],
-  ["Who showed up", "Check-in list with timestamps", "A count"],
+  ["Who showed up", "Check-in list with timestamps", "Which anonymous tickets came, no times; only a count after the purge"],
   ["After the event", "Kept forever", "Deleted with one click"],
 ];
 

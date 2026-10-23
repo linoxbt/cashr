@@ -4,9 +4,9 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
-import { Pill, Spinner, formatWhen, usePoll } from "@/components/ui";
+import { Pill, Spinner, formatWhen, sharedMeta, usePoll } from "@/components/ui";
 import { API_CONFIGURED, api, type Meta, type PublicEvent, type RsvpStatus } from "@/lib/api";
 import { linkTarget } from "@/lib/links";
 import { forgetEvent, forgetTicket, listSavedEvents, listTickets, type SavedEvent, type StoredTicket } from "@/lib/storage";
@@ -26,10 +26,13 @@ export function Channel({ n, title, children }: { n: string; title: string; chil
 
 export function ServerStatus() {
   const [meta, setMeta] = useState<Meta | null | undefined>(undefined);
+  const first = useRef(true);
   usePoll(
     async () => {
       try {
-        setMeta(await api.meta());
+        // The first look shares the page's request; later ones check the server again.
+        setMeta(await (first.current ? sharedMeta() : api.meta()));
+        first.current = false;
       } catch {
         setMeta(null);
       }
@@ -186,7 +189,7 @@ export function MyTickets() {
           const st = status[t.eventId];
           return (
             <li key={t.eventId} className="flex items-center justify-between gap-3 px-2 py-3">
-              <Link href={`/e/${t.eventId}`} className="min-w-0 hover:underline">
+              <Link href={`/e/${t.eventId}`} prefetch={false} className="min-w-0 hover:underline">
                 <div className="truncate font-medium">{t.title ?? t.eventId}</div>
                 <div className="osd mt-0.5 text-[11px] text-ink-4">{t.startsAt ? formatWhen(t.startsAt) : "Open to see details"}</div>
               </Link>

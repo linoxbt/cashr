@@ -42,6 +42,8 @@ const FACING_KEY = "cashr.door.camera";
 
 // QR decoding is costly on phones; this is plenty for people walking up.
 const SCAN_INTERVAL_MS = 125;
+// How long a ticket must be out of view before the camera reads it as a new scan.
+const REPEAT_AFTER_MS = 5_000;
 
 export default function Door() {
   const { id } = useParams<{ id: string }>();
@@ -80,9 +82,18 @@ function DoorFor({ id }: { id: string }) {
     try {
       const sent = readJson<string[]>(queueKey, []);
       if (sent.length) {
-        const res = await api.syncCheckIns(id, sent, token);
-        // Offline check-ins the server didn't accept (e.g. the event was already settled).
-        const bad = res.results.filter((r) => r.result === "event_closed" || r.result === "unknown").length;
+        let bad: number;
+        try {
+          const res = await api.syncCheckIns(id, sent, token);
+          // Offline check-ins the server didn't accept (e.g. the leftover deposits were already swept).
+          bad = res.results.filter((r) => r.result === "event_closed" || r.result === "unknown").length;
+        } catch (e) {
+          // A request the server rejects outright would be rejected every time: drop it
+          // (counted as refused) rather than leave the door stuck offline behind it.
+          const rejected = e instanceof ApiError && e.status >= 400 && e.status < 500 && ![401, 403, 404].includes(e.status);
+          if (!rejected) throw e;
+          bad = sent.length;
+        }
         if (bad) setRefused((n) => n + bad);
         // Remove only what was sent: a scan queued while the request was out stays.
         const remaining = [...readJson<string[]>(queueKey, [])];
@@ -129,11 +140,18 @@ function DoorFor({ id }: { id: string }) {
     });
   }, [cacheKey]);
 
-  const check = useCallback(async (text: string) => {
-    if (busy.current || !token) return;
+  /** Check one ticket code. False if another check was still running and this one wasn't made. */
+  const check = useCallback(async (text: string): Promise<boolean> => {
+    if (busy.current || !token) return false;
     const parsed = parseTicketQr(text);
-    if (!parsed) return setVerdict({ kind: "unknown" });
-    if (parsed.eventId !== id) return setVerdict({ kind: "other_event" });
+    if (!parsed) {
+      setVerdict({ kind: "unknown" });
+      return true;
+    }
+    if (parsed.eventId !== id) {
+      setVerdict({ kind: "other_event" });
+      return true;
+    }
     busy.current = true;
     try {
       // The door only ever handles the hash; the secret is discarded here.
@@ -147,16 +165,23 @@ function DoorFor({ id }: { id: string }) {
       } catch (e) {
         if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
           setAuthError(true);
-          return;
+          return true;
         }
         if (!isUnreachable(e)) {
-          return setVerdict({ kind: "error", detail: e instanceof Error ? e.message : undefined });
+          setVerdict({ kind: "error", detail: e instanceof Error ? e.message : undefined });
+          return true;
         }
         // Offline, timed out, or the host can't reach the API: decide from the
         // saved list and queue the check-in.
         setOnline(false);
-        if (!local) return setVerdict({ kind: "unverified", offline: true });
-        if (local.checked_in) return setVerdict({ kind: "already", seat: local.seat, offline: true });
+        if (!local) {
+          setVerdict({ kind: "unverified", offline: true });
+          return true;
+        }
+        if (local.checked_in) {
+          setVerdict({ kind: "already", seat: local.seat, offline: true });
+          return true;
+        }
         markLocal(hash);
         const q = [...readJson<string[]>(queueKey, []), hash];
         writeJson(queueKey, q);
@@ -168,6 +193,7 @@ function DoorFor({ id }: { id: string }) {
     } finally {
       busy.current = false;
     }
+    return true;
   }, [id, token, manifest, markLocal, queueKey]);
 
   // Clear the verdict after a few seconds so the next person can scan.
@@ -225,9 +251,13 @@ function DoorFor({ id }: { id: string }) {
         ctx.drawImage(video, 0, 0, w, h);
         const code = jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: "dontInvert" });
         const now = Date.now();
-        if (code?.data && (code.data !== lastScan.current.text || now - lastScan.current.at > 4000)) {
+        if (code?.data) {
+          // The same ticket held in front of the camera is checked once: it counts as
+          // new only after it has been out of view for a while (otherwise a guest who
+          // was just let in would read "Already checked in" a moment later).
+          const again = code.data === lastScan.current.text && now - lastScan.current.at < REPEAT_AFTER_MS;
           lastScan.current = { text: code.data, at: now };
-          check(code.data);
+          if (!again) void check(code.data);
         }
       }
       raf = requestAnimationFrame(tick);
@@ -315,10 +345,10 @@ function DoorFor({ id }: { id: string }) {
 
       <form
         className="mt-5 flex gap-2"
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
-          check(manual);
-          setManual("");
+          // Kept in the box if a camera scan was mid-check, so pressing Check again works.
+          if (await check(manual)) setManual("");
         }}
       >
         <label htmlFor="ticket-code" className="sr-only">Ticket code</label>

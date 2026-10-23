@@ -135,13 +135,13 @@ const EVENTS = "cashr.events.v1";
 
 export function listTickets(): StoredTicket[] {
   return Object.values(read<Record<string, StoredTicket>>(local(), TICKETS, {})).sort((a, b) =>
-    b.createdAt.localeCompare(a.createdAt),
+    String(b?.createdAt ?? "").localeCompare(String(a?.createdAt ?? "")),
   );
 }
 
 export function listSavedEvents(): SavedEvent[] {
   return Object.values(read<Record<string, SavedEvent>>(local(), EVENTS, {})).sort((a, b) =>
-    b.savedAt.localeCompare(a.savedAt),
+    String(b?.savedAt ?? "").localeCompare(String(a?.savedAt ?? "")),
   );
 }
 

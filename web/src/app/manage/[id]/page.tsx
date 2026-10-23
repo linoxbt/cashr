@@ -8,7 +8,7 @@ import { Qr } from "@/components/Qr";
 import { CopyField, Notice, PageState, Pill, Spinner, Stat, formatWhen, useMeta, usePoll } from "@/components/ui";
 import { api, ApiError, isEventId, type AdminView, type PayoutStatus } from "@/lib/api";
 import { REJECTION_TEXT, addressProblem, zatToZec, zip321 } from "@/lib/codec";
-import { takeLinkToken } from "@/lib/storage";
+import { forgetEvent, takeLinkToken } from "@/lib/storage";
 
 type Tab = "overview" | "money" | "seized";
 
@@ -21,7 +21,7 @@ const ACTIONS: Record<string, { label: string; confirm: string; tone: "primary" 
   settle: {
     label: "End event & refund",
     confirm:
-      "Refund everyone who checked in and forfeit the rest? The door stops working and this can't be undone.\n\nFirst make sure every door phone shows no check-ins waiting to sync: check-ins synced after this are refused.",
+      "Refund everyone who checked in and forfeit the rest? The door stops working and this can't be undone.\n\nA door phone that was offline should sync soon: its check-ins still count until the leftover deposits are swept.",
     tone: "primary",
   },
   retry: { label: "Retry failed payouts", confirm: "Try the failed payouts again?", tone: "secondary" },
@@ -55,7 +55,10 @@ function ManageFor({ id }: { id: string }) {
     async () => {
       if (!token) return;
       try {
-        setView(await api.admin(id, token));
+        const v = await api.admin(id, token);
+        // Purged: the saved links lead to an empty event now, so this device forgets them.
+        if (v.event.status === "purged") forgetEvent(id);
+        setView(v);
         setError(null);
         setLoadedAt(new Date());
       } catch (e) {
@@ -117,7 +120,7 @@ function ManageFor({ id }: { id: string }) {
           <h1 className="mt-2 text-5xl ">{ev.title}</h1>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Link href={`/e/${ev.id}`} className="btn-secondary">RSVP page</Link>
+          <Link href={`/e/${ev.id}`} prefetch={false} className="btn-secondary">RSVP page</Link>
           {available.map((a) => (
             <button
               key={a}
@@ -159,6 +162,13 @@ function ManageFor({ id }: { id: string }) {
             <strong>Money</strong>. Purging is blocked until then, because it destroys the wallet keys.
           </Notice>
         )}
+        {ev.status === "settling" && ev.sweep_after && new Date(ev.sweep_after) > new Date() && (
+          <Notice title="Waiting for offline door phones">
+            Check-ins a door phone uploads before{" "}
+            {new Date(ev.sweep_after).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })} still get
+            their refund. After that, the leftover deposits are swept and the event is settled.
+          </Notice>
+        )}
         {ev.status === "purged" && (
           <Notice tone="ok" title="Purged">Every ticket hash, refund address and payment record has been deleted, and the event&rsquo;s wallet keys were destroyed. Only the totals below remain.</Notice>
         )}
@@ -167,7 +177,7 @@ function ManageFor({ id }: { id: string }) {
       <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="RSVPs" value={`${ev.rsvp_count} / ${ev.capacity}`} sub={`${ev.seats_left} seats left`} />
         <Stat label="Checked in" value={ev.checked_in_count} sub={ev.rsvp_count ? `${Math.round((ev.checked_in_count / ev.rsvp_count) * 100)}% of RSVPs` : "No RSVPs yet"} />
-        <Stat label="Returned payments" value={ev.rejected_count} sub="Full, late, wrong amount or reused address" />
+        <Stat label="Returned payments" value={ev.rejected_count} sub="Full, late, wrong amount or a repeated address" />
         <Stat
           label="Wallet balance"
           value={view.balance_zat === null ? "—" : `${zatToZec(view.balance_zat)} ZEC`}
@@ -176,20 +186,24 @@ function ManageFor({ id }: { id: string }) {
       </div>
 
       <div className="mt-10 border-b border-ink/10">
-        <nav className="-mb-px flex gap-6 text-sm" aria-label="Dashboard sections">
+        <div role="tablist" className="-mb-px flex gap-6 overflow-x-auto text-sm" aria-label="Dashboard sections">
           {([["overview", "Tickets"], ["money", "Money"], ["seized", "What a seizure reveals"]] as [Tab, string][]).map(([k, label]) => (
             <button
               key={k}
+              role="tab"
+              id={`tab-${k}`}
+              aria-selected={tab === k}
+              aria-controls="tab-panel"
               onClick={() => setTab(k)}
-              className={`border-b-2 pb-3 font-medium ${tab === k ? "border-ink text-ink" : "border-transparent text-ink-3 hover:text-ink"}`}
+              className={`whitespace-nowrap border-b-2 pb-3 font-medium ${tab === k ? "border-ink text-ink" : "border-transparent text-ink-3 hover:text-ink"}`}
             >
               {label}
             </button>
           ))}
-        </nav>
+        </div>
       </div>
 
-      <div className="mt-6">
+      <div className="mt-6" role="tabpanel" id="tab-panel" aria-labelledby={`tab-${tab}`}>
         {tab === "overview" && <TicketsTab view={view} />}
         {tab === "money" && <MoneyTab view={view} token={token} onChange={() => setNonce((n) => n + 1)} />}
         {tab === "seized" && <SeizedTab view={view} />}
@@ -280,8 +294,9 @@ function MoneyTab({ view, token, onChange }: { view: AdminView; token: string; o
   const ev = view.event;
   const meta = useMeta();
   return (
-    <div className="grid gap-6 lg:grid-cols-[1fr_20rem]">
-      <div className="space-y-6">
+    // minmax(0, …): the tables scroll inside their cards instead of widening the page on a phone.
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+      <div className="min-w-0 space-y-6">
         <div className="grid gap-4 sm:grid-cols-3">
           <Stat label="Refunded" value={`${zatToZec(ev.refunded_zat)} ZEC`} />
           <Stat
@@ -375,6 +390,9 @@ function MoneyTab({ view, token, onChange }: { view: AdminView; token: string; o
   );
 }
 
+// Marks what the server holds but never sends to this dashboard.
+const HELD = "‹held by the server›";
+
 function SeizedTab({ view }: { view: AdminView }) {
   const dump = {
     event: {
@@ -391,27 +409,29 @@ function SeizedTab({ view }: { view: AdminView }) {
       },
     },
     fund_address: view.event.forfeit_address || null,
-    rsvps: view.rsvps.map((r) => ({ seat: r.seat, ticket_hash: r.ticket_hash, refund_address: r.refund_address, checked_in: r.checked_in, status: r.status })),
-    deposits: view.deposits.map((d) => ({ amount_zat: d.amount_zat, kind: d.kind, reason: d.reason || undefined })),
-    payouts: view.payouts.map((p) => ({ kind: p.kind, status: p.status, recipients: p.recipients, amount_zat: p.amount_zat, txid: p.txid || undefined })),
+    rsvps: view.rsvps.map((r) => ({ seat: r.seat, ticket_hash: r.ticket_hash, refund_address: HELD, checked_in: r.checked_in, status: r.status })),
+    deposits: view.deposits.map((d) => ({ txid: HELD, amount_zat: d.amount_zat, kind: d.kind, reason: d.reason || undefined })),
+    payouts: view.payouts.map((p) => ({ kind: p.kind, status: p.status, recipient_addresses: HELD, amount_zat: p.amount_zat, txid: p.txid || undefined })),
   };
   return (
-    <div className="grid gap-6 lg:grid-cols-[22rem_1fr]">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[22rem_minmax(0,1fr)]">
       <div className="space-y-4 text-sm leading-relaxed text-ink-2">
         <h2 className="text-3xl text-ink">Imagine this server was seized tonight.</h2>
         <p>
-          On the right is every record cashr holds for this event, except two it can&rsquo;t show you: the SHA-256
-          hashes of your manage and door links, and the event wallet&rsquo;s encrypted seed. Look for a name, an email, a
-          phone number or the address someone paid from. None of them exist.
+          On the right is every record cashr holds for this event. Fields marked{" "}
+          <code className="text-ink">{HELD}</code> are held by the server but never sent to this dashboard. Look for a
+          name, an email, a phone number or the address someone paid from. None of them exist.
         </p>
         <ul className="list-disc space-y-1.5 pl-5">
           <li><strong>Ticket hashes</strong> are SHA-256 of secrets that live only on attendees&rsquo; phones.</li>
-          <li><strong>Refund addresses</strong> are one-time shielded addresses. The chain can&rsquo;t link them to their owners. They&rsquo;re shortened here because you never need them; the server keeps them in full until the purge, inside the RSVPs and the refund payouts.</li>
-          <li><strong>Deposit transactions</strong> are shielded. Their sender is hidden from everyone, us included.</li>
+          <li><strong>Refund addresses</strong> are one-time shielded addresses (only their Orchard part), kept in full until the purge in the RSVPs and refund payouts. The chain can&rsquo;t link them to their owners.</li>
+          <li><strong>Deposit transaction ids</strong> stop a payment being counted twice. They&rsquo;re shielded, so their sender is hidden from everyone, us included, and an accepted deposit&rsquo;s id isn&rsquo;t stored with its ticket.</li>
+          <li>Also held: the event&rsquo;s wallet address, the chain height when it was created and when RSVPs closed, when its public list next updates, the SHA-256 hashes of your manage and door links, and the event wallet&rsquo;s encrypted seed with the deposits&rsquo; memos.</li>
         </ul>
         <p>
           Purging deletes these records, the event&rsquo;s title, date and place, <em>and</em> its wallet keys and seed,
-          so not even the server can decrypt the event&rsquo;s memos from the chain again. Only the totals remain.
+          so not even the server can decrypt the event&rsquo;s memos from the chain again. Only the totals remain. The
+          server&rsquo;s encrypted nightly backups still hold them for up to a week, until they rotate out.
         </p>
       </div>
       <pre className="max-h-[36rem] overflow-auto whitespace-pre-wrap break-all panel bg-well/60 p-5 font-mono text-xs leading-relaxed text-ink-2">

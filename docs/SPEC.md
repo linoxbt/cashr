@@ -13,7 +13,7 @@ can reconstruct who RSVPed or who came.
 |---|---|---|
 | Anyone | `/`, `/how-it-works`, `/privacy` | Understand the product and its threat model |
 | Organiser | `/new` | Create an event; receive public, manage and door links once |
-| Attendee | `/e/[id]` | Paste a fresh refund address → save the ticket → pay via ZIP 321 QR → hold a ticket QR → see the ticket listed (in batches, within ~2 h) and the refund outcome once the event settles |
+| Attendee | `/e/[id]` | Paste a fresh refund address → save the ticket → pay via ZIP 321 QR → hold a ticket QR → see the ticket listed (at random moments, within ~3 h) and the refund outcome once the event settles |
 | Door volunteer | `/door/[id]#k=` | Scan tickets (camera or paste), works offline with a cached hash list and sync queue |
 | Organiser | `/manage/[id]#k=` | Live counts, tickets, money, payouts; close/reopen, end & refund, retry, purge; "What a seizure reveals" |
 

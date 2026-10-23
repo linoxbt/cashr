@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { CopyField, Notice, Spinner, useMeta } from "@/components/ui";
 import { api, ApiError, type PublicEvent } from "@/lib/api";
@@ -66,7 +66,6 @@ export default function NewEvent() {
         forfeit_address: form.forfeit_address.trim(),
       });
       setCreated(res);
-      window.scrollTo({ top: 0 });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong.");
     } finally {
@@ -146,6 +145,9 @@ export default function NewEvent() {
 }
 
 function CreatedPanel({ created }: { created: Created }) {
+  // The links are shown once: start at the top so "Save these links now" is seen.
+  // The page scrolls inside the screen frame (components/Crt.tsx), not the window.
+  useEffect(() => document.querySelector(".crt-scroll")?.scrollTo({ top: 0 }), []);
   const origin = typeof window === "undefined" ? "" : window.location.origin;
   const { event } = created;
   const publicLink = `${origin}/e/${event.id}`;

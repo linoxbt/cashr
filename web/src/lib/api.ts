@@ -37,6 +37,8 @@ export interface AdminEvent extends Omit<PublicEvent, "checked_in_count"> {
   forfeited_zat: number;
   float_zat: number;
   swept_zat: number;
+  /** While settling: leftover deposits wait until then for offline door phones' check-ins. */
+  sweep_after: string | null;
 }
 
 export type RsvpStatus = "confirmed" | "refunding" | "refunded" | "forfeited";
@@ -65,6 +67,8 @@ export interface Meta {
   network: "main" | "test";
   min_conf: number;
   reject_fee_zat: number;
+  /** Minutes a settling event waits for offline door phones before sweeping (absent on older servers). */
+  door_sync_grace_min?: number;
   tip: number | null;
 }
 

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-import { useMeta } from "@/components/ui";
+import { useIsDemo, useMeta } from "@/components/ui";
 import { API_CONFIGURED } from "@/lib/api";
 import { Wordmark } from "@/components/Logo";
 import { DEMO_URL, SITE_URL } from "@/lib/site";
@@ -50,8 +50,16 @@ function writeTrail(trail: string[]) {
     /* storage blocked: Back falls back to the home page */
   }
 }
+let trailChecked = false;
 /** Record a page: returning to the previous one shortens the trail, anything else extends it. */
 function stepTrail(path: string): string[] {
+  if (!trailChecked) {
+    trailChecked = true;
+    // Arriving fresh (a link or typed address, not Back/Forward or a reload): the
+    // page before this one in the tab's history isn't ours, whatever the trail says.
+    const nav = performance.getEntriesByType?.("navigation")[0] as PerformanceNavigationTiming | undefined;
+    if (nav?.type === "navigate") writeTrail([]);
+  }
   const trail = readTrail();
   if (trail[trail.length - 1] === path) return trail;
   const next = trail[trail.length - 2] === path ? trail.slice(0, -1) : [...trail, path];
@@ -151,8 +159,7 @@ function ChainStatus() {
 
 /** Main site: a link to the demo. Demo site: a banner back to the real app. */
 function DemoLink({ className = "" }: { className?: string }) {
-  const meta = useMeta();
-  if (meta?.chain === "sim") return null;
+  if (useIsDemo()) return null;
   return (
     <a href={DEMO_URL} className={`glitch inline-block text-gold-ink hover:text-ink ${className}`}>
       Demo
@@ -161,8 +168,7 @@ function DemoLink({ className = "" }: { className?: string }) {
 }
 
 function DemoBanner({ className = "" }: { className?: string }) {
-  const meta = useMeta();
-  if (meta?.chain !== "sim") return null;
+  if (!useIsDemo()) return null;
   return (
     <div className={`bg-gold px-4 py-1.5 text-center font-mono text-[12px] font-medium uppercase tracking-[-0.02em] text-gold-on ${className}`}>
       Demo · simulated chain, no real ZEC ·{" "}
@@ -188,8 +194,7 @@ export function Crt({ children }: { children: ReactNode }) {
   const [theme, toggleTheme] = useTheme();
   const [canGoBack, setCanGoBack] = useState(false);
   useEffect(() => setCanGoBack(stepTrail(pathname ?? "/").length > 1), [pathname]);
-  const meta = useMeta();
-  const demo = meta?.chain === "sim";
+  const demo = useIsDemo();
   const firstMenuLink = useRef<HTMLAnchorElement>(null);
   useEffect(() => {
     if (!menu) return;
@@ -201,8 +206,11 @@ export function Crt({ children }: { children: ReactNode }) {
 
   useEffect(() => setBw(readJson<boolean>("cashr.bw", false)), []);
   useEffect(() => {
-    scroller.current?.scrollTo({ top: 0 });
     setMenu(false);
+    // A link to a section (/docs#faq) lands on it; any other new page starts at the top.
+    const target = window.location.hash && document.getElementById(decodeURIComponent(window.location.hash.slice(1)));
+    if (target) target.scrollIntoView();
+    else scroller.current?.scrollTo({ top: 0 });
   }, [pathname]);
 
   const toggleBw = () => {
@@ -216,7 +224,7 @@ export function Crt({ children }: { children: ReactNode }) {
     <div className="crt">
       <div className={`crt-screen crt-boot ${bw ? "bw" : ""}`}>
         <div ref={scroller} className="crt-scroll">
-          <div className={`min-h-full px-1 pb-24 ${demo ? "pt-32 sm:pt-44" : "pt-24 sm:pt-36"}`}>{children}</div>
+          <main className={`min-h-full px-1 pb-24 ${demo ? "pt-32 sm:pt-44" : "pt-24 sm:pt-36"}`}>{children}</main>
         </div>
 
         {/* On-screen display: top */}

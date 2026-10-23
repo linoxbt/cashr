@@ -19,8 +19,7 @@ cashr replaces the list with:
 3. **A QR check-in at the door.** The door hashes the secret and looks it up. It records yes/no, not a time.
 4. **An automatic refund** to everyone who came, at an address only they know. No-show deposits go to the group's fund.
 5. **A purge.** After settling, one click deletes the event's ticket hashes and refund addresses, and destroys its
-   wallet keys so its memos can never be decrypted again. The title, date and place go too. Only totals remain, plus
-   a keyed hash of each refund address used, kept for a year or two so no address can be reused for another RSVP.
+   wallet keys so its memos can never be decrypted again. The title, date and place go too. Only totals remain.
 
 The organiser's dashboard has a **"What a seizure reveals"** tab showing every record held for the event. There is
 nothing in it that names anyone.
@@ -32,8 +31,8 @@ nothing in it that names anyone.
 | **Live app** | https://cashr.site | Zcash **mainnet**. Pay real shielded ZEC from ZODL (or any wallet that pays ZIP 321 links with memos). |
 | **Demo without ZEC** | https://demo.cashr.site | A **simulated** chain. The RSVP page shows *Simulate this payment*, so the whole flow works without a wallet. |
 
-Both run the same code. The only thing mocked anywhere is the simulated chain behind the demo site: an in-memory
-Zcash stand-in that mines a block every few seconds and resets when its server restarts. The live app's wallet is
+Both run the same code. The only thing mocked anywhere is the simulated chain behind the demo site: a Zcash
+stand-in that mines a block every few seconds and keeps its state on disk across restarts. The live app's wallet is
 a real librustzcash light client that reaches lightwalletd through Tor.
 
 A two-minute tour: create an event (keep the two private links), open the invite link in another browser, RSVP
@@ -67,7 +66,8 @@ curl -fsSL https://raw.githubusercontent.com/linoxbt/cashr/main/deploy/install.s
 Details and other options in [docs/DEPLOY.md](docs/DEPLOY.md). By hand:
 
 ```bash
-cp .env.example .env && docker compose up -d --build     # wallet + API
+cp .env.example .env     # then fill in its secrets (openssl rand -hex 32), see docs/DEPLOY.md
+docker compose up -d --build     # wallet + API
 cd web && npm install && NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 ```
 
@@ -76,7 +76,7 @@ payment"):
 
 ```bash
 cd api && uv venv && uv pip install -e '.[dev]'
-CASHR_CHAIN=sim CASHR_SECRET=dev .venv/bin/uvicorn cashr.main:app --port 8000 --no-access-log
+CASHR_CHAIN=sim .venv/bin/uvicorn cashr.main:app --port 8000 --no-access-log
 cd web && npm install && NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 ```
 
@@ -92,8 +92,9 @@ cd web && npm run build && npm run e2e   # browser journey against a running sim
 ## Privacy model
 
 Read [the threat model](web/src/app/privacy/page.tsx) (also served at `/privacy`) and
-[docs/PROTOCOL.md](docs/PROTOCOL.md). In short: no access logs, no IPs stored by the API, no accounts, tokens only in URL
-fragments, Orchard-only event addresses, refunds sent with `FullPrivacy`, uniform deposit amounts, refund-address reuse
-refused, and the attendee's confirmation check downloads the whole hash list rather than asking about one ticket.
+[docs/PROTOCOL.md](docs/PROTOCOL.md). In short: no access or proxy logs of visitors, no IPs stored, no accounts, tokens
+only in URL fragments, Orchard-only event addresses, refunds sent with `FullPrivacy` one per transaction at random
+times, uniform deposit amounts, a public list that changes only on its own random schedule, and the attendee's
+confirmation check downloads the whole hash list rather than asking about one ticket.
 
 What you trust: the server's wallet holds deposits until settlement, so keep deposits small.

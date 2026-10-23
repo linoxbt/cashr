@@ -1,4 +1,4 @@
-// The six VHS sleeves: one per idea in cashr. Shown on the docs page.
+// The six VHS sleeves: one per idea in cashr. Shown on the home page.
 import type { Tape } from "@/components/TapeDeck";
 
 // ---- cover art (SVG, inherits the tape colour) --------------------------------
@@ -104,7 +104,7 @@ export const TAPES: Tape[] = [
     id: "refund",
     title: ["The", "Refund"],
     color: "#3DD68C",
-    caption: "Your tickets, live: going, checked in, refunded to an address only you know.",
+    caption: "Your tickets, on this device only: going, then refunded to an address only you know.",
     tags: ["▶ Play: your tickets"],
     href: "/tickets",
     art: <RefundLoop />,
