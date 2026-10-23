@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from test_lifecycle import admin_view, checkin, refunds_to, status, tickets
 
 from cashr.app import create_app
+from cashr.chain.base import Recipient
 from cashr.chain.sim import EXPIRY_DELTA, SimChain, random_unified_address
 from cashr.config import Settings
 
@@ -96,3 +97,21 @@ def test_expired_refund_is_rebuilt_once(client, make_event, attendee):
     assert len(client.chain.sent) == 2
     assert refunds_to(client, a.refund_address) == [ev["deposit_zat"]] * 2  # built twice, paid once
     assert sum(tx.height > 0 for tx in client.chain._txs.values() if tx.recipients[0].address == a.refund_address) == 1
+
+
+def test_sim_wallets_survive_a_restart(tmp_path):
+    # The demo restarts on every deploy; an in-memory sim stranded every event's
+    # money ("no account acct-3") and reused account names across events.
+    path = str(tmp_path / "sim.pickle")
+    chain = SimChain("test", state_path=path)
+    ref, addr = chain.new_event_account()
+    chain.pay(addr, 100_000, b"")
+    chain.mine(10)
+    chain.send(ref, addr, [Recipient(random_unified_address("test"), 50_000, b"")], "k1")
+
+    again = SimChain("test", state_path=path)
+    assert again.height == chain.height
+    assert again.balance(ref) == chain.balance(ref)
+    assert again.send(ref, addr, [Recipient(random_unified_address("test"), 50_000, b"")], "k1") \
+        == chain._by_key["k1"]  # same key, same operation: never a second transaction
+    assert again.new_event_account()[0] != ref

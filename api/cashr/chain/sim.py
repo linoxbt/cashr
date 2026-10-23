@@ -10,7 +10,8 @@ explicitly, and the web app shows a banner whenever it is active.
 
 from __future__ import annotations
 
-import itertools
+import os
+import pickle
 import secrets
 import threading
 import time
@@ -82,7 +83,8 @@ class SimChain:
     # policy: 10 for received notes, 3 for its own change), so tests can't pass
     # on timing the real wallet would never allow.
     def __init__(self, network: str = "main", auto_mine: bool = True,
-                 received_conf: int = 10, change_conf: int = 3, async_ops: bool = False):
+                 received_conf: int = 10, change_conf: int = 3, async_ops: bool = False,
+                 state_path: str = ""):
         self.network = network
         self.auto_mine = auto_mine
         self.received_conf = received_conf
@@ -100,11 +102,28 @@ class SimChain:
         self._txs: dict[str, _Tx] = {}
         self._ops: dict[str, _Op] = {}
         self._by_key: dict[str, str] = {}
-        self._ids = itertools.count(1)
+        self._next_id = 1
         self.sent: list[tuple[str, list[Recipient], str]] = []  # every transaction built
         self.fail_sends = False
         # Simulate a lost response: the wallet acts, the caller sees an error.
         self.lose_responses = 0
+        # Like the real wallet, accounts outlive a restart when a path is given.
+        self._state_path = state_path
+        if state_path and os.path.exists(state_path):
+            with open(state_path, "rb") as f:
+                self.__dict__.update(pickle.load(f))
+
+    _STATE = ("height", "_block_times", "_deleted", "_accounts", "_txs", "_ops", "_by_key", "_unpolled", "_next_id")
+
+    def _save(self) -> None:
+        # Called with the lock held, after every change. The file is our own
+        # simulated state on the demo's private volume, so pickle is fine.
+        if not self._state_path:
+            return
+        tmp = self._state_path + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump({k: getattr(self, k) for k in self._STATE}, f)
+        os.replace(tmp, self._state_path)
 
     # ---- test / dev controls ------------------------------------------
     def pay(self, address: str, amount_zat: int, memo: bytes) -> str:
@@ -115,6 +134,7 @@ class SimChain:
             acct.notes.append(_Note(address, txid, 0, amount_zat, memo.ljust(512, b"\x00")))
             if self.auto_mine:
                 self.mine()
+            self._save()
             return txid
 
     def mine(self, blocks: int = 1) -> None:
@@ -123,6 +143,8 @@ class SimChain:
             for _ in range(blocks):
                 self.height += 1
                 self._block_times[self.height] = time.time()
+                # Keep about a day of block times at the demo's pace, so the saved state stays small.
+                self._block_times.pop(self.height - 20_000, None)
                 for acct in self._accounts.values():
                     for n in acct.notes:
                         if n.height == 0 and not n.change:
@@ -132,11 +154,13 @@ class SimChain:
                         tx.height = self.height
                         if tx.change:
                             tx.change.height = self.height
+            self._save()
 
     def drop_from_mempool(self, txid: str) -> None:
         """Simulate a transaction that fell out of the mempool unmined."""
         with self._lock:
             self._txs[txid].in_mempool = False
+            self._save()
 
     def _by_address(self, address: str) -> _Account:
         for acct in self._accounts.values():
@@ -184,9 +208,11 @@ class SimChain:
 
     def new_event_account(self) -> tuple[str, str]:
         with self._lock:
-            ref = f"acct-{next(self._ids)}"
+            ref = f"acct-{self._next_id}"
+            self._next_id += 1
             addr = random_unified_address(self.network)
             self._accounts[ref] = _Account(addr)
+            self._save()
             return ref, addr
 
     def received(self, account_ref: str, address: str, since_height: int = 0) -> list[ReceivedNote]:
@@ -215,31 +241,37 @@ class SimChain:
 
     def _submit(self, account_ref: str, key: str, build) -> str:
         with self._lock:
-            if self.fail_sends:
-                raise ChainError("simulated wallet failure")
-            self._account(account_ref)
-            opid = self._by_key.get(key)
-            if opid is None:
-                opid = f"opid-sim-{secrets.token_hex(8)}"
-                self._by_key[key] = opid
-                self._ops[opid] = _Op(key, account_ref)
-            op = self._ops[opid]
-            tx = self._txs.get(op.txid)
-            if op.txid and tx is None:
-                # Like the real wallet: never build again for a txid it can't account for.
-                raise ChainError("the transaction for this key is unknown to the wallet; refusing to send again")
-            if tx is not None and not self._expired(tx):
-                tx.in_mempool = True  # rebroadcast; never a second transaction
-                return self._respond(opid)
-            op.state, op.error, op.txid = "pending", "", ""
             try:
-                op.txid, op.amount_zat = build(self._account(account_ref))
-                op.state = "success"
-            except ChainError as e:
-                op.state, op.error = "failed", str(e)
-            if self.async_ops:
-                self._unpolled.add(opid)
+                return self._submit_locked(account_ref, key, build)
+            finally:
+                self._save()
+
+    def _submit_locked(self, account_ref: str, key: str, build) -> str:
+        if self.fail_sends:
+            raise ChainError("simulated wallet failure")
+        self._account(account_ref)
+        opid = self._by_key.get(key)
+        if opid is None:
+            opid = f"opid-sim-{secrets.token_hex(8)}"
+            self._by_key[key] = opid
+            self._ops[opid] = _Op(key, account_ref)
+        op = self._ops[opid]
+        tx = self._txs.get(op.txid)
+        if op.txid and tx is None:
+            # Like the real wallet: never build again for a txid it can't account for.
+            raise ChainError("the transaction for this key is unknown to the wallet; refusing to send again")
+        if tx is not None and not self._expired(tx):
+            tx.in_mempool = True  # rebroadcast; never a second transaction
             return self._respond(opid)
+        op.state, op.error, op.txid = "pending", "", ""
+        try:
+            op.txid, op.amount_zat = build(self._account(account_ref))
+            op.state = "success"
+        except ChainError as e:
+            op.state, op.error = "failed", str(e)
+        if self.async_ops:
+            self._unpolled.add(opid)
+        return self._respond(opid)
 
     def _build(self, account_ref: str, acct: _Account, recipients: list[Recipient], everything: bool):
         spendable, pending = self._split(acct)
@@ -289,6 +321,7 @@ class SimChain:
                 return OpStatus("failed", error="operation unknown to wallet")
             if opid in self._unpolled:
                 self._unpolled.discard(opid)
+                self._save()
                 return OpStatus("pending")
             return OpStatus(op.state, txid=op.txid, error=op.error, amount_zat=op.amount_zat)
 
@@ -314,3 +347,4 @@ class SimChain:
             self._deleted.add(account_ref)
             for txid in [t for t, tx in self._txs.items() if tx.account == account_ref]:
                 del self._txs[txid]
+            self._save()

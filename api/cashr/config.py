@@ -18,6 +18,9 @@ class Settings:
     # that forgot to set it must not quietly accept simulated payments.
     chain_mode: str = field(default_factory=lambda: os.environ.get("CASHR_CHAIN", ""))
     network: str = field(default_factory=lambda: os.environ.get("CASHR_NETWORK", "main"))
+    # Where the sim chain keeps its wallets between restarts. Empty keeps them in
+    # memory only, which strands every event's money when the process restarts.
+    sim_state_path: str = field(default_factory=lambda: os.environ.get("CASHR_SIM_STATE", ""))
     database_url: str = field(
         default_factory=lambda: os.environ.get("CASHR_DATABASE_URL", "sqlite:///./cashr.db")
     )

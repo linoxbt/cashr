@@ -13,7 +13,7 @@ def make_chain(settings: Settings) -> Chain:
     if settings.chain_mode == "sim":
         from .sim import SimChain
 
-        return SimChain(settings.network)
+        return SimChain(settings.network, state_path=settings.sim_state_path)
     raise ValueError(f"Set CASHR_CHAIN to 'rpc' or 'sim' (got {settings.chain_mode!r}).")
 
 
