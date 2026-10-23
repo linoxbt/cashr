@@ -194,7 +194,7 @@ export default function Docs() {
                 ["Network fees for refunds", "Paid from forfeited deposits and organiser top-ups, never from refunds."],
                 ["When a refund counts as paid", "Once its transaction is mined with 3 confirmations. One that expires unmined is sent again automatically; it is never paid twice."],
                 ["No-show money", "Swept, minus the network fee, to the organiser's no-show fund address once refunds have confirmed. Without an address it waits in the event wallet, and the event can't be purged until it is swept."],
-                ["When refunds can go out", "A deposit becomes spendable after 10 confirmations (about 12 minutes). Refunds queued earlier simply wait."],
+                ["When refunds can go out", "A deposit becomes spendable after 10 confirmations (about 12 minutes; about 4 once the NU7 upgrade makes blocks three times as frequent). Refunds queued earlier simply wait."],
                 ["Who holds the money", "cashr's wallet holds deposits until the event is settled. Keep deposits small: the price of a coffee."],
               ]}
             />

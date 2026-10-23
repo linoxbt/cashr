@@ -52,8 +52,21 @@ PURGED_TITLE = "Purged event"
 PURGED_AT = datetime(1970, 1, 1, tzinfo=timezone.utc)
 # A payment sent just before RSVPs closed can be mined a block or two later;
 # it still counts. Measured from the chain height when RSVPs closed.
+RSVP_GRACE_SECONDS = 150
+# NU7 makes blocks three times as frequent (75 s to 25 s), from these heights.
+NU7_HEIGHT = {"main": 3_543_405, "test": 4_465_026}
+# The grace in blocks before NU7 (tests use it).
 RSVP_GRACE_BLOCKS = 2
-BLOCK_SECONDS = 75
+
+
+def block_seconds(network: str, height: int) -> int:
+    """Target time between blocks around `height`."""
+    return 25 if height >= NU7_HEIGHT.get(network, 1 << 62) else 75
+
+
+def grace_blocks(network: str, close_height: int) -> int:
+    """How many blocks after the close still count: about RSVP_GRACE_SECONDS."""
+    return -(-RSVP_GRACE_SECONDS // block_seconds(network, close_height))
 # An event that never received anything is retired this long after it started,
 # so abandoned events don't keep wallet accounts (and capacity) forever.
 IDLE_RETIRE_AFTER = timedelta(days=1)
@@ -276,7 +289,7 @@ class Engine:
                 # that was down doesn't stretch the grace.
                 if close_height is None:
                     late_s = max(0.0, (datetime.now(timezone.utc) - deadline).total_seconds())
-                    close_height = max(0, tip - int(late_s // BLOCK_SECONDS))
+                    close_height = max(0, tip - int(late_s // block_seconds(self.settings.network, tip)))
                 ev.close_height = close_height
             known = {
                 (d.txid, d.pool, d.out_index)
@@ -347,11 +360,10 @@ class Engine:
                     refund_address=memo.refund_address, seat=self._free_seat(db, ev)))
         db.flush()
 
-    @staticmethod
-    def _within_grace(ev: Event, height: int) -> bool:
+    def _within_grace(self, ev: Event, height: int) -> bool:
         """Mined so soon after RSVPs closed that it was sent while they were open."""
         return (ev.status in DOOR_OPEN and ev.close_height is not None and height > 0
-                and height <= ev.close_height + RSVP_GRACE_BLOCKS)
+                and height <= ev.close_height + grace_blocks(self.settings.network, ev.close_height))
 
     @staticmethod
     def _free_seat(db: Session, ev: Event) -> int:

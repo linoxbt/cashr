@@ -19,7 +19,14 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Key, Nonce,
 };
-use rand::{rngs::OsRng, RngCore};
+use rand::Rng;
+
+/// The operating system's random generator. (rand 0.10 calls it `SysRng`, which
+/// reports errors; wrapped, it panics on the OS failure it can't recover from anyway.)
+pub type OsRng = rand::rand_core::UnwrapErr<rand::rngs::SysRng>;
+pub fn os_rng() -> OsRng {
+    rand::rand_core::UnwrapErr(rand::rngs::SysRng)
+}
 use secrecy::{ExposeSecret, SecretVec};
 
 const AAD: &[u8] = b"cashr-wallet seed v1";
@@ -81,7 +88,7 @@ impl SeedStore {
             return Err(wrong());
         }
         let mut nonce = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce);
+        os_rng().fill_bytes(&mut nonce);
         let ct = self
             .cipher
             .encrypt(Nonce::from_slice(&nonce), Payload { msg: CHECK_PLAINTEXT, aad: CHECK_AAD })
@@ -113,14 +120,14 @@ impl SeedStore {
 
     pub fn generate() -> SecretVec<u8> {
         let mut seed = vec![0u8; 32];
-        OsRng.fill_bytes(&mut seed);
+        os_rng().fill_bytes(&mut seed);
         SecretVec::new(seed)
     }
 
     /// Write a seed under a temporary name; `commit` renames it once the account exists.
     pub fn stage(&self, seed: &SecretVec<u8>) -> anyhow::Result<String> {
         let mut nonce = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce);
+        os_rng().fill_bytes(&mut nonce);
         let ct = self
             .cipher
             .encrypt(Nonce::from_slice(&nonce), Payload { msg: seed.expose_secret(), aad: AAD })
@@ -219,7 +226,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("uw-seeds-{}", uuid::Uuid::new_v4()));
         let store = SeedStore::open(&dir, &"11".repeat(32)).unwrap();
         let mut nonce = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce);
+        os_rng().fill_bytes(&mut nonce);
         let ct = store.cipher.encrypt(Nonce::from_slice(&nonce), Payload { msg: &[9u8; 32], aad: OLD_AAD }).unwrap();
         let mut data = nonce.to_vec();
         data.extend_from_slice(&ct);

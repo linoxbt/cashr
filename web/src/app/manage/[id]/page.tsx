@@ -145,7 +145,7 @@ function ManageFor({ id }: { id: string }) {
         {view.wallet_error && <Notice tone="bad" title="Wallet unreachable">{view.wallet_error}</Notice>}
         {shortfall && confirming && (
           <Notice title="Waiting for deposits to confirm">
-            Refunds can only spend deposits once they have enough confirmations (about 12 minutes for the newest one).
+            Refunds can only spend deposits once they have enough confirmations (about 12 minutes, or 4 after the NU7 upgrade, for the newest one).
             They go out automatically.
           </Notice>
         )}

@@ -775,3 +775,12 @@ def test_health_fails_when_the_wallet_stops_keeping_up(client, monkeypatch):
     monkeypatch.setattr(client.chain, "sync_age", lambda: 3600)
     r = client.get("/health")
     assert r.status_code == 503 and r.json()["ok"] is False
+
+
+def test_the_deadline_grace_keeps_its_length_in_time_after_nu7():
+    # NU7 makes blocks three times as frequent: the same ~150 s grace is 6 blocks.
+    from cashr.engine import NU7_HEIGHT, block_seconds, grace_blocks
+
+    assert block_seconds("main", NU7_HEIGHT["main"] - 1) == 75 and grace_blocks("main", NU7_HEIGHT["main"] - 1) == 2
+    assert block_seconds("main", NU7_HEIGHT["main"]) == 25 and grace_blocks("main", NU7_HEIGHT["main"]) == 6
+    assert grace_blocks("test", NU7_HEIGHT["test"] + 10) == 6

@@ -2,7 +2,9 @@
 
 use anyhow::{anyhow, Context};
 use hyper_util::rt::TokioIo;
-use rand::{rngs::OsRng, RngCore};
+use rand::Rng;
+
+use crate::keys::os_rng;
 use tokio_socks::tcp::Socks5Stream;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Uri};
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
@@ -66,7 +68,7 @@ async fn socks_connect(proxy: &str, uri: &Uri) -> anyhow::Result<TokioIo<tokio::
     let host = uri.host().ok_or_else(|| anyhow!("lightwalletd URL has no host"))?;
     let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
     let mut login = [0u8; 16];
-    OsRng.fill_bytes(&mut login);
+    os_rng().fill_bytes(&mut login);
     let stream = Socks5Stream::connect_with_password(proxy, (host, port), &hex::encode(login), "cashr")
         .await
         .with_context(|| format!("connecting through the SOCKS proxy at {proxy}"))?;

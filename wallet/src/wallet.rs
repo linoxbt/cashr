@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail};
-use rand::{rngs::OsRng, RngCore};
+use rand::Rng;
 use secrecy::ExposeSecret;
 use tokio::sync::Mutex;
 use tonic::Code;
@@ -48,7 +48,7 @@ use zip321::{Payment, TransactionRequest};
 
 use crate::{
     cache::MemBlockCache,
-    keys::SeedStore,
+    keys::{os_rng, OsRng, SeedStore},
     lightwalletd::{Client, Endpoint},
     ops::{Op, OpStore},
 };
@@ -172,7 +172,7 @@ impl Wallet {
         // deleted account's keys and memos, and is unlinked without being overwritten.
         // (The mode is stored in the file; SQLite is built with secure delete on.)
         rusqlite::Connection::open(&db_path)?.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
-        let mut db = WalletDb::for_path(&db_path, params, SystemClock, OsRng)?;
+        let mut db = WalletDb::for_path(&db_path, params, SystemClock, os_rng())?;
         zcash_client_sqlite::wallet::init::init_wallet_db(&mut db, None)
             .map_err(|e| anyhow!("wallet database migration failed: {e:?}"))?;
         let tip = db.chain_height()?.map(u32::from).unwrap_or(0);
@@ -210,7 +210,7 @@ impl Wallet {
     /// A separate connection for reads, so RPC calls never wait for a sync
     /// (which holds the writer for whole batches) to finish.
     fn reader(&self) -> anyhow::Result<Db> {
-        Ok(WalletDb::for_path(&self.db_path, self.params, SystemClock, OsRng)?)
+        Ok(WalletDb::for_path(&self.db_path, self.params, SystemClock, os_rng())?)
     }
 
     /// Rewrites the database so deleted rows leave no trace in free pages or the WAL.
@@ -349,14 +349,14 @@ impl Wallet {
             if next.get(txid).is_some_and(|at| now < *at) {
                 return false;
             }
-            let jitter = (OsRng.next_u32() % 121) as u64;
+            let jitter = (os_rng().next_u32() % 121) as u64;
             next.insert(*txid, now + std::time::Duration::from_secs(60 + jitter));
             return true;
         }
         let TransactionDataRequest::Enhancement(txid) = request else { return true };
         let mut deferred = self.deferred.lock().await;
         let at = *deferred.entry(*txid).or_insert_with(|| {
-            let jitter = (OsRng.next_u32() % (ENHANCE_DELAY_MAX_S - ENHANCE_DELAY_MIN_S + 1)) as u64;
+            let jitter = (os_rng().next_u32() % (ENHANCE_DELAY_MAX_S - ENHANCE_DELAY_MIN_S + 1)) as u64;
             std::time::Instant::now() + std::time::Duration::from_secs(ENHANCE_DELAY_MIN_S as u64 + jitter)
         });
         if std::time::Instant::now() < at {
@@ -915,19 +915,19 @@ impl Wallet {
     }
 
     /// Resolve a recipient to the receiver we will actually pay. Under
-    /// FullPrivacy only an Orchard receiver is acceptable, so funds never
-    /// leave the Orchard pool and no amount is revealed.
+    /// FullPrivacy only an Orchard receiver is acceptable, so the payment stays
+    /// shielded (since NU6.3 it travels in the Ironwood pool) and no amount is revealed.
     fn shielded_target(&self, address: &str, policy: PrivacyPolicy) -> anyhow::Result<ZcashAddress> {
         let decoded = Address::decode(&self.params, address).ok_or_else(|| anyhow!("invalid recipient address"))?;
         match decoded {
             Address::Unified(ua) => {
                 if let Some(o) = ua.orchard() {
-                    let orchard_only = UnifiedAddress::from_receivers(Some(*o), None, None)
+                    let orchard_only = UnifiedAddress::from_receivers(Some(*o), None, None, None, None)
                         .ok_or_else(|| anyhow!("could not build Orchard-only address"))?;
                     return Ok(Address::from(orchard_only).to_zcash_address(&self.params));
                 }
                 if policy == PrivacyPolicy::AllowRevealedAmounts && ua.sapling().is_some() {
-                    return Ok(Address::from(ua).to_zcash_address(&self.params));
+                    return Ok(Address::from(*ua).to_zcash_address(&self.params));
                 }
                 bail!("Recipient has no Orchard receiver; refusing under {policy:?}")
             }
@@ -1006,6 +1006,8 @@ impl Wallet {
                 create_proposed_transactions::<_, _, std::convert::Infallible, _, std::convert::Infallible, _>(
                     &mut *db,
                     &self.params,
+                    &SystemClock,
+                    &mut os_rng(),
                     &self.prover,
                     &self.prover,
                     &SpendingKeys::from_unified_spending_key(usk),

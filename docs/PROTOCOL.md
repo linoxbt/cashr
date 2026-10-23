@@ -53,7 +53,7 @@ A note is processed once it has `CASHR_MIN_CONF` confirmations, in `(height, txi
    nowhere private to return it. It is listed with the returned payments so the attendee and organiser can see it.
    The RSVP page prevents this before payment.
 3. **Otherwise rejected, and returned minus `CASHR_REJECT_FEE_ZAT`, if any of:** wrong event id, RSVPs closed
-   (status not `open`, or past `rsvp_closes_at`; a payment mined within 2 blocks of the close height, recorded when
+   (status not `open`, or past `rsvp_closes_at`; a payment mined within about 150 seconds (2 blocks; 6 after NU7) of the close height, recorded when
    the organiser closed or estimated back from the deadline, still counts), amount ≠ deposit, duplicate ticket hash, refund address
    already used by another RSVP to this event, or event full. A return smaller than the fee itself is kept as float.
    Reuse is checked within the event only: checking other events would tell anyone who pays into their own event
@@ -84,7 +84,8 @@ Refunds, returns and sweeps are payouts: `queued → submitted → broadcast →
   account the wallet never deleted (a reset or restored database) is refused and its seed kept. The file rewrite
   that clears deleted pages is recorded as owed and finished at the next start if interrupted.
 * The close height for a deadline comes from the wallet's scanned block times (`z_heightattime`), falling back to
-  an estimate (75 s per block) only when the wallet has no block that old.
+  an estimate (75 s per block, 25 s from NU7) only when the wallet has no block that old. The grace after the close is
+  about 150 seconds: 2 blocks before NU7, 6 after.
   A pending transaction is rebroadcast periodically; one that expires unmined is rebuilt under the same key.
 * An insufficient-funds failure keeps the payout queued (deposits still confirming, or a fee top-up is needed).
   If the wallet has no record of an operation, the payout stops as `failed` rather than risk paying twice.

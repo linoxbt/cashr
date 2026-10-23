@@ -162,7 +162,8 @@ key it never builds a second transaction while the first could still be mined: a
 pending transaction, leaves a mined one alone, and rebuilds only one that failed before broadcast or expired unmined.
 
 Spending uses librustzcash's default confirmation policy (3 confirmations for the wallet's own change, 10 for
-received notes). Deposits therefore become refundable about 12 minutes after they arrive; queued refunds wait.
+received notes). Deposits therefore become refundable about 12 minutes after they arrive (about 4 after NU7, which makes blocks
+three times as frequent); queued refunds wait.
 
 Build without Docker: `cd wallet && cargo build --release`. The Sapling parameters are bundled into the binary,
 and Orchard needs none.
