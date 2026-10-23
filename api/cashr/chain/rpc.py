@@ -101,7 +101,7 @@ class RpcChain:
 
     def balance(self, account_ref: str) -> Balance:
         b = self._call("z_getbalanceforaccount", account_ref)
-        return Balance(int(b["spendableZat"]), int(b["pendingZat"]))
+        return Balance(int(b["spendableZat"]), int(b["pendingZat"]), int(b.get("awaitingMemoZat", 0)))
 
     def send(self, account_ref: str, from_address: str, recipients: list[Recipient], key: str) -> str:
         amounts = [

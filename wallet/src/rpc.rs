@@ -169,8 +169,8 @@ async fn dispatch(state: &RpcState, method: &str, params: &[Value]) -> Result<Va
 
         "z_getbalanceforaccount" => {
             let account = str_param(params, 0, "account")?;
-            let (spendable, pending) = blocking(|| w.balance(account))?;
-            Ok(json!({"spendableZat": spendable, "pendingZat": pending}))
+            let ((spendable, pending), awaiting) = blocking(|| Ok::<_, anyhow::Error>((w.balance(account)?, w.awaiting_memo(account)?)))?;
+            Ok(json!({"spendableZat": spendable, "pendingZat": pending, "awaitingMemoZat": awaiting}))
         }
 
         "z_sendmany" => {

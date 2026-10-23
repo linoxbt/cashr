@@ -110,6 +110,36 @@ class SimPay(BaseModel):
 
 
 # ---- views ---------------------------------------------------------------
+class _BodyTooLarge(Exception):
+    pass
+
+
+class BodyLimit:
+    """Caps a body sent without Content-Length (chunked) as it streams in."""
+
+    def __init__(self, app, max_bytes: int):
+        self.app, self.max_bytes = app, max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        seen = 0
+
+        async def limited():
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > self.max_bytes:
+                    raise _BodyTooLarge
+            return message
+
+        try:
+            await self.app(scope, limited, send)
+        except _BodyTooLarge:
+            await JSONResponse({"error": "too_large", "message": "Request too large."}, status_code=413)(scope, receive, send)
+
+
 def public_event(ev: Event) -> dict:
     return {
         "id": ev.id,
@@ -232,6 +262,8 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
         if length is not None and (not length.isdigit() or int(length) > MAX_BODY_BYTES):
             return JSONResponse({"error": "too_large", "message": "Request too large."}, status_code=413)
         return await call_next(request)
+
+    app.add_middleware(BodyLimit, max_bytes=MAX_BODY_BYTES)
 
     def db_session():
         with sessions() as db:
@@ -417,7 +449,8 @@ def create_app(settings: Settings | None = None, chain=None) -> FastAPI:
             ev = engine.authorize(db, event_id, token, "door")
             if not is_ticket_hash(body.ticket_hash):
                 return {"result": "unknown", "seat": None, "checked_in_count": ev.checked_in_count}
-            result, seat = engine.check_in(db, ev, body.ticket_hash)
+            # Like an offline device's sync: an arrival still counts until the sweep.
+            result, seat = engine.late_check_in(db, ev, body.ticket_hash)
             db.commit()
             return {"result": result, "seat": seat, "checked_in_count": ev.checked_in_count}
 

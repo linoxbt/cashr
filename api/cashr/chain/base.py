@@ -46,6 +46,8 @@ class Balance:
     spendable_zat: int
     # Received or change value that is not spendable yet (waiting for confirmations).
     pending_zat: int
+    # Received value whose memo the wallet hasn't read yet (RSVP or payment to return?).
+    awaiting_memo_zat: int = 0
 
     @property
     def total_zat(self) -> int:

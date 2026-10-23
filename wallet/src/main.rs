@@ -102,8 +102,15 @@ async fn main() -> anyhow::Result<()> {
     let via = cfg.socks_proxy.as_deref().unwrap_or("direct");
     info!(listen = %cfg.listen, lightwalletd = %cfg.lightwalletd, %via, "cashr-wallet ready");
     axum::serve(listener, app)
+        // SIGTERM too: `docker stop` sends it, and dying on the SIGKILL that follows
+        // would leave WAL files that a restored backup must never meet.
         .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+            let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
         })
         .await?;
     Ok(())

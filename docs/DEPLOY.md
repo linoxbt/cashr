@@ -80,15 +80,22 @@ it reaches the disk. Set `CASHR_BACKUP_REMOTE` (an rsync target, `user@host:/pat
 a backup on the same disk doesn't survive it. Keep `CASHR_WALLET_SEED_KEY` and `CASHR_BACKUP_PASSPHRASE` offline,
 apart from the backups: restoring needs the passphrase, spending needs the seed key.
 
-A backup keeps events purged after it was taken until it rotates out (a week). Restore onto a stopped stack:
+A backup keeps events purged after it was taken until it rotates out (a week).
+
+Restore onto a stopped stack, into **emptied** volumes: a `-wal` file left from the old data would be replayed onto
+the restored database and corrupt it.
 
 ```bash
 docker compose down
 openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in cashr-<time>.tgz.enc -pass env:CASHR_BACKUP_PASSPHRASE \
   | docker run --rm -i -v cashr_wallet-data:/w -v cashr_api-data:/a alpine:3.20 sh -c \
-    'mkdir -p /r && tar xz -C /r && cp -a /r/wallet-data/. /w/ && cp -a /r/api-data/. /a/'
+    'find /w /a -mindepth 1 -delete && mkdir -p /r && tar xz -C /r && cp -a /r/wallet-data/. /w/ && cp -a /r/api-data/. /a/'
 docker compose up -d
 ```
+
+Restoring rolls payouts back too: a refund sent after the backup was taken shows as not sent yet, and would be sent
+again if the event wallet can still pay it. Before starting the API on a restored backup, check the event wallets'
+history for refunds sent after the backup time.
 
 ### Monitoring
 
@@ -141,9 +148,10 @@ RPC methods: `getblockcount`, `getwalletinfo`, `z_getnewaccount`, `z_getaddressf
 `z_getoperationstatus`, `gettransaction` (mined / pending / expired), `z_deleteaccount`, `z_heightattime`.
 `getwalletinfo` also reports `last_sync_age_s`, which the API's `/health` uses.
 
-**Deleting an account** is refused unless the wallet synced within the last 5 minutes with no block left unscanned,
-the account holds no more than 20,000 zatoshis (including unconfirmed and uneconomic notes), and no send from it is
-being built or could still be mined. A wrong `CASHR_WALLET_SEED_KEY` stops the wallet at startup (it checks the key
+**Deleting an account** is refused unless the wallet synced within the last minute with no block left unscanned,
+the account holds no more than 20,000 zatoshis (including unconfirmed value; notes too small to pay their own fee
+don't count, so dust can't block a purge), and no send from it is being built or could still be mined. Its database
+runs in WAL mode with SQLite built to overwrite deleted content, and is rewritten after each delete. A wrong `CASHR_WALLET_SEED_KEY` stops the wallet at startup (it checks the key
 against a `seeds/key-check` file written on first start).
 Names follow zcashd where one exists, but the API depends on the extensions, so it only supports this wallet.
 
