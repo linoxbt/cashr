@@ -38,8 +38,10 @@ def test_memos_never_name_the_event(client, make_event, attendee):
 
 
 def test_purge_leaves_nothing_that_names_the_event(client, make_event, attendee):
+    from datetime import datetime, timedelta, timezone
+    closes = (datetime.now(timezone.utc) + timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
     created = make_event(title="Tenants' union, flat 4B", forfeit_address=random_unified_address(),
-                         rsvp_closes_at="2026-10-26T18:00:00Z")
+                         rsvp_closes_at=closes)
     ev, admin = created["event"], created["admin_token"]
     pay(client, ev, attendee(ev["id"]).memo())
     settle(client, ev, admin)
@@ -193,11 +195,13 @@ def test_the_public_list_changes_only_on_its_own_schedule(tmp_path, attendee):
     from cashr.chain.sim import SimChain
     from cashr.config import Settings
 
+    from datetime import datetime, timezone
+    starts_at = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     chain = SimChain("main", received_conf=1, change_conf=1)
     settings = Settings(chain_mode="sim", database_url=f"sqlite:///{tmp_path}/b.db", run_scanner=False, list_delay_min=120, refund_spread_min=0)
     with TestClient(create_app(settings, chain)) as c:
         c.chain, c.engine = chain, c.app.state.engine
-        created = c.post("/events", json={"title": "x", "starts_at": "2026-12-01T18:00:00Z", "capacity": 2,
+        created = c.post("/events", json={"title": "x", "starts_at": starts_at, "capacity": 2,
                                           "deposit_zat": 500_000}).json()
         ev, admin, door = created["event"], created["admin_token"], created["door_token"]
         with c.engine.sessions() as db:

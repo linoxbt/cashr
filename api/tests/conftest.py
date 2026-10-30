@@ -1,5 +1,6 @@
 import os
 import secrets
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -33,7 +34,10 @@ def client(tmp_path, chain):
 @pytest.fixture
 def make_event(client):
     def _make(**overrides):
-        body = {"title": "Tuesday circle", "starts_at": "2026-10-27T19:00:00Z",
+        # Relative to now so the fixture never ages out: an event whose start is
+        # already past would auto-close its RSVPs before any test could pay in.
+        starts_at = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body = {"title": "Tuesday circle", "starts_at": starts_at,
                 "location": "Shared on the ticket", "capacity": 3, "deposit_zat": 500_000}
         body.update(overrides)
         r = client.post("/events", json=body)
