@@ -99,3 +99,7 @@ times, uniform deposit amounts, a public list that changes only on its own rando
 confirmation check downloads the whole hash list rather than asking about one ticket.
 
 What you trust: the server's wallet holds deposits until settlement, so keep deposits small.
+
+## License
+
+[MIT](LICENSE).

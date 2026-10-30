@@ -3,6 +3,7 @@ name = "cashr-api"
 version = "0.1.0"
 description = "cashr: RSVPs with refundable shielded-ZEC deposits and no attendee list."
 requires-python = ">=3.11"
+license = "MIT"
 dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
@@ -14,7 +15,7 @@ dependencies = [
 dev = ["pytest>=8"]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
